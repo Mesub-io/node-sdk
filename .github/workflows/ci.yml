@@ -26,6 +26,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          # It would look for pnpm to set up its cache before pnpm is installed.
+          package-manager-cache: false
       - uses: pnpm/action-setup@v6
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
@@ -38,6 +40,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
+          package-manager-cache: false
       - run: node --version
       - run: node node_modules/vitest/vitest.mjs run
       - run: node scripts/check-exports.mjs
