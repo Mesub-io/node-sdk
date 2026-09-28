@@ -1,0 +1,107 @@
+{
+  "name": "@mesub/node",
+  "version": "0.0.0",
+  "description": "Server-side SDK for Mesub: know whether a wallet has access to a plan, from Node.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mesub-io/node-sdk.git"
+  },
+  "homepage": "https://github.com/Mesub-io/node-sdk#readme",
+  "bugs": "https://github.com/Mesub-io/node-sdk/issues",
+  "keywords": [
+    "mesub",
+    "solana",
+    "subscriptions",
+    "billing",
+    "sdk"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./express": {
+      "import": {
+        "types": "./dist/express.d.ts",
+        "default": "./dist/express.js"
+      },
+      "require": {
+        "types": "./dist/express.d.cts",
+        "default": "./dist/express.cjs"
+      }
+    },
+    "./next": {
+      "import": {
+        "types": "./dist/next.d.ts",
+        "default": "./dist/next.js"
+      },
+      "require": {
+        "types": "./dist/next.d.cts",
+        "default": "./dist/next.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.27.0",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings src/ test/",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check:exports": "node scripts/check-exports.mjs",
+    "prepare": "husky",
+    "prepublishOnly": "pnpm build && pnpm check:exports"
+  },
+  "peerDependencies": {
+    "express": ">=4",
+    "next": ">=14"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    },
+    "next": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.0",
+    "oxlint": "^1.58.0",
+    "prettier": "^3.4.2",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  },
+  "lint-staged": {
+    "*.{ts,mjs}": [
+      "oxlint --deny-warnings",
+      "prettier --check"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --check"
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+name: CI
+
+# Push only: every branch a pull request is opened from is pushed first, so a
+# pull_request trigger ran the same commit a second time.
+on:
+  push:
+    branches: ['**']
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Every Node the package says it supports.
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v5
+
+      # pnpm 11 itself needs Node 22.13, so installing and building happen on
+      # 24 whatever the matrix says. No pnpm version here: the action reads
+      # packageManager in package.json, and refuses to run when both name one.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          # It would look for pnpm to set up its cache before pnpm is installed.
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm build
+
+      # Then the Node under test, with no pnpm in the way: the tests and the
+      # built package are what a merchant on that version runs.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - run: node --version
+      - run: node node_modules/vitest/vitest.mjs run
+      - run: node scripts/check-exports.mjs

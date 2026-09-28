@@ -1,0 +1,7 @@
+node_modules
+dist
+*.tgz
+coverage
+.DS_Store
+# iCloud's numbered copies of files in ~/Documents.
+* [0-9].*

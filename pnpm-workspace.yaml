@@ -1,0 +1,6 @@
+# pnpm skips install scripts by default since v10 and exits non zero until each
+# one is decided. esbuild downloads its binary on install, and tsup needs it.
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild

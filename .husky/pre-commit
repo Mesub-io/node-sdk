@@ -1,0 +1,2 @@
+# Staged files only, so a commit stays quick.
+pnpm exec lint-staged

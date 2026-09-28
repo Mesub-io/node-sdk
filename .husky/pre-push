@@ -1,0 +1,5 @@
+# What CI would refuse anyway, before the push leaves.
+pnpm run typecheck
+pnpm run test
+pnpm run build
+pnpm run check:exports
