@@ -14,22 +14,30 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     strategy:
-      # Every Node the package says it supports.
       matrix:
+        # Every Node the package says it supports.
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@v5
-      # No version here: the action reads packageManager in package.json, and
-      # refuses to run when both name one.
-      - uses: pnpm/action-setup@v6
+
+      # pnpm 11 itself needs Node 22.13, so installing and building happen on
+      # 24 whatever the matrix says. No pnpm version here: the action reads
+      # packageManager in package.json, and refuses to run when both name one.
       - uses: actions/setup-node@v5
         with:
-          node-version: ${{ matrix.node }}
-          cache: pnpm
+          node-version: 24
+      - uses: pnpm/action-setup@v6
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm typecheck
-      - run: pnpm test
       - run: pnpm build
-      - run: pnpm check:exports
+
+      # Then the Node under test, with no pnpm in the way: the tests and the
+      # built package are what a merchant on that version runs.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - run: node node_modules/vitest/vitest.mjs run
+      - run: node scripts/check-exports.mjs
