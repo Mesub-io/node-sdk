@@ -1,5 +1,5 @@
-/**
- * `@mesub/node`: the client, its types and errors, and the memory cache.
- * Filled in by #2 to #5.
- */
-export {};
+/** `@mesub/node`: the client, its types and errors. */
+export { Mesub } from './client.js';
+export type { MesubOptions } from './client.js';
+export { MesubError } from './errors.js';
+export type { MesubErrorCode, MesubErrorOptions } from './errors.js';
