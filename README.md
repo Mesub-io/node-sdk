@@ -170,7 +170,7 @@ Mesub-io/backend):
 
 ```sh
 # in the backend: write a merchant, a key, a plan and a subscriber's token
-pnpm contract:fixture > /tmp/mesub-contract.env
+pnpm -s contract:fixture > /tmp/mesub-contract.env
 
 # here
 env $(cat /tmp/mesub-contract.env) pnpm test:contract
