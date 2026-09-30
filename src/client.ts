@@ -6,6 +6,14 @@ import { MesubError } from './errors.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { Transport } from './transport.js';
 
+/** What a guard decided, and on which answer. */
+export interface Decision {
+    access: boolean;
+    answer: AccessAnswer | null;
+    /** The answer came from the outage fallback, not from Mesub just now. */
+    stale: boolean;
+}
+
 export interface MesubOptions {
     /** Secret API key. Defaults to `process.env.MESUB_API_KEY`. */
     apiKey?: string;
@@ -129,8 +137,21 @@ export class Mesub {
      * integration, not a denial.
      */
     async hasAccess(wallet: string, plan: string): Promise<boolean> {
+        return (await this.decide(wallet, plan)).access;
+    }
+
+    /**
+     * `hasAccess`, with the answer it decided on: what the middlewares hand
+     * the route. `answer` is null only for a wallet never seen during an
+     * outage, `stale` is true when the answer came from the fallback.
+     *
+     * @internal
+     */
+    async decide(wallet: string, plan: string): Promise<Decision> {
         try {
-            return (await this.access(wallet, plan)).access;
+            const answer = await this.access(wallet, plan);
+
+            return { access: answer.access, answer, stale: false };
         } catch (error) {
             const unreachable =
                 error instanceof MesubError &&
@@ -142,7 +163,9 @@ export class Mesub {
             // The last answer known, even stale; a wallet never seen stays out.
             const cached = await this.cache.read(wallet, plan);
 
-            return cached?.value.access ?? false;
+            return cached
+                ? { access: cached.value.access, answer: cached.value, stale: true }
+                : { access: false, answer: null, stale: true };
         }
     }
 }
