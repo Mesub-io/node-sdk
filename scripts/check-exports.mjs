@@ -42,6 +42,25 @@ for (const [subpath, conditions] of Object.entries(pkg.exports)) {
     }
 }
 
+// One MesubError across entries. Without shared chunks each CJS entry inlines
+// its own copy, and `instanceof MesubError` fails on an error thrown by
+// `@mesub/node/express`: builds and tests fine, breaks in a merchant's catch.
+const core = { import: (await import(pkg.name)).MesubError, require: require(pkg.name).MesubError };
+
+for (const subpath of Object.keys(pkg.exports)) {
+    if (subpath === '.' || subpath === './package.json') continue;
+
+    const specifier = `${pkg.name}/${subpath.slice(2)}`;
+    const loaded = { import: await import(specifier), require: require(specifier) };
+
+    for (const condition of ['import', 'require']) {
+        const theirs = loaded[condition].MesubError;
+        if (theirs !== undefined && theirs !== core[condition]) {
+            failures.push(`${specifier} (${condition}): its MesubError is not the core's`);
+        }
+    }
+}
+
 if (failures.length > 0) {
     console.error(failures.join('\n'));
     process.exit(1);

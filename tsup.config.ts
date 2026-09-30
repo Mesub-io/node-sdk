@@ -13,6 +13,10 @@ export default defineConfig({
         next: 'src/next.ts',
     },
     format: ['esm', 'cjs'],
+    // Shared chunks in CJS too: without them each entry inlines its own copy
+    // of the core, and a MesubError thrown by `@mesub/node/express` would fail
+    // `instanceof MesubError` against the one from `@mesub/node`.
+    splitting: true,
     // tsup sets `baseUrl` for its declaration build, which TypeScript 6 calls
     // deprecated and refuses. Silenced here only, never in tsconfig.json.
     dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
