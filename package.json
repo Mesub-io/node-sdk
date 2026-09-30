@@ -103,5 +103,8 @@
     "*.{json,md,yml,yaml}": [
       "prettier --check"
     ]
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
   }
 }

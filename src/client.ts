@@ -3,6 +3,7 @@ import { AccessCache } from './cache/access-cache.js';
 import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { MesubError } from './errors.js';
+import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { Transport } from './transport.js';
 
 export interface MesubOptions {
@@ -35,6 +36,10 @@ export class Mesub {
     protected readonly transport: Transport;
     /** @internal */
     protected readonly cache: AccessCache<AccessAnswer>;
+    /** @internal */
+    protected readonly tokens: TokenVerifier;
+    /** Asked once per process; forgotten if it failed, so the next call asks again. */
+    private projectIdOnce: Promise<string> | undefined;
 
     constructor(options: MesubOptions = {}) {
         const apiKey = options.apiKey || process.env['MESUB_API_KEY'];
@@ -53,6 +58,35 @@ export class Mesub {
             maxRetries: options.maxRetries ?? 2,
         });
         this.cache = new AccessCache(options.cache ?? new MemoryStore<AccessAnswer>());
+        const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+        this.tokens = new TokenVerifier({
+            baseUrl,
+            fetch: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
+            projectId: () => this.projectId(),
+        });
+    }
+
+    /**
+     * Who the access token `@mesub/react` issued is about, verified locally
+     * with Mesub's public keys. Throws a MesubError `invalid_token` for a
+     * forged, expired or other project's token, `unavailable` when the keys
+     * or the project id could not be fetched.
+     */
+    async verifyToken(token: string): Promise<VerifiedToken> {
+        return this.tokens.verify(token);
+    }
+
+    /** The key's project id, from `GET /v1/project`, once per process. */
+    private projectId(): Promise<string> {
+        this.projectIdOnce ??= this.transport.get('/v1/project').then(
+            (answer) => (answer as { id: string }).id,
+            (error: unknown) => {
+                this.projectIdOnce = undefined;
+                throw error;
+            },
+        );
+
+        return this.projectIdOnce;
     }
 
     /**

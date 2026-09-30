@@ -12,3 +12,4 @@ export type {
     SubscriptionStatus,
 } from './answer.js';
 export * from './cache/index.js';
+export { type HeaderSource, TOKEN_COOKIE, tokenFrom, type VerifiedToken } from './tokens.js';
