@@ -1,3 +1,4 @@
+import type { AccessAnswer } from './answer.js';
 import { type Decision, Mesub } from './client.js';
 import { MesubError } from './errors.js';
 import { type HeaderSource, tokenFrom, type VerifiedToken } from './tokens.js';
@@ -8,6 +9,23 @@ export type DenialReason = 'unauthenticated' | 'no_access' | 'unavailable';
 export type GuardOutcome =
     | { allowed: true; subscriber: VerifiedToken; decision: Decision }
     | { allowed: false; reason: DenialReason; decision?: Decision };
+
+/** Who is asking and what Mesub answered, as a guarded route receives it. */
+export interface MesubAccess {
+    userId: string;
+    wallet: string;
+    answer: AccessAnswer | null;
+    /** The answer came from the outage fallback. */
+    stale: boolean;
+}
+
+/** A refusal, as `onDenied` receives it. */
+export interface Denial {
+    reason: DenialReason;
+    /** 401, 402 or 503: what would be answered without `onDenied`. */
+    status: number;
+    answer: AccessAnswer | null;
+}
 
 /** What a guard answers by default for each refusal. */
 export const DENIAL_STATUS: Record<DenialReason, number> = {
@@ -76,5 +94,22 @@ export function denialBody(outcome: Extract<GuardOutcome, { allowed: false }>) {
         access: false,
         reason: outcome.reason,
         ...(outcome.decision?.answer ? { status: outcome.decision.answer.status } : {}),
+    };
+}
+
+export function accessOf(outcome: Extract<GuardOutcome, { allowed: true }>): MesubAccess {
+    return {
+        userId: outcome.subscriber.userId,
+        wallet: outcome.subscriber.wallet,
+        answer: outcome.decision.answer,
+        stale: outcome.decision.stale,
+    };
+}
+
+export function denialOf(outcome: Extract<GuardOutcome, { allowed: false }>): Denial {
+    return {
+        reason: outcome.reason,
+        status: DENIAL_STATUS[outcome.reason],
+        answer: outcome.decision?.answer ?? null,
     };
 }
