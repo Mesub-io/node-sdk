@@ -2,7 +2,7 @@ import { defineConfig } from 'tsup';
 
 /**
  * One build per entry point, each importing only the core: a project on
- * Express never loads anything written for Next, and the other way round.
+ * Express never loads anything written for Next or Nest, and so on.
  * ESM and CJS both, with their own declaration files, since `require` and
  * `import` resolve types separately.
  */
@@ -11,6 +11,7 @@ export default defineConfig({
         index: 'src/index.ts',
         express: 'src/express.ts',
         next: 'src/next.ts',
+        nest: 'src/nest.ts',
     },
     format: ['esm', 'cjs'],
     // Shared chunks in CJS too: without them each entry inlines its own copy
@@ -24,5 +25,5 @@ export default defineConfig({
     sourcemap: true,
     target: 'node20',
     // Peer dependencies are the merchant's own copy, never bundled.
-    external: ['express', 'next'],
+    external: ['express', 'next', '@nestjs/common'],
 });

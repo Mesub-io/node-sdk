@@ -1,0 +1,465 @@
+import 'reflect-metadata';
+
+import {
+    Controller,
+    type ExecutionContext,
+    Get,
+    HttpException,
+    type INestApplication,
+    Query,
+    UseGuards,
+} from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
+import request from 'supertest';
+
+import type { AccessAnswer } from '../src/answer.js';
+import { Mesub } from '../src/index.js';
+import { MesubAccess, MesubError, RequirePlan, type RequirePlanOptions } from '../src/nest.js';
+
+const BASE = 'https://api.mesub.test';
+const PROJECT = 'proj_1';
+const WALLET = 'SysvarRent111111111111111111111111111111111';
+const ATTACKER = 'Attacker111111111111111111111111111111111111';
+
+let privateKey: CryptoKey;
+let jwk: JWK;
+
+beforeAll(async () => {
+    const pair = await generateKeyPair('ES256');
+    privateKey = pair.privateKey;
+    jwk = { ...(await exportJWK(pair.publicKey)), kid: 'key-1', alg: 'ES256', use: 'sig' };
+});
+
+function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
+    return {
+        wallet: WALLET,
+        plan: 'pro',
+        access: true,
+        status: 'active',
+        payment_status: 'paid',
+        subscribed_since: null,
+        first_subscribed_at: null,
+        current_period_end: null,
+        cancelled_at: null,
+        access_until: null,
+        next_charge_at: null,
+        next_retry_at: null,
+        revalidate_after: 60,
+        ...over,
+    };
+}
+
+async function token(over: { aud?: string; exp?: string } = {}) {
+    return new SignJWT({ wallet: WALLET })
+        .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
+        .setSubject('user_1')
+        .setAudience(over.aud ?? PROJECT)
+        .setIssuer(BASE)
+        .setIssuedAt()
+        .setExpirationTime(over.exp ?? '1h')
+        .sign(privateKey);
+}
+
+interface Mesh {
+    /** What /v1/access answers, per call. */
+    access?: () => Response | Promise<Response>;
+    /** What the JWKS and /v1/project answer; healthy by default. */
+    keys?: () => Response;
+    project?: () => Response;
+}
+
+/** A Mesub whose API is a function, so each test says what it answers. */
+function mesub(mesh: Mesh = {}) {
+    const calls: string[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+        const url = new URL(String(input instanceof Request ? input.url : input));
+        calls.push(url.pathname);
+        if (url.pathname === '/.well-known/jwks.json')
+            return mesh.keys?.() ?? Response.json({ keys: [jwk] });
+        if (url.pathname === '/v1/project')
+            return mesh.project?.() ?? Response.json({ id: PROJECT });
+        if (url.pathname === '/v1/access')
+            return (mesh.access ?? (() => Response.json(answer())))();
+        throw new Error(`unexpected ${url.pathname}`);
+    });
+    const client = new Mesub({
+        apiKey: 'SUB_test',
+        baseUrl: BASE,
+        fetch: fetch as unknown as typeof globalThis.fetch,
+        maxRetries: 0,
+    });
+
+    return { client, calls };
+}
+
+const apps: INestApplication[] = [];
+
+afterEach(async () => {
+    await Promise.all(apps.splice(0).map((nest) => nest.close()));
+});
+
+/** A Nest app with a guarded route echoing `@MesubAccess()`, and a guarded controller. */
+async function app(client: Mesub, options: Omit<RequirePlanOptions, 'client'> = {}) {
+    @Controller()
+    class RouteController {
+        @Get('pro')
+        @UseGuards(RequirePlan('pro', { ...options, client }))
+        pro(@MesubAccess() mesub: MesubAccess, @Query('wallet') _wallet?: string) {
+            return mesub;
+        }
+
+        @Get('open')
+        open() {
+            return { open: true };
+        }
+    }
+
+    @Controller('reports')
+    @UseGuards(RequirePlan('pro', { ...options, client }))
+    class ReportsController {
+        @Get()
+        list(@MesubAccess() mesub: MesubAccess) {
+            return { wallet: mesub.wallet };
+        }
+    }
+
+    const module = await Test.createTestingModule({
+        controllers: [RouteController, ReportsController],
+    }).compile();
+    const nest = module.createNestApplication({ logger: false });
+    await nest.init();
+    apps.push(nest);
+
+    return nest.getHttpServer();
+}
+
+describe('RequirePlan', () => {
+    describe('letting through', () => {
+        it('lets a subscriber with access reach the route', async () => {
+            const { client } = mesub();
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+        });
+
+        it('gives who they are and the answer through @MesubAccess()', async () => {
+            const { client } = mesub();
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.body).toEqual({
+                userId: 'user_1',
+                wallet: WALLET,
+                answer: answer(),
+                stale: false,
+            });
+        });
+
+        it('reads the token from the mesub-token cookie', async () => {
+            const { client } = mesub();
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Cookie', `mesub-token=${await token()}`)
+                .expect(200);
+        });
+
+        // The wallet asked about is the token's, never one the request names.
+        it('asks Mesub about the wallet in the token', async () => {
+            const { client } = mesub();
+            const decide = vi.spyOn(client, 'decide');
+
+            const response = await request(await app(client))
+                .get(`/pro?wallet=${ATTACKER}`)
+                .set('Authorization', `Bearer ${await token()}`)
+                .set('x-wallet', ATTACKER);
+
+            expect(decide).toHaveBeenCalledWith(WALLET, 'pro');
+            expect(response.body.wallet).toBe(WALLET);
+        });
+
+        it('leaves unguarded routes alone', async () => {
+            const { client, calls } = mesub();
+
+            await request(await app(client))
+                .get('/open')
+                .expect(200);
+            expect(calls).toEqual([]);
+        });
+    });
+
+    describe('401, not signed in', () => {
+        it.each([
+            ['no token at all', {} as Record<string, string>],
+            ['another scheme', { Authorization: 'Basic abc' }],
+        ])('answers 401 on %s', async (_label, headers) => {
+            const { client } = mesub();
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set(headers);
+
+            expect(response.status).toBe(401);
+            expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+        });
+
+        it('answers 401 on a token for another project', async () => {
+            const { client } = mesub();
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token({ aud: 'proj_2' })}`)
+                .expect(401);
+        });
+
+        it('answers 401 on an expired token', async () => {
+            const { client } = mesub();
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token({ exp: '-1s' })}`)
+                .expect(401);
+        });
+
+        it('answers 401 on something that is not a token', async () => {
+            const { client } = mesub();
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Authorization', 'Bearer not-a-token')
+                .expect(401);
+        });
+
+        it('never asks /v1/access without a valid token', async () => {
+            const { client, calls } = mesub();
+
+            await request(await app(client)).get('/pro');
+
+            expect(calls).not.toContain('/v1/access');
+        });
+    });
+
+    describe('402, no access', () => {
+        it('answers 402 with the status for a subscriber without access', async () => {
+            const { client } = mesub({
+                access: () => Response.json(answer({ access: false, status: 'stopped' })),
+            });
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(402);
+            expect(response.body).toEqual({
+                access: false,
+                reason: 'no_access',
+                status: 'stopped',
+            });
+        });
+
+        // Mesub down, but this wallet was seen and had access: it stays in.
+        it('keeps a known subscriber in during an outage', async () => {
+            let down = false;
+            const { client } = mesub({
+                access: () =>
+                    down
+                        ? Response.json({ message: 'down' }, { status: 503 })
+                        : Response.json(answer({ revalidate_after: 0 })),
+            });
+            const server = await app(client);
+            const bearer = `Bearer ${await token()}`;
+            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+
+            down = true;
+            const response = await request(server).get('/pro').set('Authorization', bearer);
+
+            expect(response.status).toBe(200);
+            expect(response.body.stale).toBe(true);
+        });
+
+        it('answers 402 for an unseen wallet during an outage', async () => {
+            const { client } = mesub({
+                access: () => Response.json({ message: 'down' }, { status: 503 }),
+            });
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(402);
+            expect(response.body).toEqual({ access: false, reason: 'no_access' });
+        });
+    });
+
+    describe('503, nobody can be identified', () => {
+        it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
+            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+            expect(response.body).toEqual({ access: false, reason: 'unavailable' });
+        });
+
+        it('answers 503 when the project id cannot be fetched', async () => {
+            const { client } = mesub({
+                project: () => Response.json({ message: 'down' }, { status: 503 }),
+            });
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+        });
+
+        // A Fastify reply has `header`, not `setHeader`.
+        it('sets Retry-After on a Fastify reply too', async () => {
+            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+            const reply = { header: vi.fn() };
+            const headers = { authorization: `Bearer ${await token()}` };
+            const context = {
+                switchToHttp: () => ({ getRequest: () => ({ headers }), getResponse: () => reply }),
+            } as unknown as ExecutionContext;
+            const guard = new (RequirePlan('pro', { client }))();
+
+            const thrown = await (guard.canActivate(context) as Promise<boolean>).catch(
+                (error: unknown) => error,
+            );
+
+            expect(thrown).toBeInstanceOf(HttpException);
+            expect((thrown as HttpException).getStatus()).toBe(503);
+            expect(reply.header).toHaveBeenCalledWith('Retry-After', '30');
+        });
+
+        it('sends no Retry-After on other refusals', async () => {
+            const { client } = mesub();
+
+            const response = await request(await app(client)).get('/pro');
+
+            expect(response.headers['retry-after']).toBeUndefined();
+        });
+    });
+
+    describe('onDenied', () => {
+        it('lets the merchant throw their own exception', async () => {
+            const { client } = mesub({
+                access: () => Response.json(answer({ access: false, status: 'none' })),
+            });
+            const onDenied = vi.fn((denial) => {
+                throw new HttpException({ upgrade: `/subscribe?why=${denial.reason}` }, 403);
+            });
+
+            const response = await request(await app(client, { onDenied }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(403);
+            expect(response.body).toEqual({ upgrade: '/subscribe?why=no_access' });
+            expect(onDenied.mock.calls[0]![0]).toMatchObject({
+                reason: 'no_access',
+                status: 402,
+                answer: { status: 'none' },
+            });
+        });
+
+        it('hands it the 401 and the request', async () => {
+            const { client } = mesub();
+            const onDenied = vi.fn(() => {
+                throw new HttpException('teapot', 418);
+            });
+
+            await request(await app(client, { onDenied }))
+                .get('/pro')
+                .set('x-trace', 'abc')
+                .expect(418);
+            expect(onDenied.mock.calls[0]).toMatchObject([
+                { reason: 'unauthenticated', status: 401, answer: null },
+                { headers: { 'x-trace': 'abc' } },
+            ]);
+        });
+
+        it('falls back to the default refusal when it returns', async () => {
+            const { client } = mesub();
+            const onDenied = vi.fn();
+
+            const response = await request(await app(client, { onDenied })).get('/pro');
+
+            expect(onDenied).toHaveBeenCalledOnce();
+            expect(response.status).toBe(401);
+            expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+        });
+
+        it('is never called for a subscriber with access', async () => {
+            const { client } = mesub();
+            const onDenied = vi.fn();
+
+            await request(await app(client, { onDenied }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+            expect(onDenied).not.toHaveBeenCalled();
+        });
+    });
+
+    // A broken integration must reach Nest as an error, not look like a denial.
+    describe('integration errors', () => {
+        it.each([
+            ['a bad secret key', 401],
+            ['an unknown plan', 404],
+        ])('answers 500 on %s', async (_label, status) => {
+            const { client } = mesub({
+                access: () => Response.json({ message: 'nope' }, { status }),
+            });
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(500);
+            expect(response.body).not.toHaveProperty('access');
+        });
+
+        it('rethrows the MesubError untouched', async () => {
+            const { client } = mesub({
+                access: () => Response.json({ message: 'nope' }, { status: 404 }),
+            });
+            const guard = new (RequirePlan('pro', { client }))();
+            const headers = { authorization: `Bearer ${await token()}` };
+            const context = {
+                switchToHttp: () => ({ getRequest: () => ({ headers }), getResponse: () => ({}) }),
+            } as unknown as ExecutionContext;
+
+            const thrown = await (guard.canActivate(context) as Promise<boolean>).catch(
+                (error: unknown) => error,
+            );
+
+            expect(thrown).toBeInstanceOf(MesubError);
+            expect(thrown).toMatchObject({ code: 'plan_not_found' });
+        });
+    });
+
+    describe('on a whole controller', () => {
+        it('guards every route of it', async () => {
+            const { client } = mesub();
+            const server = await app(client);
+
+            await request(server).get('/reports').expect(401);
+            const response = await request(server)
+                .get('/reports')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body).toEqual({ wallet: WALLET });
+        });
+    });
+});
