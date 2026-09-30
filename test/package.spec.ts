@@ -11,11 +11,17 @@ describe('package.json', () => {
         expect(pkg.name).toBe('@mesub/node');
     });
 
-    it('exposes the core, Express and Next, and nothing else', () => {
-        expect(Object.keys(pkg.exports)).toEqual(['.', './express', './next', './package.json']);
+    it('exposes the core, Express, Next and Nest, and nothing else', () => {
+        expect(Object.keys(pkg.exports)).toEqual([
+            '.',
+            './express',
+            './next',
+            './nest',
+            './package.json',
+        ]);
     });
 
-    it.each(['.', './express', './next'])(
+    it.each(['.', './express', './next', './nest'])(
         'serves %s to import and require, with types',
         (subpath) => {
             const entry = pkg.exports[subpath];
@@ -27,13 +33,15 @@ describe('package.json', () => {
         },
     );
 
-    // A merchant on Express must not be made to install Next, or the reverse.
-    it('asks for Express and Next as optional peers only', () => {
-        expect(pkg.dependencies ?? {}).not.toHaveProperty('express');
-        expect(pkg.dependencies ?? {}).not.toHaveProperty('next');
-        expect(pkg.peerDependenciesMeta.express.optional).toBe(true);
-        expect(pkg.peerDependenciesMeta.next.optional).toBe(true);
-    });
+    // A merchant on Express must not be made to install Next or Nest, and so on.
+    it.each(['express', 'next', '@nestjs/common'])(
+        'asks for %s as an optional peer only',
+        (peer) => {
+            expect(pkg.dependencies ?? {}).not.toHaveProperty(peer);
+            expect(pkg.peerDependencies).toHaveProperty(peer);
+            expect(pkg.peerDependenciesMeta[peer].optional).toBe(true);
+        },
+    );
 
     it('ships the build and nothing else', () => {
         expect(pkg.files).toEqual(['dist']);

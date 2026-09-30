@@ -62,7 +62,23 @@ export const GET = withMesub(
 );
 ```
 
-Both answer a refusal themselves:
+With a NestJS controller or route:
+
+```ts
+import { Controller, Get, UseGuards } from '@nestjs/common';
+import { MesubAccess, RequirePlan } from '@mesub/node/nest';
+
+@Controller('reports')
+@UseGuards(RequirePlan('pro'))
+export class ReportsController {
+    @Get()
+    list(@MesubAccess() mesub: MesubAccess) {
+        return buildReport(mesub.wallet);
+    }
+}
+```
+
+All three answer a refusal themselves:
 
 | Status  | When                                                                   | Body                                             |
 | ------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
@@ -71,8 +87,10 @@ Both answer a refusal themselves:
 | **503** | Mesub unreachable before anyone could be identified. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
 
 `onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
-own JSON. A broken integration (a bad secret key, an unknown plan) is never a
-refusal: Express gets it through `next(err)`, Next through a thrown error.
+own JSON. In Nest it throws your own exception, and the default refusal is
+thrown if it returns. A broken integration (a bad secret key, an unknown plan)
+is never a refusal: Express gets it through `next(err)`, Next and Nest through
+a thrown error, answered 500.
 
 ## Without a middleware
 
@@ -151,8 +169,8 @@ and a stable `code` to branch on:
 
 ## Requirements
 
-Node 20 or later. Express and Next are optional peer dependencies: install the
-one you use. `jose` is the only runtime dependency.
+Node 20 or later. Express, Next and `@nestjs/common` are optional peer
+dependencies: install the one you use. `jose` is the only runtime dependency.
 
 ## Development
 
