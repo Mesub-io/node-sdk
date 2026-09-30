@@ -1,6 +1,7 @@
 /**
  * Stable codes to branch on. `unexpected` covers any status without its own
- * code (403, 409, a 2xx whose body is not JSON, ...).
+ * code (403, 409, a 2xx whose body is not JSON, ...). `invalid_token` is an
+ * access token that fails verification: forged, expired, or for another project.
  */
 export type MesubErrorCode =
     | 'invalid_request'
@@ -8,6 +9,7 @@ export type MesubErrorCode =
     | 'plan_not_found'
     | 'rate_limited'
     | 'unavailable'
+    | 'invalid_token'
     | 'unexpected';
 
 export interface MesubErrorOptions {
