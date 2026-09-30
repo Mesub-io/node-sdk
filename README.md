@@ -35,7 +35,7 @@ Two keys, both from your Mesub dashboard, and nothing else:
 
 | Where                | What                                                                 |
 | -------------------- | -------------------------------------------------------------------- |
-| Your server's `.env` | `MESUB_API_KEY=SUB_...`, the secret key. Read by this package.       |
+| Your server's `.env` | `MESUB_API_KEY=SUB_...`, the API key. Read by this package.          |
 | Your frontend        | `PUB_...`, the publishable key, given to `@mesub/react`. Not secret. |
 
 ## Guard a route
@@ -88,7 +88,7 @@ All three answer a refusal themselves:
 
 `onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
 own JSON. In Nest it throws your own exception, and the default refusal is
-thrown if it returns. A broken integration (a bad secret key, an unknown plan)
+thrown if it returns. A broken integration (a bad API key, an unknown plan)
 is never a refusal: Express gets it through `next(err)`, Next and Nest through
 a thrown error, answered 500.
 
@@ -160,7 +160,7 @@ and a stable `code` to branch on:
 | `code`            | Meaning                                              |
 | ----------------- | ---------------------------------------------------- |
 | `invalid_request` | 400, e.g. a wallet that is not an address            |
-| `unauthorized`    | 401, a secret key Mesub never issued                 |
+| `unauthorized`    | 401, an API key Mesub never issued                   |
 | `plan_not_found`  | 404, no plan of yours under that slug                |
 | `rate_limited`    | 429, after the retries                               |
 | `unavailable`     | 5xx, a timeout or a network error, after the retries |

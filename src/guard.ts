@@ -55,7 +55,7 @@ export function defaultClient(): Mesub {
  *   nobody can be identified, so not even the outage fallback can apply
  * - the fallback of `hasAccess` otherwise, through `decide`
  *
- * An integration error (a bad secret key, an unknown plan) is thrown.
+ * An integration error (a bad API key, an unknown plan) is thrown.
  */
 export async function guard(
     client: Mesub,
