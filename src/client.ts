@@ -1,3 +1,8 @@
+import type { AccessAnswer, AccessOptions } from './answer.js';
+import { AccessCache } from './cache/access-cache.js';
+import { MemoryStore } from './cache/memory-store.js';
+import type { CacheStore } from './cache/store.js';
+import { MesubError } from './errors.js';
 import { Transport } from './transport.js';
 
 export interface MesubOptions {
@@ -9,8 +14,18 @@ export interface MesubOptions {
     fetch?: typeof fetch;
     /** Per attempt, in milliseconds. Defaults to 5000. */
     timeout?: number;
-    /** Retries after the first attempt. Defaults to 2. */
+    /**
+     * How many times a failed call to Mesub is sent again, after the first
+     * attempt. Defaults to 2. HTTP retries only: nothing to do with a plan's
+     * pull retries, which Mesub runs on its side (and a Free plan has none).
+     */
     maxRetries?: number;
+    /**
+     * Where `/v1/access` answers are kept. Defaults to a memory store of
+     * 10,000 entries, emptied on restart; a Redis store keeps the outage
+     * fallback across restarts and servers.
+     */
+    cache?: CacheStore<AccessAnswer>;
 }
 
 const DEFAULT_BASE_URL = 'https://api.mesub.io';
@@ -18,6 +33,8 @@ const DEFAULT_BASE_URL = 'https://api.mesub.io';
 export class Mesub {
     /** @internal */
     protected readonly transport: Transport;
+    /** @internal */
+    protected readonly cache: AccessCache<AccessAnswer>;
 
     constructor(options: MesubOptions = {}) {
         const apiKey = options.apiKey || process.env['MESUB_API_KEY'];
@@ -35,5 +52,63 @@ export class Mesub {
             timeout: options.timeout ?? 5_000,
             maxRetries: options.maxRetries ?? 2,
         });
+        this.cache = new AccessCache(options.cache ?? new MemoryStore<AccessAnswer>());
+    }
+
+    /**
+     * Everything Mesub knows about that wallet on that plan: whether it has
+     * access, its status, its dates. Served from the cache while fresh.
+     *
+     * Throws a `MesubError` whenever Mesub cannot answer: it is for screens.
+     * A guard calls `hasAccess`, which falls back instead.
+     */
+    async access(wallet: string, plan: string, options: AccessOptions = {}): Promise<AccessAnswer> {
+        const attempts = options.attempts === true;
+
+        if (!attempts) {
+            const cached = await this.cache.read(wallet, plan);
+
+            if (cached?.fresh) return cached.value;
+        }
+
+        // Throws a MesubError on any failure, which goes straight to the caller.
+        const answer = (await this.transport.get('/v1/access', {
+            wallet,
+            plan,
+            // Left out when not asked: the transport drops undefined values.
+            attempts: attempts || undefined,
+        })) as AccessAnswer;
+
+        // A heavy answer must not replace the light one a guard reads.
+        if (!attempts) await this.cache.write(wallet, plan, answer);
+
+        return answer;
+    }
+
+    /**
+     * Whether that wallet has access to that plan, for a guard.
+     *
+     * When Mesub is unavailable after the retries (`unavailable` or
+     * `rate_limited`), it answers the last answer it knew, even stale, and
+     * `false` for a wallet it never saw. Any other error is thrown, never
+     * turned into `false`: a bad key or an unknown plan is a broken
+     * integration, not a denial.
+     */
+    async hasAccess(wallet: string, plan: string): Promise<boolean> {
+        try {
+            return (await this.access(wallet, plan)).access;
+        } catch (error) {
+            const unreachable =
+                error instanceof MesubError &&
+                (error.code === 'unavailable' || error.code === 'rate_limited');
+
+            // A broken integration is thrown, never read as "no access".
+            if (!unreachable) throw error;
+
+            // The last answer known, even stale; a wallet never seen stays out.
+            const cached = await this.cache.read(wallet, plan);
+
+            return cached?.value.access ?? false;
+        }
     }
 }
