@@ -1,0 +1,38 @@
+name: Publish
+
+# A version tag publishes that version. npm trusted publishing: GitHub proves
+# who is publishing through OIDC, so no npm token is stored in this repository.
+# Set up once on npmjs.com: package settings, Trusted Publisher, GitHub Actions,
+# Mesub-io / node-sdk / publish.yml.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  # What trusted publishing and provenance sign with.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+
+      # The tag must name the version being published: v0.2.0 publishes 0.2.0.
+      - name: Check the tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm check:exports
+      - run: npm publish --provenance --access public

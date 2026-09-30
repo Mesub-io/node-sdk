@@ -7,8 +7,14 @@ behalf, retries, and keeps the record of every attempt. This package is the
 part that lives on your servers. It answers one question on every request:
 **does this subscriber have access to this plan?**
 
-> **Status: not published to npm yet.** Everything below works on `main`, see
-> the [board](https://github.com/orgs/Mesub-io/projects/4) for what is left.
+> **Status: early, 0.x.** The API may still change between minor versions.
+> See the [board](https://github.com/orgs/Mesub-io/projects/4) for what is next.
+
+## Install
+
+```sh
+npm install @mesub/node
+```
 
 ## How it fits
 
@@ -160,6 +166,12 @@ pnpm check:exports # every entry resolves through import and require, and shares
 ```
 
 The pre-push hook runs all of it, as CI does on Node 20, 22 and 24.
+
+### Releasing
+
+Bump `version` in `package.json` and `VERSION` in `src/version.ts`, merge, then
+push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Publish
+workflow checks, builds and publishes with provenance.
 
 ### Contract test
 
