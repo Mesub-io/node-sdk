@@ -71,7 +71,8 @@
     "test:watch": "vitest",
     "check:exports": "node scripts/check-exports.mjs",
     "prepare": "husky",
-    "prepublishOnly": "pnpm build && pnpm check:exports"
+    "prepublishOnly": "pnpm build && pnpm check:exports",
+    "test:contract": "vitest run test/contract.spec.ts"
   },
   "peerDependencies": {
     "express": ">=4",
