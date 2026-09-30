@@ -1,6 +1,6 @@
 {
   "name": "@mesub/node",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Server-side SDK for Mesub: know whether a wallet has access to a plan, from Node.",
   "license": "MIT",
   "repository": {
@@ -111,5 +111,8 @@
   },
   "dependencies": {
     "jose": "^6.2.12"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
