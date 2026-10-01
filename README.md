@@ -113,8 +113,9 @@ await mesub.access(wallet, 'pro', { attempts: true }); // plus the last pull att
   after a key rotation: the keys and the project id are then kept in memory.
 - **`hasAccess`** never locks out a paying subscriber for an outage, nor lets a
   stranger in: after its retries it serves the last answer it knew for that
-  wallet and plan, even stale (for up to 24 hours), and `false` for one it
-  never saw. `access` throws instead, since it is for screens.
+  wallet and plan, even stale (for up to 24 hours, see `maxStaleMs`), and
+  `false` for one it never saw. `access` throws instead, since it is for
+  screens.
 - A bad key, an unknown plan or a malformed wallet always throws, it is never
   turned into `false`.
 
@@ -132,6 +133,7 @@ new Mesub({
     maxRetries, // default 2
     fetch, // a custom fetch, e.g. bound to your own agent
     cache, // where answers are kept, default: 10,000 entries in memory
+    maxStaleMs, // how long a stale answer serves the outage fallback, default 24 h
 });
 ```
 

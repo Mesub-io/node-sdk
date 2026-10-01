@@ -1,4 +1,4 @@
-import type { AccessAnswer, CacheStore } from '../src/index.js';
+import type { AccessAnswer, CacheStore, MesubOptions } from '../src/index.js';
 import { Mesub, MesubError } from '../src/index.js';
 import { json, mockFetch, nest } from './helpers.js';
 
@@ -27,13 +27,18 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
 }
 
 /** No retries: an outage is one failed call, not three waits of backoff. */
-function client(fetch: typeof globalThis.fetch, cache?: CacheStore<AccessAnswer>) {
+function client(
+    fetch: typeof globalThis.fetch,
+    cache?: CacheStore<AccessAnswer>,
+    options: MesubOptions = {},
+) {
     return new Mesub({
         apiKey: 'SUB_test',
         baseUrl: 'https://api.mesub.test',
         fetch,
         maxRetries: 0,
         ...(cache ? { cache } : {}),
+        ...options,
     });
 }
 
@@ -274,6 +279,22 @@ describe('hasAccess', () => {
             await mesub.hasAccess(WALLET, 'pro');
             vi.setSystemTime(START.getTime() + 60_000 + DAY + 1);
 
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        });
+
+        it('keeps a stale answer only as long as maxStaleMs says', async () => {
+            const { fetch } = mockFetch(
+                json(200, answer()),
+                nest(503, 'Service Unavailable'),
+                nest(503, 'Service Unavailable'),
+            );
+            const mesub = client(fetch, undefined, { maxStaleMs: 1_000 });
+            await mesub.hasAccess(WALLET, 'pro');
+
+            vi.setSystemTime(START.getTime() + 60_000 + 1_000);
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+
+            vi.setSystemTime(START.getTime() + 60_000 + 1_001);
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
         });
 

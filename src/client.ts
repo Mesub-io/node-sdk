@@ -35,6 +35,12 @@ export interface MesubOptions {
      * fallback across restarts and servers.
      */
     cache?: CacheStore<AccessAnswer>;
+    /**
+     * How long an answer is kept once stale, for the outage fallback of
+     * `hasAccess` and the guards, in milliseconds. Defaults to 24 hours. 0
+     * turns the fallback off: an outage then keeps everyone out.
+     */
+    maxStaleMs?: number;
 }
 
 const DEFAULT_BASE_URL = 'https://api.mesub.io';
@@ -65,7 +71,10 @@ export class Mesub {
             timeout: options.timeout ?? 5_000,
             maxRetries: options.maxRetries ?? 2,
         });
-        this.cache = new AccessCache(options.cache ?? new MemoryStore<AccessAnswer>());
+        this.cache = new AccessCache(
+            options.cache ?? new MemoryStore<AccessAnswer>(),
+            options.maxStaleMs === undefined ? {} : { maxStaleMs: options.maxStaleMs },
+        );
         const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
         this.tokens = new TokenVerifier({
             baseUrl,
