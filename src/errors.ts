@@ -1,6 +1,7 @@
 /**
  * Stable codes to branch on. `unexpected` covers any status without its own
- * code (403, 409, a 2xx whose body is not JSON, ...). `invalid_token` is an
+ * code (403, 409, a 2xx whose body is not JSON, a 404 whose body is not a
+ * Mesub error, so a wrong `baseUrl`, ...). `invalid_token` is an
  * access token that fails verification: forged, expired, or for another project.
  */
 export type MesubErrorCode =

@@ -352,7 +352,7 @@ describe('withMesub', () => {
             ['an unknown plan', 404, 'plan_not_found'],
         ])('throws %s', async (_label, status, code) => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'nope' }, { status }),
+                access: () => Response.json({ message: 'nope', statusCode: status }, { status }),
             });
             const handler = vi.fn(() => new Response('ok'));
 

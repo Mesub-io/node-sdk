@@ -127,6 +127,45 @@ describe('status mapping', () => {
     });
 });
 
+// A wrong baseUrl must not read as "no plan of yours is named pro".
+describe('a 404', () => {
+    it.each([
+        ['an HTML page', new Response('<h1>Not Found</h1>', { status: 404 })],
+        ['an empty body', new Response(null, { status: 404 })],
+        ['JSON from another API', json(404, { message: 'Not Found' })],
+        ['a JSON array', json(404, [])],
+        [
+            "Nest's answer for a route it does not have",
+            nest(404, 'Cannot GET /api/v1/access?wallet=w', 'Not Found'),
+        ],
+    ])('on %s asks whether baseUrl is right', async (_label, response) => {
+        const { fetch } = mockFetch(response);
+
+        const error = await transport(fetch)
+            .get('/v1/access')
+            .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).toMatchObject({ status: 404, code: 'unexpected' });
+        expect((error as MesubError).message).toBe(
+            '/v1/access answered 404 with no Mesub error: is baseUrl (https://api.test) the Mesub API?',
+        );
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ["the back's own error", nest(404, 'No plan of yours is named pro.', 'Not Found')],
+        ['a body with a code', json(404, { code: 'plan_not_found', message: 'No such plan.' })],
+    ])('stays plan_not_found on %s', async (_label, response) => {
+        const { fetch } = mockFetch(response);
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            status: 404,
+            code: 'plan_not_found',
+        });
+    });
+});
+
 describe('error messages', () => {
     it('joins an array message', async () => {
         const { fetch } = mockFetch(nest(400, ['wallet must be base58', 'plan is required']));

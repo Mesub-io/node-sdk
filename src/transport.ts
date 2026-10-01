@@ -70,10 +70,17 @@ export class Transport {
                 }
             }
 
-            const error = new MesubError(messageFrom(text, response.status), {
-                status: response.status,
-                code: codeForStatus(response.status),
-            });
+            const error =
+                response.status === 404 && !isMesubErrorBody(text)
+                    ? new MesubError(
+                          `${url.pathname} answered 404 with no Mesub error: is baseUrl ` +
+                              `(${this.#config.baseUrl}) the Mesub API?`,
+                          { status: 404, code: 'unexpected' },
+                      )
+                    : new MesubError(messageFrom(text, response.status), {
+                          status: response.status,
+                          code: codeForStatus(response.status),
+                      });
             return {
                 ok: false,
                 error,
@@ -135,6 +142,28 @@ function messageFrom(text: string, status: number): string {
     }
     if (typeof error === 'string' && error !== '') return error;
     return fallback;
+}
+
+/**
+ * Whether a 404 came from the Mesub API rather than from whatever else lives
+ * at a wrong `baseUrl`: a JSON error body, as Nest writes it (`statusCode`
+ * and `message`) or with a `code`. Nest's own answer for a route it does not
+ * have (`Cannot GET /api/v1/access`) is not one: a path prefix too many.
+ */
+function isMesubErrorBody(text: string): boolean {
+    let body: unknown;
+    try {
+        body = JSON.parse(text);
+    } catch {
+        return false;
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+
+    const { code, statusCode, message } = body as Record<string, unknown>;
+    if (typeof code === 'string') return true;
+    if (typeof statusCode !== 'number') return false;
+
+    return !(typeof message === 'string' && /^Cannot [A-Z]+ \//.test(message));
 }
 
 function sleep(ms: number): Promise<void> {
