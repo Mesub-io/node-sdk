@@ -1,5 +1,5 @@
 import type { AccessAnswer, CacheStore, MesubOptions } from '../src/index.js';
-import { Mesub, MesubError } from '../src/index.js';
+import { Mesub, MemoryStore, MesubError } from '../src/index.js';
 import { json, mockFetch, nest } from './helpers.js';
 
 const WALLET = 'SysvarRent111111111111111111111111111111111';
@@ -26,6 +26,22 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
+const PROJECT = 'proj_1';
+
+/** `/v1/project` answers `project`; every other call goes to `fetch`. */
+function withProject(
+    fetch: typeof globalThis.fetch,
+    project: () => Response | Error = () => json(200, { id: PROJECT }),
+): typeof globalThis.fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+        if (new URL(String(input)).pathname !== '/v1/project') return fetch(input, init);
+
+        const answer = project();
+        if (answer instanceof Error) throw answer;
+        return answer;
+    }) as typeof globalThis.fetch;
+}
+
 /** No retries: an outage is one failed call, not three waits of backoff. */
 function client(
     fetch: typeof globalThis.fetch,
@@ -35,7 +51,7 @@ function client(
     return new Mesub({
         apiKey: 'SUB_test',
         baseUrl: 'https://api.mesub.test',
-        fetch,
+        fetch: withProject(fetch),
         maxRetries: 0,
         ...(cache ? { cache } : {}),
         ...options,
@@ -168,10 +184,127 @@ describe('access', () => {
             await client(fetch, { get: () => undefined, set }).access(WALLET, 'pro');
 
             expect(set).toHaveBeenCalledWith(
-                `mesub:access:pro:${WALLET}`,
+                `mesub:access:${PROJECT}:pro:${WALLET}`,
                 expect.objectContaining({ value: answer() }),
                 expect.any(Number),
             );
+        });
+    });
+
+    // Two projects sharing one Redis must never read each other's answers.
+    describe('the cache scope', () => {
+        it('asks /v1/project once, then keeps it', async () => {
+            const project = vi.fn(() => json(200, { id: PROJECT }));
+            const { fetch } = mockFetch(json(200, answer()), json(200, answer({ plan: 'team' })));
+            const mesub = new Mesub({
+                apiKey: 'SUB_test',
+                baseUrl: 'https://api.mesub.test',
+                fetch: withProject(fetch, project),
+                maxRetries: 0,
+            });
+
+            await mesub.access(WALLET, 'pro');
+            await mesub.access(WALLET, 'team');
+
+            expect(project).toHaveBeenCalledOnce();
+        });
+
+        it('keeps two projects sharing one store apart', async () => {
+            const store = new MemoryStore<AccessAnswer>();
+            const first = mockFetch(json(200, answer()));
+            const second = mockFetch(json(200, answer({ access: false, status: 'none' })));
+            const project = (id: string, fetch: typeof globalThis.fetch) =>
+                new Mesub({
+                    apiKey: `SUB_${id}`,
+                    baseUrl: 'https://api.mesub.test',
+                    fetch: withProject(fetch, () => json(200, { id })),
+                    cache: store,
+                });
+
+            await expect(project('proj_a', first.fetch).hasAccess(WALLET, 'pro')).resolves.toBe(
+                true,
+            );
+            await expect(project('proj_b', second.fetch).hasAccess(WALLET, 'pro')).resolves.toBe(
+                false,
+            );
+            expect(second.calls).toHaveLength(1);
+        });
+
+        it('scopes by a hash of the API key while /v1/project cannot answer', async () => {
+            const set = vi.fn();
+            const { fetch } = mockFetch(json(200, answer()));
+            const mesub = new Mesub({
+                apiKey: 'SUB_test',
+                baseUrl: 'https://api.mesub.test',
+                fetch: withProject(fetch, () => nest(503, 'Service Unavailable')),
+                cache: { get: () => undefined, set },
+            });
+
+            await mesub.access(WALLET, 'pro');
+
+            const key = set.mock.calls[0]![0] as string;
+            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:${WALLET}$`));
+            expect(key).not.toContain('SUB_test');
+        });
+
+        it('hashes two API keys apart', async () => {
+            const keys: string[] = [];
+            const scoped = (apiKey: string) =>
+                new Mesub({
+                    apiKey,
+                    baseUrl: 'https://api.mesub.test',
+                    fetch: withProject(mockFetch(json(200, answer())).fetch, () =>
+                        nest(503, 'Service Unavailable'),
+                    ),
+                    cache: { get: () => undefined, set: (key) => void keys.push(key) },
+                });
+
+            await scoped('SUB_one').access(WALLET, 'pro');
+            await scoped('SUB_two').access(WALLET, 'pro');
+
+            expect(keys[0]).not.toBe(keys[1]);
+        });
+
+        // A single attempt: the scope must not add the retries of an outage.
+        it('asks /v1/project once per call while it fails, without retrying', async () => {
+            const project = vi.fn(() => nest(503, 'Service Unavailable'));
+            const { fetch } = mockFetch(
+                json(200, answer({ revalidate_after: 0 })),
+                json(200, answer()),
+            );
+            const mesub = new Mesub({
+                apiKey: 'SUB_test',
+                baseUrl: 'https://api.mesub.test',
+                fetch: withProject(fetch, project),
+                maxRetries: 2,
+            });
+
+            await mesub.hasAccess(WALLET, 'pro');
+            await mesub.hasAccess(WALLET, 'pro');
+
+            expect(project).toHaveBeenCalledTimes(2);
+        });
+
+        it('moves to the project scope once /v1/project answers', async () => {
+            const set = vi.fn();
+            let up = false;
+            const { fetch } = mockFetch(json(200, answer()), json(200, answer()));
+            const mesub = new Mesub({
+                apiKey: 'SUB_test',
+                baseUrl: 'https://api.mesub.test',
+                fetch: withProject(fetch, () =>
+                    up ? json(200, { id: PROJECT }) : new TypeError('fetch failed'),
+                ),
+                maxRetries: 0,
+                cache: { get: () => undefined, set },
+            });
+
+            await mesub.access(WALLET, 'pro');
+            up = true;
+            await mesub.access(WALLET, 'pro');
+
+            expect(set.mock.calls[0]![0]).toMatch(/^mesub:access:key-/);
+            expect(set.mock.calls[1]![0]).toBe(`mesub:access:${PROJECT}:pro:${WALLET}`);
         });
     });
 

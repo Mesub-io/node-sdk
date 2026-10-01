@@ -4,7 +4,7 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { MesubError } from './errors.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
-import { Transport } from './transport.js';
+import { type CallOptions, Transport } from './transport.js';
 
 /** What a guard decided, and on which answer. */
 export interface Decision {
@@ -54,6 +54,10 @@ export class Mesub {
     protected readonly tokens: TokenVerifier;
     /** Asked once per process; forgotten if it failed, so the next call asks again. */
     private projectIdOnce: Promise<string> | undefined;
+    /** The project id once `/v1/project` answered it: the cache scope from then on. */
+    private knownProjectId: string | undefined;
+    /** The cache scope while the project id cannot be asked. */
+    private readonly apiKeyScope: () => Promise<string>;
 
     constructor(options: MesubOptions = {}) {
         const apiKey = options.apiKey || process.env['MESUB_API_KEY'];
@@ -75,6 +79,8 @@ export class Mesub {
             options.cache ?? new MemoryStore<AccessAnswer>(),
             options.maxStaleMs === undefined ? {} : { maxStaleMs: options.maxStaleMs },
         );
+        let apiKeyScope: Promise<string> | undefined;
+        this.apiKeyScope = () => (apiKeyScope ??= hashScope(apiKey));
         const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
         this.tokens = new TokenVerifier({
             baseUrl,
@@ -94,9 +100,14 @@ export class Mesub {
     }
 
     /** The key's project id, from `GET /v1/project`, once per process. */
-    private projectId(): Promise<string> {
-        this.projectIdOnce ??= this.transport.get('/v1/project').then(
-            (answer) => (answer as { id: string }).id,
+    private projectId(call: CallOptions = {}): Promise<string> {
+        this.projectIdOnce ??= this.transport.get('/v1/project', {}, call).then(
+            (answer) => {
+                const { id } = answer as { id: string };
+
+                if (typeof id === 'string' && id !== '') this.knownProjectId = id;
+                return id;
+            },
             (error: unknown) => {
                 this.projectIdOnce = undefined;
                 throw error;
@@ -107,6 +118,24 @@ export class Mesub {
     }
 
     /**
+     * What the cache keys are scoped by, so two projects sharing one store
+     * never read each other's answers: the project id, asked lazily (the
+     * token verifier usually asked already), in one attempt. While it cannot
+     * be asked, a hash of the API key, never the key itself.
+     */
+    private async cacheScope(): Promise<string> {
+        if (this.knownProjectId !== undefined) return this.knownProjectId;
+
+        try {
+            await this.projectId({ maxRetries: 0 });
+        } catch {
+            // Mesub unreachable, or a bad key that /v1/access reports itself.
+        }
+
+        return this.knownProjectId ?? this.apiKeyScope();
+    }
+
+    /**
      * Everything Mesub knows about that wallet on that plan: whether it has
      * access, its status, its dates. Served from the cache while fresh.
      *
@@ -114,10 +143,21 @@ export class Mesub {
      * A guard calls `hasAccess`, which falls back instead.
      */
     async access(wallet: string, plan: string, options: AccessOptions = {}): Promise<AccessAnswer> {
-        const attempts = options.attempts === true;
+        // Attempts skip the cache both ways: no scope to resolve.
+        if (options.attempts === true) return this.ask(wallet, plan, null);
+
+        return this.ask(wallet, plan, await this.cacheScope());
+    }
+
+    /**
+     * `access`, in the cache scope its caller resolved once, or without the
+     * cache at all (`null`) for an answer with its attempts.
+     */
+    private async ask(wallet: string, plan: string, scope: string | null): Promise<AccessAnswer> {
+        const attempts = scope === null;
 
         if (!attempts) {
-            const cached = await this.cache.read(wallet, plan);
+            const cached = await this.cache.read(wallet, plan, scope);
 
             if (cached?.fresh) return cached.value;
         }
@@ -131,7 +171,7 @@ export class Mesub {
         })) as AccessAnswer;
 
         // A heavy answer must not replace the light one a guard reads.
-        if (!attempts) await this.cache.write(wallet, plan, answer);
+        if (!attempts) await this.cache.write(wallet, plan, answer, scope);
 
         return answer;
     }
@@ -157,8 +197,12 @@ export class Mesub {
      * @internal
      */
     async decide(wallet: string, plan: string): Promise<Decision> {
+        // Once: while the project cannot be asked, asking again for the
+        // fallback would only wait for the same outage twice.
+        const scope = await this.cacheScope();
+
         try {
-            const answer = await this.access(wallet, plan);
+            const answer = await this.ask(wallet, plan, scope);
 
             return { access: answer.access, answer, stale: false };
         } catch (error) {
@@ -170,11 +214,19 @@ export class Mesub {
             if (!unreachable) throw error;
 
             // The last answer known, even stale; a wallet never seen stays out.
-            const cached = await this.cache.read(wallet, plan);
+            const cached = await this.cache.read(wallet, plan, scope);
 
             return cached
                 ? { access: cached.value.access, answer: cached.value, stale: true }
                 : { access: false, answer: null, stale: true };
         }
     }
+}
+
+/** `key-` and 16 hex characters of the API key's SHA-256: a scope, not a way back to the key. */
+async function hashScope(apiKey: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(apiKey));
+    const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0'));
+
+    return `key-${hex.join('').slice(0, 16)}`;
 }

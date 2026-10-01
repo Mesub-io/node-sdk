@@ -38,16 +38,22 @@ export class AccessCache<T extends Revalidating> {
         this.now = options.now ?? Date.now;
     }
 
-    /** `mesub:access:<plan>:<wallet>`, prefixed so it can share a Redis with anything. */
-    static key(wallet: string, plan: string): string {
-        return `mesub:access:${plan}:${wallet}`;
+    /**
+     * `mesub:access:<scope>:<plan>:<wallet>`, prefixed so it can share a Redis
+     * with anything. The scope (the client passes its project) keeps two
+     * projects sharing one store apart; without one, `mesub:access:<plan>:<wallet>`.
+     */
+    static key(wallet: string, plan: string, scope?: string): string {
+        return scope === undefined
+            ? `mesub:access:${plan}:${wallet}`
+            : `mesub:access:${scope}:${plan}:${wallet}`;
     }
 
-    async read(wallet: string, plan: string): Promise<CachedAnswer<T> | undefined> {
+    async read(wallet: string, plan: string, scope?: string): Promise<CachedAnswer<T> | undefined> {
         let entry: CacheEntry<T> | undefined;
 
         try {
-            entry = await this.store.get(AccessCache.key(wallet, plan));
+            entry = await this.store.get(AccessCache.key(wallet, plan, scope));
         } catch {
             return undefined;
         }
@@ -60,14 +66,14 @@ export class AccessCache<T extends Revalidating> {
         return { value: entry.value, fresh: now < entry.freshUntil };
     }
 
-    async write(wallet: string, plan: string, value: T): Promise<void> {
+    async write(wallet: string, plan: string, value: T, scope?: string): Promise<void> {
         const now = this.now();
         const freshUntil = now + Math.max(0, value.revalidate_after) * 1000;
         const keepUntil = freshUntil + this.maxStaleMs;
 
         try {
             await this.store.set(
-                AccessCache.key(wallet, plan),
+                AccessCache.key(wallet, plan, scope),
                 { value, freshUntil, keepUntil },
                 keepUntil - now,
             );

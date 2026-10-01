@@ -11,6 +11,11 @@ export interface TransportConfig {
     maxRetries: number;
 }
 
+/** What one call may change from the client's configuration. */
+export interface CallOptions {
+    maxRetries?: number;
+}
+
 const INITIAL_RETRY_DELAY = 500;
 const MAX_RETRY_DELAY = 8_000;
 const MAX_RETRY_AFTER = 60_000;
@@ -27,16 +32,21 @@ export class Transport {
         this.#config = config;
     }
 
-    async get(path: string, query: Record<string, QueryValue> = {}): Promise<unknown> {
+    async get(
+        path: string,
+        query: Record<string, QueryValue> = {},
+        options: CallOptions = {},
+    ): Promise<unknown> {
         const url = new URL(this.#config.baseUrl + path);
         for (const [key, value] of Object.entries(query)) {
             if (value !== undefined) url.searchParams.set(key, String(value));
         }
+        const maxRetries = options.maxRetries ?? this.#config.maxRetries;
 
         for (let retry = 0; ; retry++) {
             const attempt = await this.#attempt(url);
             if (attempt.ok) return attempt.body;
-            if (!attempt.retry || retry >= this.#config.maxRetries) throw attempt.error;
+            if (!attempt.retry || retry >= maxRetries) throw attempt.error;
             await sleep(attempt.retryAfter ?? backoff(retry));
         }
     }

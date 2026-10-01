@@ -154,6 +154,13 @@ const redisStore: CacheStore<AccessAnswer> = {
 const mesub = new Mesub({ cache: redisStore });
 ```
 
+Keys read `mesub:access:<project>:<plan>:<wallet>`, so several projects can
+share one Redis. The project id is the one `/v1/project` answers for your key,
+asked once per process; while Mesub cannot answer it, a hash of the API key
+(never the key itself) stands in. Keys written by 0.1, without the project,
+are no longer read and expire on their own TTL: after an upgrade, each wallet
+costs one call to Mesub before it is cached again.
+
 ## Errors
 
 Every failure is a `MesubError` with a `status` (the HTTP status, or `null`)
