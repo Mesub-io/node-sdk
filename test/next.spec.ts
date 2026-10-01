@@ -1,7 +1,7 @@
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 
 import type { AccessAnswer } from '../src/answer.js';
-import { Mesub } from '../src/index.js';
+import { Mesub, type MesubOptions } from '../src/index.js';
 import { MesubError, withMesub, type MesubAccess, type WithMesubOptions } from '../src/next.js';
 
 const BASE = 'https://api.mesub.test';
@@ -50,16 +50,16 @@ async function token(over: { aud?: string; exp?: string } = {}) {
 
 interface Mesh {
     /** What /v1/access answers, per call. */
-    access?: () => Response | Promise<Response>;
+    access?: (init?: RequestInit) => Response | Promise<Response>;
     /** What the JWKS and /v1/project answer; healthy by default. */
     keys?: () => Response;
     project?: () => Response;
 }
 
 /** A Mesub whose API is a function, so each test says what it answers. */
-function mesub(mesh: Mesh = {}) {
+function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     const calls: string[] = [];
-    const fetch = vi.fn(async (input: string | URL | Request) => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
         calls.push(url.pathname);
         if (url.pathname === '/.well-known/jwks.json')
@@ -67,7 +67,7 @@ function mesub(mesh: Mesh = {}) {
         if (url.pathname === '/v1/project')
             return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
-            return (mesh.access ?? (() => Response.json(answer())))();
+            return (mesh.access ?? (() => Response.json(answer())))(init);
         throw new Error(`unexpected ${url.pathname}`);
     });
     const client = new Mesub({
@@ -75,9 +75,17 @@ function mesub(mesh: Mesh = {}) {
         baseUrl: BASE,
         fetch: fetch as unknown as typeof globalThis.fetch,
         maxRetries: 0,
+        ...options,
     });
 
     return { client, calls };
+}
+
+/** Mesub not answering at all, until the call gives up. */
+function hang(init?: RequestInit) {
+    return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+    });
 }
 
 interface Ctx {
@@ -276,6 +284,17 @@ describe('withMesub', () => {
     describe('503, nobody can be identified', () => {
         it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
             const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+
+            const response = await route(client)(get(await bearer()), context);
+
+            expect(response.status).toBe(503);
+            expect(response.headers.get('retry-after')).toBe('30');
+            expect(await response.json()).toEqual({ access: false, reason: 'unavailable' });
+        });
+
+        // A guard holds a request for guardTimeout at most, never for an outage (#24).
+        it('answers 503 with Retry-After when Mesub does not answer within guardTimeout', async () => {
+            const { client } = mesub({ access: hang }, { guardTimeout: 50 });
 
             const response = await route(client)(get(await bearer()), context);
 

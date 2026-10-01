@@ -476,6 +476,144 @@ describe('hasAccess', () => {
     });
 });
 
+// A guard must not hold a request for the length of an outage (#24).
+describe('decide, for the guards', () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+        vi.setSystemTime(START);
+        vi.spyOn(Math, 'random').mockReturnValue(0);
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+    });
+
+    /** Today's retries, so the budget is what cuts the call short. */
+    function guarded(fetch: typeof globalThis.fetch, options: MesubOptions = {}) {
+        return client(fetch, undefined, { maxRetries: 2, ...options });
+    }
+
+    /** Starts it and records when it settled, so fake timers can run first. */
+    function timed<T>(promise: Promise<T>) {
+        const state: { value?: T; at?: number } = {};
+        void promise.then((value) => {
+            state.value = value;
+            state.at = Date.now() - START.getTime();
+        });
+        return state;
+    }
+
+    it('answers within 2 s when Mesub hangs, from the stale answer', async () => {
+        const { fetch } = mockFetch(json(200, answer({ revalidate_after: 0 })), 'hang', 'hang');
+        const mesub = guarded(fetch);
+        await mesub.decide(WALLET, 'pro');
+
+        const decision = timed(mesub.decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(decision.at).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(decision.value).toEqual({
+            access: true,
+            answer: answer({ revalidate_after: 0 }),
+            stale: true,
+        });
+    });
+
+    it('says it timed out for a wallet it never saw', async () => {
+        const { fetch } = mockFetch('hang');
+
+        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        expect(decision.value).toEqual({
+            access: false,
+            answer: null,
+            stale: true,
+            timedOut: true,
+        });
+    });
+
+    it('takes another budget from guardTimeout', async () => {
+        const { fetch } = mockFetch('hang');
+
+        const decision = timed(guarded(fetch, { guardTimeout: 500 }).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect(decision.at).toBe(500);
+    });
+
+    it('does not wait a Retry-After of 30 s', async () => {
+        const { fetch } = mockFetch(json(429, { message: 'slow down' }, { 'retry-after': '30' }));
+
+        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(decision).toEqual({
+            at: 0,
+            value: { access: false, answer: null, stale: true, timedOut: true },
+        });
+    });
+
+    it('retries within the budget, and recovers', async () => {
+        const { fetch } = mockFetch(nest(503, 'down'), json(200, answer()));
+
+        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect(decision.value).toEqual({ access: true, answer: answer(), stale: false });
+    });
+
+    // Mesub said it is down, in time: today's fallback, not a timeout.
+    it('keeps a fast outage a plain fallback once the retries are spent', async () => {
+        const { fetch } = mockFetch(nest(503, 'a'), nest(503, 'b'), nest(503, 'c'));
+
+        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(1_500);
+
+        expect(decision.value).toEqual({ access: false, answer: null, stale: true });
+    });
+
+    it('still throws an integration error', async () => {
+        const { fetch } = mockFetch(nest(401, 'That API key is not valid.'));
+
+        await expect(guarded(fetch).decide(WALLET, 'pro')).rejects.toMatchObject({
+            code: 'unauthorized',
+        });
+    });
+
+    it('fits the /v1/project lookup in the budget too', async () => {
+        const { fetch } = mockFetch('hang');
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            baseUrl: 'https://api.mesub.test',
+            fetch: (async (input: string | URL | Request, init?: RequestInit) =>
+                fetch(input, init)) as typeof globalThis.fetch,
+        });
+
+        const decision = mesub.decide(WALLET, 'pro');
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        // The key hash is real crypto, settled off the fake clock: awaited, not timed.
+        await expect(decision).resolves.toMatchObject({ access: false, timedOut: true });
+        expect(Date.now() - START.getTime()).toBe(2_000);
+        expect(fetch).toHaveBeenCalledOnce();
+    });
+
+    // Called directly, hasAccess keeps the client's own timeout and retries.
+    it('leaves hasAccess to the client timeout and retries', async () => {
+        const { fetch } = mockFetch('hang', 'hang', 'hang');
+
+        const result = timed(guarded(fetch).hasAccess(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(result.at).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(14_500);
+
+        expect(result).toEqual({ at: 16_500, value: false });
+    });
+});
+
 /**
  * A Free plan has no pull retries (#57): a missed pull stops the subscription
  * at once, and /v1/access answers it the way below. Nothing in the SDK depends

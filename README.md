@@ -80,11 +80,11 @@ export class ReportsController {
 
 All three answer a refusal themselves:
 
-| Status  | When                                                                   | Body                                             |
-| ------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
-| **401** | No token, or one that is forged, expired, or for another project       | `{ access: false, reason: 'unauthenticated' }`   |
-| **402** | A valid subscriber without access to that plan                         | `{ access: false, reason: 'no_access', status }` |
-| **503** | Mesub unreachable before anyone could be identified. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
+| Status  | When                                                                                                 | Body                                             |
+| ------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **401** | No token, or one that is forged, expired, or for another project                                     | `{ access: false, reason: 'unauthenticated' }`   |
+| **402** | A valid subscriber without access to that plan                                                       | `{ access: false, reason: 'no_access', status }` |
+| **503** | Nobody can be identified, or no answer within `guardTimeout` for an unseen wallet. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
 
 `onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
 own JSON. In Nest it throws your own exception, and the default refusal is
@@ -116,12 +116,21 @@ await mesub.access(wallet, 'pro', { attempts: true }); // plus the last pull att
   wallet and plan, even stale (for up to 24 hours, see `maxStaleMs`), and
   `false` for one it never saw. `access` throws instead, since it is for
   screens.
+- **The guards** (`requirePlan`, `withMesub`, `RequirePlan`) never hold a
+  request longer than `guardTimeout`, 2 s by default, for the access check:
+  retries happen only while they fit, and a `Retry-After` that would outlast
+  it is not waited. When it runs out, the guard answers from the last answer
+  it knew, like `hasAccess`, or 503 with `Retry-After: 30` for a wallet it
+  never saw, since nobody knows yet whether it pays. Verifying the token is
+  not counted: it needs Mesub only once per process, as said above.
 - A bad key, an unknown plan or a malformed wallet always throws, it is never
   turned into `false`.
 
 Calls to Mesub time out after 5 s and are retried twice, on network errors,
 408, 409, 429 and 5xx, honouring `Retry-After`. These are HTTP retries of the
-SDK's own calls, unrelated to a plan's pull retries.
+SDK's own calls, unrelated to a plan's pull retries. `access` and `hasAccess`,
+called from your own code, keep exactly that: `guardTimeout` binds the guards
+only.
 
 ## Options
 
@@ -134,6 +143,7 @@ new Mesub({
     fetch, // a custom fetch, e.g. bound to your own agent
     cache, // where answers are kept, default: 10,000 entries in memory
     maxStaleMs, // how long a stale answer serves the outage fallback, default 24 h
+    guardTimeout, // the guards' budget for the access check, ms, default 2000
 });
 ```
 

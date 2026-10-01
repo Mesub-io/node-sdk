@@ -14,6 +14,24 @@ export interface TransportConfig {
 /** What one call may change from the client's configuration. */
 export interface CallOptions {
     maxRetries?: number;
+    /**
+     * Epoch ms by which the call settles, retries and waits included: each
+     * attempt is cut at it, and a wait that would outlast it is not waited.
+     */
+    deadline?: number;
+}
+
+/** The errors of calls that gave up because their deadline came, not because Mesub said no. */
+const outOfTime = new WeakSet<MesubError>();
+
+/** Whether a call gave up on its deadline, rather than on Mesub's answer. */
+export function ranOutOfTime(error: unknown): boolean {
+    return error instanceof MesubError && outOfTime.has(error);
+}
+
+function givenUp(error: MesubError): MesubError {
+    outOfTime.add(error);
+    return error;
 }
 
 const INITIAL_RETRY_DELAY = 500;
@@ -42,18 +60,39 @@ export class Transport {
             if (value !== undefined) url.searchParams.set(key, String(value));
         }
         const maxRetries = options.maxRetries ?? this.#config.maxRetries;
+        const { deadline } = options;
 
         for (let retry = 0; ; retry++) {
-            const attempt = await this.#attempt(url);
+            const attempt = await this.#attempt(url, deadline);
             if (attempt.ok) return attempt.body;
             if (!attempt.retry || retry >= maxRetries) throw attempt.error;
-            await sleep(attempt.retryAfter ?? backoff(retry));
+
+            const wait = attempt.retryAfter ?? backoff(retry);
+            // Not even a Retry-After is waited past the deadline: the caller
+            // falls back now rather than at the end of a wait it cannot afford.
+            if (deadline !== undefined && Date.now() + wait >= deadline) {
+                throw givenUp(attempt.error);
+            }
+            await sleep(wait);
         }
     }
 
-    async #attempt(url: URL): Promise<Attempt> {
+    async #attempt(url: URL, deadline: number | undefined): Promise<Attempt> {
+        const left = deadline === undefined ? Infinity : deadline - Date.now();
+
+        if (left <= 0) {
+            const error = new MesubError('No time was left to call Mesub.', {
+                status: null,
+                code: 'unavailable',
+            });
+            return { ok: false, error: givenUp(error), retry: false, retryAfter: null };
+        }
+
+        // Cut at the deadline when it comes before the attempt's own timeout.
+        const timeout = Math.min(this.#config.timeout, left);
+        const cutByDeadline = timeout < this.#config.timeout;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), this.#config.timeout);
+        const timer = setTimeout(() => controller.abort(), timeout);
 
         try {
             const response = await this.#config.fetch(url, {
@@ -98,6 +137,14 @@ export class Transport {
                 retryAfter: retryAfter(response.headers.get('retry-after')),
             };
         } catch (cause) {
+            if (controller.signal.aborted && cutByDeadline) {
+                const error = new MesubError(
+                    `Mesub did not answer within the ${Math.round(timeout)} ms left before the deadline.`,
+                    { status: null, code: 'unavailable', cause },
+                );
+                return { ok: false, error: givenUp(error), retry: false, retryAfter: null };
+            }
+
             const message = controller.signal.aborted
                 ? `Mesub did not answer within ${this.#config.timeout} ms.`
                 : `Could not reach Mesub: ${cause instanceof Error ? cause.message : String(cause)}`;

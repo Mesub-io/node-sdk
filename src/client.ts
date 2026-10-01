@@ -4,7 +4,7 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { MesubError } from './errors.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
-import { type CallOptions, Transport } from './transport.js';
+import { type CallOptions, ranOutOfTime, Transport } from './transport.js';
 
 /** What a guard decided, and on which answer. */
 export interface Decision {
@@ -12,6 +12,11 @@ export interface Decision {
     answer: AccessAnswer | null;
     /** The answer came from the outage fallback, not from Mesub just now. */
     stale: boolean;
+    /**
+     * The guard's time budget ran out before Mesub answered, with no answer
+     * cached for that wallet: the guards answer 503, not 402.
+     */
+    timedOut?: boolean;
 }
 
 export interface MesubOptions {
@@ -41,9 +46,18 @@ export interface MesubOptions {
      * turns the fallback off: an outage then keeps everyone out.
      */
     maxStaleMs?: number;
+    /**
+     * How long the guards (`requirePlan`, `withMesub`, `RequirePlan`) give
+     * Mesub to answer, retries and waits included, in milliseconds. Defaults
+     * to 2000. Once it runs out the guard answers from the cache, even stale,
+     * or 503 with Retry-After for a wallet it never saw. `access` and
+     * `hasAccess`, called directly, are not bound by it.
+     */
+    guardTimeout?: number;
 }
 
 const DEFAULT_BASE_URL = 'https://api.mesub.io';
+const DEFAULT_GUARD_TIMEOUT = 2_000;
 
 export class Mesub {
     /** @internal */
@@ -58,6 +72,7 @@ export class Mesub {
     private knownProjectId: string | undefined;
     /** The cache scope while the project id cannot be asked. */
     private readonly apiKeyScope: () => Promise<string>;
+    private readonly guardTimeout: number;
 
     constructor(options: MesubOptions = {}) {
         const apiKey = options.apiKey || process.env['MESUB_API_KEY'];
@@ -79,6 +94,11 @@ export class Mesub {
             options.cache ?? new MemoryStore<AccessAnswer>(),
             options.maxStaleMs === undefined ? {} : { maxStaleMs: options.maxStaleMs },
         );
+        this.guardTimeout = options.guardTimeout ?? DEFAULT_GUARD_TIMEOUT;
+        // NaN or 0 would cut every guard's call before it starts.
+        if (!(this.guardTimeout > 0)) {
+            throw new Error('guardTimeout must be a positive number of milliseconds.');
+        }
         let apiKeyScope: Promise<string> | undefined;
         this.apiKeyScope = () => (apiKeyScope ??= hashScope(apiKey));
         const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -123,11 +143,14 @@ export class Mesub {
      * token verifier usually asked already), in one attempt. While it cannot
      * be asked, a hash of the API key, never the key itself.
      */
-    private async cacheScope(): Promise<string> {
+    private async cacheScope(deadline?: number): Promise<string> {
         if (this.knownProjectId !== undefined) return this.knownProjectId;
 
         try {
-            await this.projectId({ maxRetries: 0 });
+            await this.projectId({
+                maxRetries: 0,
+                ...(deadline === undefined ? {} : { deadline }),
+            });
         } catch {
             // Mesub unreachable, or a bad key that /v1/access reports itself.
         }
@@ -153,7 +176,12 @@ export class Mesub {
      * `access`, in the cache scope its caller resolved once, or without the
      * cache at all (`null`) for an answer with its attempts.
      */
-    private async ask(wallet: string, plan: string, scope: string | null): Promise<AccessAnswer> {
+    private async ask(
+        wallet: string,
+        plan: string,
+        scope: string | null,
+        call: CallOptions = {},
+    ): Promise<AccessAnswer> {
         const attempts = scope === null;
 
         if (!attempts) {
@@ -163,12 +191,16 @@ export class Mesub {
         }
 
         // Throws a MesubError on any failure, which goes straight to the caller.
-        const answer = (await this.transport.get('/v1/access', {
-            wallet,
-            plan,
-            // Left out when not asked: the transport drops undefined values.
-            attempts: attempts || undefined,
-        })) as AccessAnswer;
+        const answer = (await this.transport.get(
+            '/v1/access',
+            {
+                wallet,
+                plan,
+                // Left out when not asked: the transport drops undefined values.
+                attempts: attempts || undefined,
+            },
+            call,
+        )) as AccessAnswer;
 
         // A heavy answer must not replace the light one a guard reads.
         if (!attempts) await this.cache.write(wallet, plan, answer, scope);
@@ -186,23 +218,35 @@ export class Mesub {
      * integration, not a denial.
      */
     async hasAccess(wallet: string, plan: string): Promise<boolean> {
-        return (await this.decide(wallet, plan)).access;
+        return (await this.decideBy(wallet, plan)).access;
     }
 
     /**
-     * `hasAccess`, with the answer it decided on: what the middlewares hand
-     * the route. `answer` is null only for a wallet never seen during an
-     * outage, `stale` is true when the answer came from the fallback.
+     * `hasAccess`, with the answer it decided on, within `guardTimeout`: what
+     * the middlewares hand the route. `answer` is null only for a wallet never
+     * seen during an outage, `stale` is true when the answer came from the
+     * fallback, `timedOut` when the budget ran out on a wallet never seen.
      *
      * @internal
      */
     async decide(wallet: string, plan: string): Promise<Decision> {
+        return this.decideBy(wallet, plan, Date.now() + this.guardTimeout);
+    }
+
+    /**
+     * The decision itself. With a deadline (the guards), every call to Mesub
+     * fits before it: attempts are cut at it and a Retry-After that would
+     * outlast it is not waited. Without one (`hasAccess` called directly),
+     * the client's timeout and retries, as configured.
+     */
+    private async decideBy(wallet: string, plan: string, deadline?: number): Promise<Decision> {
+        const call: CallOptions = deadline === undefined ? {} : { deadline };
         // Once: while the project cannot be asked, asking again for the
         // fallback would only wait for the same outage twice.
-        const scope = await this.cacheScope();
+        const scope = await this.cacheScope(deadline);
 
         try {
-            const answer = await this.ask(wallet, plan, scope);
+            const answer = await this.ask(wallet, plan, scope, call);
 
             return { access: answer.access, answer, stale: false };
         } catch (error) {
@@ -216,8 +260,11 @@ export class Mesub {
             // The last answer known, even stale; a wallet never seen stays out.
             const cached = await this.cache.read(wallet, plan, scope);
 
-            return cached
-                ? { access: cached.value.access, answer: cached.value, stale: true }
+            if (cached) return { access: cached.value.access, answer: cached.value, stale: true };
+
+            // Out of time is not Mesub saying no: nobody knows, so a retry later.
+            return ranOutOfTime(error)
+                ? { access: false, answer: null, stale: true, timedOut: true }
                 : { access: false, answer: null, stale: true };
         }
     }

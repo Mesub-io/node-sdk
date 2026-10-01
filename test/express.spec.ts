@@ -8,7 +8,7 @@ import request from 'supertest';
 
 import type { AccessAnswer } from '../src/answer.js';
 import { MesubError, requirePlan, type MesubLocals } from '../src/express.js';
-import { Mesub } from '../src/index.js';
+import { Mesub, type MesubOptions } from '../src/index.js';
 
 const BASE = 'https://api.mesub.test';
 const PROJECT = 'proj_1';
@@ -55,16 +55,16 @@ async function token(over: { aud?: string; exp?: string } = {}) {
 
 interface Mesh {
     /** What /v1/access answers, per call. */
-    access?: () => Response | Promise<Response>;
+    access?: (init?: RequestInit) => Response | Promise<Response>;
     /** What the JWKS and /v1/project answer; healthy by default. */
     keys?: () => Response;
     project?: () => Response;
 }
 
 /** A Mesub whose API is a function, so each test says what it answers. */
-function mesub(mesh: Mesh = {}) {
+function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     const calls: string[] = [];
-    const fetch = vi.fn(async (input: string | URL | Request) => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
         calls.push(url.pathname);
         if (url.pathname === '/.well-known/jwks.json')
@@ -72,7 +72,7 @@ function mesub(mesh: Mesh = {}) {
         if (url.pathname === '/v1/project')
             return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
-            return (mesh.access ?? (() => Response.json(answer())))();
+            return (mesh.access ?? (() => Response.json(answer())))(init);
         throw new Error(`unexpected ${url.pathname}`);
     });
     const client = new Mesub({
@@ -80,9 +80,17 @@ function mesub(mesh: Mesh = {}) {
         baseUrl: BASE,
         fetch: fetch as unknown as typeof globalThis.fetch,
         maxRetries: 0,
+        ...options,
     });
 
     return { client, calls };
+}
+
+/** Mesub not answering at all, until the call gives up. */
+function hang(init?: RequestInit) {
+    return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+    });
 }
 
 /** An app with one guarded route that echoes res.locals.mesub. */
@@ -269,6 +277,39 @@ describe('requirePlan', () => {
             expect(response.status).toBe(503);
             expect(response.headers['retry-after']).toBe('30');
             expect(response.body).toEqual({ access: false, reason: 'unavailable' });
+        });
+
+        // A guard holds a request for guardTimeout at most, never for an outage (#24).
+        it('answers 503 with Retry-After when Mesub does not answer within guardTimeout', async () => {
+            const { client } = mesub({ access: hang }, { guardTimeout: 50 });
+
+            const response = await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+            expect(response.body).toEqual({ access: false, reason: 'unavailable' });
+        });
+
+        it('keeps a known subscriber in when the budget runs out', async () => {
+            let down = false;
+            const { client } = mesub(
+                {
+                    access: (init) =>
+                        down ? hang(init) : Response.json(answer({ revalidate_after: 0 })),
+                },
+                { guardTimeout: 50 },
+            );
+            const server = app(client);
+            const bearer = `Bearer ${await token()}`;
+            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+
+            down = true;
+            const response = await request(server).get('/pro').set('Authorization', bearer);
+
+            expect(response.status).toBe(200);
+            expect(response.body.stale).toBe(true);
         });
 
         it('answers 503 when the project id cannot be fetched', async () => {

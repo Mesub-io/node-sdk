@@ -1,5 +1,5 @@
 import { MesubError } from '../src/errors.js';
-import { Transport } from '../src/transport.js';
+import { ranOutOfTime, Transport } from '../src/transport.js';
 import { json, mockFetch, nest } from './helpers.js';
 
 function transport(fetch: typeof globalThis.fetch, overrides: { maxRetries?: number } = {}) {
@@ -378,5 +378,115 @@ describe('timeouts and network errors', () => {
         await transport(fetch).get('/v1/access');
 
         expect(vi.getTimerCount()).toBe(0);
+    });
+});
+
+// The guards' budget: one deadline for the whole call, retries and waits included.
+describe('a deadline', () => {
+    it('cuts an attempt at the deadline, not at the 5 s timeout', async () => {
+        const { fetch } = mockFetch('hang', json(200, {}));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        const { error } = await result;
+
+        expect(error).toMatchObject({ status: null, code: 'unavailable' });
+        expect(error!.message).toBe(
+            'Mesub did not answer within the 2000 ms left before the deadline.',
+        );
+        expect(ranOutOfTime(error)).toBe(true);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('still retries when the backoff fits before it', async () => {
+        const { fetch } = mockFetch(nest(503, 'x'), json(200, { ok: 1 }));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect((await result).value).toEqual({ ok: 1 });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('cuts the retry at what is left, not at a full timeout', async () => {
+        const { fetch } = mockFetch(nest(503, 'x'), 'hang');
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        const { error } = await result;
+
+        expect(error!.message).toBe(
+            'Mesub did not answer within the 1500 ms left before the deadline.',
+        );
+        expect(ranOutOfTime(error)).toBe(true);
+    });
+
+    it('never waits a Retry-After that outlasts it', async () => {
+        const { fetch } = mockFetch(json(429, { message: 'slow down' }, { 'retry-after': '30' }));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        const { error } = await result;
+
+        expect(error).toMatchObject({ status: 429, code: 'rate_limited', message: 'slow down' });
+        expect(ranOutOfTime(error)).toBe(true);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits a Retry-After that fits', async () => {
+        const limited = json(429, { message: 'slow down' }, { 'retry-after': '1' });
+        const { fetch } = mockFetch(limited, json(200, { ok: 1 }));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect((await result).value).toEqual({ ok: 1 });
+    });
+
+    it('calls nothing once it has passed', async () => {
+        const { fetch } = mockFetch(json(200, {}));
+
+        const { error } = await settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() - 1 }),
+        );
+
+        expect(error).toMatchObject({ code: 'unavailable' });
+        expect(ranOutOfTime(error)).toBe(true);
+        expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('marks no error of a call without one, nor one Mesub answered in time', async () => {
+        const { fetch } = mockFetch(nest(404, 'No plan of yours is named pro.'));
+
+        const { error } = await settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        expect(error).toMatchObject({ code: 'plan_not_found' });
+        expect(ranOutOfTime(error)).toBe(false);
+        expect(ranOutOfTime(new Error('x'))).toBe(false);
+    });
+
+    it('lets maxRetries be lowered for one call', async () => {
+        const { fetch } = mockFetch(nest(503, 'x'), json(200, {}));
+
+        await expect(
+            transport(fetch).get('/v1/access', {}, { maxRetries: 0 }),
+        ).rejects.toMatchObject({ code: 'unavailable' });
+        expect(fetch).toHaveBeenCalledTimes(1);
     });
 });
