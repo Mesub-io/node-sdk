@@ -24,8 +24,9 @@ npm install @mesub/node
    `Authorization: Bearer` and in a `mesub-token` cookie.
 2. This package **verifies that token locally**, with Mesub's public keys
    (fetched once from `/.well-known/jwks.json`), and learns which wallet is
-   behind the request. The wallet always comes from that token, never from
-   anything your code or the request passes.
+   behind the request. The wallet comes from that token, never from anything
+   the request names. Already have your own login? See
+   [Bring your own auth](#bring-your-own-auth).
 3. It asks Mesub whether that wallet has access to the plan, and caches the
    answer for as long as Mesub says it stays true (`revalidate_after`).
 
@@ -80,17 +81,66 @@ export class ReportsController {
 
 All three answer a refusal themselves:
 
-| Status  | When                                                                   | Body                                             |
-| ------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
-| **401** | No token, or one that is forged, expired, or for another project       | `{ access: false, reason: 'unauthenticated' }`   |
-| **402** | A valid subscriber without access to that plan                         | `{ access: false, reason: 'no_access', status }` |
-| **503** | Mesub unreachable before anyone could be identified. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
+| Status  | When                                                                    | Body                                             |
+| ------- | ----------------------------------------------------------------------- | ------------------------------------------------ |
+| **401** | No token, or one forged, expired or for another project; or no `wallet` | `{ access: false, reason: 'unauthenticated' }`   |
+| **402** | A valid subscriber without access to that plan                          | `{ access: false, reason: 'no_access', status }` |
+| **503** | Mesub unreachable before anyone could be identified. `Retry-After: 30`  | `{ access: false, reason: 'unavailable' }`       |
 
 `onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
 own JSON. In Nest it throws your own exception, and the default refusal is
 thrown if it returns. A broken integration (a bad API key, an unknown plan)
 is never a refusal: Express gets it through `next(err)`, Next and Nest through
 a thrown error, answered 500.
+
+## Bring your own auth
+
+Your users already sign in with your own login (a session, Sign-In With
+Solana, NextAuth, Passport)? Give the guard a `wallet` function: it returns the
+signed-in user's wallet, and the Mesub access token is then never read, so
+`@mesub/react` is not needed.
+
+> [!WARNING]
+> Return the wallet from your **verified** session only: the one your login
+> checked. Never from the query string, the body, a header or a cookie the
+> caller can set. Otherwise anyone types a subscriber's address and gets in.
+
+- `null` or `undefined` (nobody signed in) answers **401**, like a missing token.
+- A string that is not a Solana address (base58, 32 to 44 characters) throws a
+  `MesubError` `invalid_request`: it is a bug in the integration (the user id
+  or the email returned instead of the wallet), so it is answered 500, not
+  turned into a 401 that would look like a sign-in problem.
+- It may be async. If it throws, that error is thrown as is.
+- 402 and 503 are answered as above, and `userId` is `null` on what the route
+  receives, since no Mesub user is behind it.
+
+With Express, after your session middleware:
+
+```ts
+app.get(
+    '/api/reports',
+    requirePlan('pro', { wallet: (req) => req.session.user?.wallet }),
+    (req, res) => res.json(buildReport(res.locals.mesub.wallet)),
+);
+```
+
+With Next.js:
+
+```ts
+export const GET = withMesub(
+    async (request, mesub) => Response.json(await buildReport(mesub.wallet)),
+    { plan: 'pro', wallet: async () => (await auth())?.user?.wallet },
+);
+```
+
+With NestJS, listing your auth guard first so it has set `request.user`:
+
+```ts
+@UseGuards(
+    AuthGuard('jwt'),
+    RequirePlan<AuthedRequest>('pro', { wallet: (request) => request.user?.wallet }),
+)
+```
 
 ## Without a middleware
 

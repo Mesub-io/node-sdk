@@ -448,6 +448,151 @@ describe('RequirePlan', () => {
         });
     });
 
+    // The merchant's own login (#23): the wallet comes from their session, not our token.
+    describe('wallet from your own auth', () => {
+        const OTHER = 'SysvarC1ock11111111111111111111111111111111';
+
+        interface AuthedRequest {
+            headers: Record<string, string | undefined>;
+            user?: { wallet: string };
+        }
+
+        /** The merchant's own auth guard, listed before RequirePlan: it sets `user`. */
+        class SessionGuard {
+            canActivate(context: ExecutionContext) {
+                const request = context.switchToHttp().getRequest<AuthedRequest>();
+                if (request.headers['x-session']) request.user = { wallet: OTHER };
+                return true;
+            }
+        }
+
+        async function authedApp(
+            client: Mesub,
+            wallet: NonNullable<
+                RequirePlanOptions<AuthedRequest & { mesub?: MesubAccess }>['wallet']
+            >,
+        ) {
+            @Controller()
+            class RouteController {
+                @Get('pro')
+                @UseGuards(SessionGuard, RequirePlan('pro', { client, wallet }))
+                pro(@MesubAccess() mesub: MesubAccess) {
+                    return mesub;
+                }
+            }
+
+            const module = await Test.createTestingModule({
+                controllers: [RouteController],
+            }).compile();
+            const nest = module.createNestApplication({ logger: false });
+            await nest.init();
+            apps.push(nest);
+
+            return nest.getHttpServer();
+        }
+
+        it('asks Mesub about the wallet the resolver returns', async () => {
+            const { client, calls } = mesub();
+
+            const response = await request(await authedApp(client, (req) => req.user?.wallet))
+                .get('/pro')
+                .set('x-session', 'abc');
+
+            expect(response.status).toBe(200);
+            expect(response.body).toEqual({
+                userId: null,
+                wallet: OTHER,
+                answer: answer(),
+                stale: false,
+            });
+            // No token to verify: the keys are never fetched.
+            expect(calls).toContain('/v1/access');
+            expect(calls).not.toContain('/.well-known/jwks.json');
+        });
+
+        it('ignores a valid Mesub token once a resolver is given', async () => {
+            const { client } = mesub();
+            const decide = vi.spyOn(client, 'decide');
+
+            await request(await authedApp(client, (req) => req.user?.wallet))
+                .get('/pro')
+                .set('x-session', 'abc')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+
+            expect(decide).toHaveBeenCalledWith(OTHER, 'pro');
+        });
+
+        it.each([
+            ['null', () => null],
+            ['undefined', () => undefined],
+        ])('answers 401 when it returns %s, even with a valid token', async (_label, wallet) => {
+            const { client, calls } = mesub();
+
+            const response = await request(await authedApp(client, wallet))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(401);
+            expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(calls).toEqual([]);
+        });
+
+        it('waits for an async resolver', async () => {
+            const { client } = mesub();
+
+            const response = await request(
+                await authedApp(client, async (req) => req.user?.wallet ?? null),
+            )
+                .get('/pro')
+                .set('x-session', 'abc');
+
+            expect(response.status).toBe(200);
+            expect(response.body.wallet).toBe(OTHER);
+        });
+
+        it('hands the resolver the request and the execution context', async () => {
+            const { client } = mesub();
+            const wallet = vi.fn(() => OTHER);
+            const headers = { 'x-session': 'abc' };
+            const context = {
+                switchToHttp: () => ({ getRequest: () => ({ headers }), getResponse: () => ({}) }),
+            } as unknown as ExecutionContext;
+
+            await new (RequirePlan('pro', { client, wallet }))().canActivate(context);
+
+            expect(wallet).toHaveBeenCalledWith({ headers, mesub: expect.any(Object) }, context);
+        });
+
+        // A bug in the integration, not a sign-in problem: never a quiet 401.
+        it('throws invalid_request when it returns something that is not an address', async () => {
+            const { client, calls } = mesub();
+            const guard = new (RequirePlan('pro', { client, wallet: () => 'ada@example.com' }))();
+            const context = {
+                switchToHttp: () => ({
+                    getRequest: () => ({ headers: {} }),
+                    getResponse: () => ({}),
+                }),
+            } as unknown as ExecutionContext;
+
+            const thrown = await (guard.canActivate(context) as Promise<boolean>).catch(
+                (error: unknown) => error,
+            );
+
+            expect(thrown).toBeInstanceOf(MesubError);
+            expect(thrown).toMatchObject({ code: 'invalid_request' });
+            expect(calls).toEqual([]);
+        });
+
+        it('answers 500 for it over HTTP', async () => {
+            const { client } = mesub();
+
+            await request(await authedApp(client, () => 'not-an-address'))
+                .get('/pro')
+                .expect(500);
+        });
+    });
+
     describe('on a whole controller', () => {
         it('guards every route of it', async () => {
             const { client } = mesub();

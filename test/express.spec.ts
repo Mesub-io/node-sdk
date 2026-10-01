@@ -329,6 +329,114 @@ describe('requirePlan', () => {
         });
     });
 
+    // The merchant's own login (#23): the wallet comes from their session, not our token.
+    describe('wallet from your own auth', () => {
+        const OTHER = 'SysvarC1ock11111111111111111111111111111111';
+
+        it('asks Mesub about the wallet the resolver returns, and hands it the request', async () => {
+            const { client, calls } = mesub();
+            const wallet = vi.fn((req: ExpressRequest) =>
+                req.headers['x-session'] ? OTHER : null,
+            );
+
+            const response = await request(app(client, { wallet }))
+                .get('/pro')
+                .set('x-session', 'abc');
+
+            expect(response.status).toBe(200);
+            expect(response.body).toEqual({
+                userId: null,
+                wallet: OTHER,
+                answer: answer(),
+                stale: false,
+            });
+            expect(wallet.mock.calls[0]![0].headers['x-session']).toBe('abc');
+            // No token to verify: the keys are never fetched.
+            expect(calls).toContain('/v1/access');
+            expect(calls).not.toContain('/.well-known/jwks.json');
+        });
+
+        it('ignores a valid Mesub token once a resolver is given', async () => {
+            const { client } = mesub();
+            const decide = vi.spyOn(client, 'decide');
+
+            await request(app(client, { wallet: () => OTHER }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+
+            expect(decide).toHaveBeenCalledWith(OTHER, 'pro');
+        });
+
+        it.each([
+            ['null', null],
+            ['undefined', undefined],
+        ])('answers 401 when it returns %s, even with a valid token', async (_label, value) => {
+            const { client, calls } = mesub();
+
+            const response = await request(app(client, { wallet: () => value }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(401);
+            expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(calls).toEqual([]);
+        });
+
+        it('waits for an async resolver', async () => {
+            const { client } = mesub();
+            const wallet = async () => {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                return OTHER;
+            };
+
+            const response = await request(app(client, { wallet })).get('/pro');
+
+            expect(response.status).toBe(200);
+            expect(response.body.wallet).toBe(OTHER);
+        });
+
+        it('answers 402 for a resolved wallet without access', async () => {
+            const { client } = mesub({
+                access: () => Response.json(answer({ access: false, status: 'none' })),
+            });
+
+            await request(app(client, { wallet: () => OTHER }))
+                .get('/pro')
+                .expect(402);
+        });
+
+        // A bug in the integration, not a sign-in problem: never a quiet 401.
+        it.each([
+            ['an email', 'ada@example.com'],
+            ['an empty string', ''],
+            ['a number', 42 as unknown as string],
+        ])('forwards %s to next(err) as invalid_request', async (_label, value) => {
+            const { client, calls } = mesub();
+
+            const response = await request(app(client, { wallet: () => value })).get('/pro');
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'invalid_request' });
+            expect(calls).toEqual([]);
+        });
+
+        it('forwards a resolver that throws to next(err)', async () => {
+            const { client } = mesub();
+
+            const response = await request(
+                app(client, {
+                    wallet: () => {
+                        throw new Error('session store down');
+                    },
+                }),
+            ).get('/pro');
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'other' });
+        });
+    });
+
     // A broken integration must reach the merchant's error handler, not look like a denial.
     describe('integration errors', () => {
         it.each([

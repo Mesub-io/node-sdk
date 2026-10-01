@@ -18,11 +18,12 @@ import {
     guard,
     type MesubAccess as Access,
     UNAVAILABLE_RETRY_AFTER_S,
+    type WalletResolver,
 } from './guard.js';
 import type { HeaderSource } from './tokens.js';
 
 export { MesubError } from './errors.js';
-export type { Denial, DenialReason } from './guard.js';
+export type { Denial, DenialReason, WalletResult } from './guard.js';
 
 /** Who is asking and what Mesub answered, as `@MesubAccess()` gives it. */
 export type MesubAccess = Access;
@@ -34,7 +35,11 @@ export interface MesubRequest {
     mesub?: MesubAccess;
 }
 
-export interface RequirePlanOptions {
+/**
+ * `Request` is your request type, as your own auth guard leaves it (with
+ * `user` set by Passport, say): what the `wallet` option reads.
+ */
+export interface RequirePlanOptions<Request extends MesubRequest = MesubRequest> {
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
     /**
@@ -42,6 +47,15 @@ export interface RequirePlanOptions {
      * status and body. If it returns, the default refusal is thrown.
      */
     onDenied?: (denial: Denial, request: MesubRequest) => void;
+    /**
+     * Take the wallet from your own auth instead of a Mesub access token, which
+     * is then never read. Return the wallet of the signed-in user, from your
+     * **verified** session (list your auth guard before `RequirePlan` in
+     * `@UseGuards`), never from the query, the body or a header the caller
+     * sets. `null` or `undefined` answers 401; a string that is not a Solana
+     * address throws a `MesubError` `invalid_request`, answered 500.
+     */
+    wallet?: WalletResolver<[request: Request, context: ExecutionContext]>;
 }
 
 /** Express has `setHeader`, a Fastify reply has `header`. */
@@ -60,17 +74,28 @@ function setHeader(response: HeaderSink, name: string, value: string) {
  * plan: `@UseGuards(RequirePlan('pro'))` on a controller or a route.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
- * header or the `mesub-token` cookie. Refusals throw an `HttpException` of 401
- * (no valid token), 402 (no access) or 503 with Retry-After (Mesub unreachable
- * while nobody could be identified yet). Integration errors are thrown as
- * they are, for Nest to log and answer 500.
+ * header or the `mesub-token` cookie, or who your `wallet` option says when
+ * given. Refusals throw an `HttpException` of 401 (no valid token, or no
+ * wallet), 402 (no access) or 503 with Retry-After (Mesub unreachable while
+ * nobody could be identified yet). Integration errors are thrown as they
+ * are, for Nest to log and answer 500.
  */
-export function RequirePlan(plan: string, options: RequirePlanOptions = {}): Type<CanActivate> {
+export function RequirePlan<Request extends MesubRequest = MesubRequest>(
+    plan: string,
+    options: RequirePlanOptions<Request> = {},
+): Type<CanActivate> {
+    const { wallet } = options;
+
     class MesubPlanGuard implements CanActivate {
         async canActivate(context: ExecutionContext): Promise<boolean> {
             const http = context.switchToHttp();
-            const request = http.getRequest<MesubRequest>();
-            const outcome = await guard(options.client ?? defaultClient(), request.headers, plan);
+            const request = http.getRequest<Request>();
+            const outcome = await guard(
+                options.client ?? defaultClient(),
+                request.headers,
+                plan,
+                wallet && (() => wallet(request, context)),
+            );
 
             if (outcome.allowed) {
                 request.mesub = accessOf(outcome);

@@ -345,6 +345,103 @@ describe('withMesub', () => {
         });
     });
 
+    // The merchant's own login (#23): the wallet comes from their session, not our token.
+    describe('wallet from your own auth', () => {
+        const OTHER = 'SysvarC1ock11111111111111111111111111111111';
+
+        it('asks Mesub about the wallet the resolver returns, and hands it the request', async () => {
+            const { client, calls } = mesub();
+            const wallet = vi.fn((request: Request) =>
+                request.headers.get('x-session') ? OTHER : null,
+            );
+            const request = get({ 'x-session': 'abc' });
+
+            const response = await route(client, { wallet })(request, context);
+
+            expect(response.status).toBe(200);
+            expect(await response.json()).toEqual({
+                mesub: { userId: null, wallet: OTHER, answer: answer(), stale: false },
+                params: { id: '42' },
+            });
+            expect(wallet).toHaveBeenCalledWith(request);
+            // No token to verify: the keys are never fetched.
+            expect(calls).toContain('/v1/access');
+            expect(calls).not.toContain('/.well-known/jwks.json');
+        });
+
+        it('ignores a valid Mesub token once a resolver is given', async () => {
+            const { client } = mesub();
+            const decide = vi.spyOn(client, 'decide');
+
+            const response = await route(client, { wallet: () => OTHER })(
+                get(await bearer()),
+                context,
+            );
+
+            expect(response.status).toBe(200);
+            expect(decide).toHaveBeenCalledWith(OTHER, 'pro');
+        });
+
+        it.each([
+            ['null', null],
+            ['undefined', undefined],
+        ])('answers 401 when it returns %s, even with a valid token', async (_label, value) => {
+            const { client, calls } = mesub();
+            const handler = vi.fn(() => new Response('ok'));
+
+            const response = await withMesub(handler, {
+                plan: 'pro',
+                client,
+                wallet: () => value,
+            })(get(await bearer()), context);
+
+            expect(response.status).toBe(401);
+            expect(await response.json()).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(handler).not.toHaveBeenCalled();
+            expect(calls).toEqual([]);
+        });
+
+        it('waits for an async resolver', async () => {
+            const { client } = mesub();
+
+            const response = await route(client, { wallet: async () => OTHER })(get(), context);
+
+            expect(response.status).toBe(200);
+            expect(((await response.json()) as { mesub: MesubAccess }).mesub.wallet).toBe(OTHER);
+        });
+
+        it('answers 402 for a resolved wallet without access', async () => {
+            const { client } = mesub({
+                access: () => Response.json(answer({ access: false, status: 'none' })),
+            });
+
+            const response = await route(client, { wallet: () => OTHER })(get(), context);
+
+            expect(response.status).toBe(402);
+        });
+
+        // A bug in the integration, not a sign-in problem: never a quiet 401.
+        it.each([
+            ['an email', 'ada@example.com'],
+            ['an empty string', ''],
+        ])('throws invalid_request on %s', async (_label, value) => {
+            const { client, calls } = mesub();
+            const handler = vi.fn(() => new Response('ok'));
+
+            const error = await withMesub(handler, { plan: 'pro', client, wallet: () => value })(
+                get(),
+                context,
+            ).catch((caught: unknown) => caught);
+
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({ code: 'invalid_request', status: null });
+            // What came back may be an email: it stays out of the logs.
+            if (value) expect((error as MesubError).message).not.toContain(value);
+            expect(handler).not.toHaveBeenCalled();
+            expect(calls).toEqual([]);
+        });
+    });
+
     // A broken integration must reach Next as a thrown error, not look like a denial.
     describe('integration errors', () => {
         it.each([
