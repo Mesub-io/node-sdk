@@ -25,7 +25,7 @@ export default defineConfig({
     dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
     clean: true,
     sourcemap: true,
-    target: 'node20',
+    target: 'node22',
     // Peer dependencies are the merchant's own copy, never bundled.
     external: ['express', 'next', '@nestjs/common'],
 });

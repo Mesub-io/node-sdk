@@ -457,8 +457,12 @@ wallet granted is not found by its external id. `subscriptions.create` then
 
 ## Requirements
 
-Node 20 or later. Express, Next and `@nestjs/common` are optional peer
+Node 22 or later. Express, Next and `@nestjs/common` are optional peer
 dependencies: install the one you use. `jose` is the only runtime dependency.
+
+What CI runs the tests against: Node 22 and 24; Express 5, and Express 4 on
+Node 22; Nest 12. `@mesub/node/next` imports nothing from Next, only the Web
+`Request` and `Response`, so no Next version is installed to test it.
 
 ## Development
 
@@ -473,19 +477,15 @@ pnpm check:exports # every entry resolves through import and require, shares one
                    # and the fake Mesub stays in @mesub/node/testing
 ```
 
-The pre-push hook runs all of it, as CI does on Node 20, 22 and 24. CI
+The pre-push hook runs all of it, as CI does on Node 22 and 24. CI
 measures coverage on Node 24, fails under 90%, and keeps the report as the
 `coverage` artifact of the run.
 
 ### Releasing
 
-Bump `version` in `package.json` and `VERSION` in `src/version.ts` (and
-`API_VERSION` there only when the release follows a newer API), merge, then
-push a matching tag on main (`git tag v0.2.0 origin/main && git push origin
-v0.2.0`). The Publish workflow refuses a tag that is not on main or does not
-name the version, runs every check, then waits for a reviewer of the `npm`
-environment to approve before publishing with provenance. A prerelease
-(`v0.2.0-rc.1`) is published under `next`.
+A version tag on main publishes, once a reviewer approves: see
+[RELEASING.md](./RELEASING.md) for the one-time setup and the checklist, and
+[CHANGELOG.md](./CHANGELOG.md) for what changed.
 
 ### Contract test
 
