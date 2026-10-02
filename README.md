@@ -478,8 +478,11 @@ The pre-push hook runs all of it, as CI does on Node 20, 22 and 24.
 
 Bump `version` in `package.json` and `VERSION` in `src/version.ts` (and
 `API_VERSION` there only when the release follows a newer API), merge, then
-push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Publish
-workflow checks, builds and publishes with provenance.
+push a matching tag on main (`git tag v0.2.0 origin/main && git push origin
+v0.2.0`). The Publish workflow refuses a tag that is not on main or does not
+name the version, runs every check, then waits for a reviewer of the `npm`
+environment to approve before publishing with provenance. A prerelease
+(`v0.2.0-rc.1`) is published under `next`.
 
 ### Contract test
 
