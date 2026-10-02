@@ -5,7 +5,7 @@ import type { CacheStore } from './cache/store.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
 import { apiKeyOf, baseUrlOf, headersOf, issuerOf, numberOf } from './options.js';
-import { Subscriptions } from './subscriptions.js';
+import { type ServerSubscription, Subscriptions } from './subscriptions.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
 import { accessAnswerFrom, accessListFrom } from './validate.js';
@@ -127,7 +127,9 @@ export class Mesub {
                 integer: true,
             }),
         });
-        this.subscriptions = new Subscriptions(this.transport);
+        this.subscriptions = new Subscriptions(this.transport, (subscription) =>
+            this.landed(subscription),
+        );
         const store = options.cache ?? new MemoryStore<AccessAnswer | AccessList>();
         const staleness =
             options.maxStaleMs === undefined
@@ -306,6 +308,39 @@ export class Mesub {
     }
 
     /**
+     * A subscription `submit`, `retrieve` or `list` answered (#33): once it
+     * grants access (`active`, or `cancelled` before its end), the answers
+     * cached for its customer that say no are dropped, by wallet, external
+     * id and email, for its plan and in the list of every plan. Without it, a
+     * `hasAccess` right after a submit kept answering the cached no until
+     * `revalidate_after` ran out. A store that fails costs nothing more than
+     * that: it never throws.
+     */
+    private async landed(subscription: ServerSubscription): Promise<void> {
+        const { plan } = subscription;
+
+        if (!subscription.access) return;
+
+        try {
+            for (const asked of customersOf(subscription)) {
+                const slot = await this.slotOf(asked);
+
+                if (plan !== null) {
+                    await this.cache.forget(slot.who, plan, slot.scope, (answer) => !answer.access);
+                }
+                await this.lists.forget(
+                    slot.who,
+                    null,
+                    slot.scope,
+                    (list) => !list.plans.some((answer) => answer.plan === plan && answer.access),
+                );
+            }
+        } catch {
+            // The answers stay cached until their revalidate_after, as before.
+        }
+    }
+
+    /**
      * Whether that customer has access to that plan, for a guard. The
      * customer is the same as for `access`, a wallet string included.
      *
@@ -379,6 +414,17 @@ type HmacKey = Awaited<ReturnType<typeof crypto.subtle.importKey>>;
 interface Slot {
     scope: string;
     who: string;
+}
+
+/** Every way a subscription's customer can be asked about: its wallet, external id and email. */
+function customersOf(subscription: ServerSubscription): Asked[] {
+    const { wallet, external_id, email } = subscription;
+    const customers: Customer[] = [{ wallet }];
+
+    if (external_id) customers.push({ external_id });
+    if (email) customers.push({ email });
+
+    return customers.map(customerOf);
 }
 
 /**

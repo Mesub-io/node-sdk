@@ -56,4 +56,8 @@ export class MemoryStore<T = unknown> implements CacheStore<T> {
             this.entries.delete(oldest);
         }
     }
+
+    delete(key: string): void {
+        this.entries.delete(key);
+    }
 }

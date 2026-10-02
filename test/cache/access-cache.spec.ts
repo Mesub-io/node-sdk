@@ -257,6 +257,23 @@ describe('AccessCache', () => {
             await expect(cache.read(WALLET, 'pro')).resolves.toBeUndefined();
         });
 
+        it('ignores a store that fails to delete', async () => {
+            const { store } = setup();
+            const cache = new AccessCache<Answer>(
+                {
+                    get: (key) => store.get(key),
+                    set: (key, entry, ttl) => store.set(key, entry, ttl),
+                    delete: async () => Promise.reject(new Error('READONLY')),
+                },
+                { now: () => NOW },
+            );
+            await cache.write(WALLET, 'pro', { access: false, revalidate_after: 60 });
+
+            await expect(cache.forget(WALLET, 'pro', undefined, () => true)).resolves.toBe(
+                undefined,
+            );
+        });
+
         it('ignores a store that fails to write', async () => {
             const cache = new AccessCache<Answer>(
                 { get: () => undefined, set: async () => Promise.reject(new Error('READONLY')) },
@@ -266,6 +283,78 @@ describe('AccessCache', () => {
             await expect(
                 cache.write(WALLET, 'pro', { access: true, revalidate_after: 60 }),
             ).resolves.toBeUndefined();
+        });
+    });
+    describe('forget', () => {
+        const no = { access: false, revalidate_after: 60 };
+
+        it('drops an answer that is outdated', async () => {
+            const { cache, store } = setup();
+            await cache.write(WALLET, 'pro', no, 'proj_1');
+
+            await cache.forget(WALLET, 'pro', 'proj_1', (answer) => !answer.access);
+
+            await expect(cache.read(WALLET, 'pro', 'proj_1')).resolves.toBeUndefined();
+            expect(store.size).toBe(0);
+        });
+
+        it('keeps an answer that still holds', async () => {
+            const { cache } = setup();
+            await cache.write(WALLET, 'pro', no);
+
+            await cache.forget(WALLET, 'pro', undefined, (answer) => answer.access);
+
+            await expect(cache.read(WALLET, 'pro')).resolves.toEqual({ value: no, fresh: true });
+        });
+
+        it('touches that plan and scope only', async () => {
+            const { cache } = setup();
+            await cache.write(WALLET, 'pro', no, 'proj_1');
+            await cache.write(WALLET, 'team', no, 'proj_1');
+            await cache.write(WALLET, 'pro', no, 'proj_2');
+
+            await cache.forget(WALLET, 'pro', 'proj_1', () => true);
+
+            await expect(cache.read(WALLET, 'team', 'proj_1')).resolves.toMatchObject({
+                fresh: true,
+            });
+            await expect(cache.read(WALLET, 'pro', 'proj_2')).resolves.toMatchObject({
+                fresh: true,
+            });
+        });
+
+        // A custom store written before `delete` existed still gets the refresh.
+        it('makes the answer stale in a store without delete', async () => {
+            const { clock, store } = setup();
+            const set = vi.fn((key: string, entry, ttl: number) => store.set(key, entry, ttl));
+            const cache = new AccessCache<Answer>(
+                { get: (key) => store.get(key), set },
+                { now: () => clock.now },
+            );
+            await cache.write(WALLET, 'pro', no);
+            clock.now = NOW + 1_000;
+
+            await cache.forget(WALLET, 'pro', undefined, () => true);
+
+            await expect(cache.read(WALLET, 'pro')).resolves.toEqual({ value: no, fresh: false });
+            expect(set).toHaveBeenLastCalledWith(
+                AccessCache.key(WALLET, 'pro'),
+                {
+                    value: no,
+                    freshUntil: NOW + 1_000,
+                    keepUntil: NOW + 60_000 + DEFAULT_MAX_STALE_MS,
+                },
+                59_000 + DEFAULT_MAX_STALE_MS,
+            );
+        });
+
+        it('does nothing for an answer never cached', async () => {
+            const { cache } = setup();
+            const outdated = vi.fn(() => true);
+
+            await cache.forget(WALLET, 'pro', undefined, outdated);
+
+            expect(outdated).not.toHaveBeenCalled();
         });
     });
 });
