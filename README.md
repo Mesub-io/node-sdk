@@ -342,7 +342,16 @@ new Mesub({
 ```
 
 `headers` cannot replace the SDK's own (`Authorization`, `User-Agent`,
-`Accept`, `Content-Type`), and the API key is never sent for the public keys.
+`Accept`, `Content-Type`, `Mesub-Version`), and the API key is never sent for
+the public keys.
+
+### API version
+
+Every call sends `Mesub-Version: 2026-10-02`, the version of the API this
+release was written against, exported as `API_VERSION`. It is pinned per
+release and cannot be set, so Mesub can change an answer for newer releases
+without breaking one already installed: upgrading the package is what moves
+you to a newer version. Mesub does not read it yet.
 
 The memory cache is per process and emptied on restart. A store is two
 methods, so Redis is a few lines, and keeps the outage fallback across
@@ -427,7 +436,8 @@ The pre-push hook runs all of it, as CI does on Node 20, 22 and 24.
 
 ### Releasing
 
-Bump `version` in `package.json` and `VERSION` in `src/version.ts`, merge, then
+Bump `version` in `package.json` and `VERSION` in `src/version.ts` (and
+`API_VERSION` there only when the release follows a newer API), merge, then
 push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The Publish
 workflow checks, builds and publishes with provenance.
 

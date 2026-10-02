@@ -42,7 +42,7 @@ export interface MesubOptions {
     /**
      * Extra headers sent with every call to Mesub, the public keys included:
      * e.g. a Cloudflare Access service token for the proxy in front. Cannot
-     * set Authorization, User-Agent, Accept nor Content-Type.
+     * set Authorization, User-Agent, Accept, Content-Type nor Mesub-Version.
      */
     headers?: Record<string, string>;
     /** A custom `fetch`, e.g. one bound to your own agent. Defaults to the global one. */
