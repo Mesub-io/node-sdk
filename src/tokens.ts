@@ -99,6 +99,15 @@ export class TokenVerifier {
         // Outside the try: when it fails, it already throws the right MesubError.
         const audience = await this.config.projectId();
 
+        // Without one jose skips the `aud` check, and every project's tokens
+        // are signed by the same keys: another project's token would pass.
+        if (typeof audience !== 'string' || audience === '') {
+            throw new MesubError('No project id to verify the access token against.', {
+                status: null,
+                code: 'unexpected',
+            });
+        }
+
         try {
             // Signature, expiry, project and issuer, all at once. `algorithms`
             // is what refuses a token signed HS256, or not signed at all.

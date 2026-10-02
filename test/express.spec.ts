@@ -392,5 +392,17 @@ describe('requirePlan', () => {
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: code });
         });
+
+        // No audience to check: never a pass for another project's token.
+        it('forwards a /v1/project answer with no project id', async () => {
+            const { client } = mesub({ project: () => Response.json({}) });
+
+            const response = await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token({ aud: 'proj_2' })}`);
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'unexpected' });
+        });
     });
 });

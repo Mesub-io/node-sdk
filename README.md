@@ -177,15 +177,15 @@ costs one call to Mesub before it is cached again.
 Every failure is a `MesubError` with a `status` (the HTTP status, or `null`)
 and a stable `code` to branch on:
 
-| `code`            | Meaning                                                             |
-| ----------------- | ------------------------------------------------------------------- |
-| `invalid_request` | 400, e.g. a wallet that is not an address                           |
-| `unauthorized`    | 401, an API key Mesub never issued                                  |
-| `plan_not_found`  | 404, no plan of yours under that slug                               |
-| `rate_limited`    | 429, after the retries                                              |
-| `unavailable`     | 5xx, a timeout or a network error, after the retries                |
-| `invalid_token`   | an access token that fails verification                             |
-| `unexpected`      | any other status, or a 404 that is not Mesub's: is `baseUrl` right? |
+| `code`            | Meaning                                                                                                                           |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid_request` | 400, e.g. a wallet that is not an address                                                                                         |
+| `unauthorized`    | 401, an API key Mesub never issued                                                                                                |
+| `plan_not_found`  | 404, no plan of yours under that slug                                                                                             |
+| `rate_limited`    | 429, after the retries                                                                                                            |
+| `unavailable`     | 5xx, a timeout or a network error, after the retries                                                                              |
+| `invalid_token`   | an access token that fails verification                                                                                           |
+| `unexpected`      | any other status, a 404 that is not Mesub's (is `baseUrl` right?), or no project id from `/v1/project`: no token is then verified |
 
 ## Requirements
 

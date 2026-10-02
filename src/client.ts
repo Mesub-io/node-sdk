@@ -114,26 +114,37 @@ export class Mesub {
      * Who the access token `@mesub/react` issued is about, verified locally
      * with Mesub's public keys. Throws a MesubError `invalid_token` for a
      * forged, expired or other project's token, `unavailable` when the keys
-     * or the project id could not be fetched.
+     * or the project id could not be fetched, `unexpected` when Mesub
+     * answered no project id.
      */
     async verifyToken(token: string): Promise<VerifiedToken> {
         return this.tokens.verify(token);
     }
 
-    /** The key's project id, from `GET /v1/project`, once per process. */
+    /**
+     * The key's project id, from `GET /v1/project`, once per process. An
+     * answer without one is a broken answer, thrown `unexpected` and never
+     * kept: it is the audience every token is checked against.
+     */
     private projectId(call: CallOptions = {}): Promise<string> {
-        this.projectIdOnce ??= this.transport.get('/v1/project', {}, call).then(
-            (answer) => {
-                const { id } = answer as { id: string };
+        this.projectIdOnce ??= this.transport
+            .get('/v1/project', {}, call)
+            .then((answer) => {
+                const id = (answer as { id?: unknown } | null)?.id;
 
-                if (typeof id === 'string' && id !== '') this.knownProjectId = id;
+                if (typeof id !== 'string' || id === '') {
+                    throw new MesubError(
+                        '/v1/project answered no project id: no access token can be verified.',
+                        { status: 200, code: 'unexpected' },
+                    );
+                }
+                this.knownProjectId = id;
                 return id;
-            },
-            (error: unknown) => {
+            })
+            .catch((error: unknown) => {
                 this.projectIdOnce = undefined;
                 throw error;
-            },
-        );
+            });
 
         return this.projectIdOnce;
     }

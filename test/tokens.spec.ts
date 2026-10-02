@@ -1,6 +1,7 @@
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 
 import { Mesub, MesubError, TOKEN_COOKIE, tokenFrom } from '../src/index.js';
+import { TokenVerifier } from '../src/tokens.js';
 
 const BASE = 'https://api.mesub.test';
 const PROJECT = 'proj_1';
@@ -287,6 +288,69 @@ describe('verifyToken', () => {
             ).resolves.toMatchObject({
                 wallet: WALLET,
             });
+        });
+    });
+
+    // Without an audience jose skips the `aud` check, and every project's
+    // tokens are signed by the same keys: another merchant's token would pass.
+    describe('when /v1/project answers no project id', () => {
+        it.each([
+            ['an empty object', {}],
+            ['an empty id', { id: '' }],
+            ['an id that is not a string', { id: 42 }],
+            ['null', null],
+        ])('refuses a token for another project on %s', async (_label, body) => {
+            const { mesub } = server(undefined, () => Response.json(body));
+
+            const error = await mesub
+                .verifyToken(await token({ aud: 'proj_2' }))
+                .catch((caught: unknown) => caught);
+
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({
+                code: 'unexpected',
+                message: expect.stringContaining('/v1/project answered no project id'),
+            });
+        });
+
+        it('refuses a token for the project as well', async () => {
+            const { mesub } = server(undefined, () => Response.json({}));
+
+            expect(await codeOf(mesub.verifyToken(await token()))).toBe('unexpected');
+        });
+
+        // Not kept: the next token asks again, and passes once Mesub answers an id.
+        it('asks again on the next token', async () => {
+            let broken = true;
+            const { mesub, calls } = server(undefined, () =>
+                Response.json(broken ? {} : { id: PROJECT }),
+            );
+            await mesub.verifyToken(await token()).catch(() => undefined);
+
+            broken = false;
+
+            await expect(mesub.verifyToken(await token())).resolves.toMatchObject({
+                wallet: WALLET,
+            });
+            expect(calls.project).toBe(2);
+        });
+
+        // The verifier refuses on its own too, whatever hands it the project id.
+        it.each([
+            ['an empty string', ''],
+            ['undefined', undefined],
+        ])('never verifies against %s', async (_label, audience) => {
+            const fetch = vi.fn(async () => Response.json({ keys: [jwk] }));
+            const verifier = new TokenVerifier({
+                baseUrl: BASE,
+                fetch: fetch as unknown as typeof globalThis.fetch,
+                projectId: async () => audience as string,
+            });
+
+            expect(await codeOf(verifier.verify(await token({ aud: 'proj_2' })))).toBe(
+                'unexpected',
+            );
+            expect(fetch).not.toHaveBeenCalled();
         });
     });
 
