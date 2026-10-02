@@ -460,6 +460,51 @@ describe('hasAccess', () => {
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
         });
 
+        // START + 61 s is when staleThen asks again (#35).
+        const ended = new Date(START.getTime() + 30_000).toISOString();
+        const later = new Date(START.getTime() + 120_000).toISOString();
+
+        it('keeps out a cancelled subscriber once access_until is past', async () => {
+            const mesub = await staleThen(
+                answer({ status: 'cancelled', access_until: ended, next_charge_at: null }),
+                nest(503, 'Service Unavailable'),
+            );
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        });
+
+        it('keeps a cancelled subscriber in before access_until', async () => {
+            const mesub = await staleThen(
+                answer({ status: 'cancelled', access_until: later, next_charge_at: null }),
+                nest(503, 'Service Unavailable'),
+            );
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        });
+
+        it('keeps a paying subscriber in past the period end: a renewal is ahead', async () => {
+            const mesub = await staleThen(
+                answer({ access_until: ended, next_charge_at: ended }),
+                nest(503, 'Service Unavailable'),
+            );
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        });
+
+        it('keeps a subscriber in arrears in while a retry is ahead', async () => {
+            const mesub = await staleThen(
+                answer({
+                    status: 'unpaid',
+                    access_until: ended,
+                    next_charge_at: null,
+                    next_retry_at: later,
+                }),
+                nest(503, 'Service Unavailable'),
+            );
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        });
+
         it('falls back on the answer of that plan only', async () => {
             const mesub = await staleThen(answer(), nest(503, 'Service Unavailable'));
 
