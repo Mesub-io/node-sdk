@@ -288,20 +288,26 @@ them.
   screens.
 - **The guards** (`requirePlan`, `withMesub`, `RequirePlan`) never hold a
   request longer than `guardTimeout`, 2 s by default, for the access check:
-  retries happen only while they fit, and a `Retry-After` that would outlast
-  it is not waited. When it runs out, or Mesub fails (5xx, 429, network),
-  the guard answers from the last answer it knew, like `hasAccess`, or 503
-  with `Retry-After: 30` for a wallet it never saw, since nobody knows yet
-  whether it pays: 402 only ever means Mesub said no. Verifying the token is
-  not counted: it needs Mesub only once per process, as said above.
+  retries happen only while they fit, a `Retry-After` that would outlast it
+  is not waited, and a 429 is never retried. When it runs out, or Mesub fails
+  (5xx, 429, network), the guard answers from the last answer it knew, like
+  `hasAccess`, or 503 with `Retry-After: 30` for a wallet it never saw, since
+  nobody knows yet whether it pays: 402 only ever means Mesub said no.
+  Verifying the token is not counted: it needs Mesub only once per process,
+  as said above.
+- **Many requests at once** for a customer not in the cache send Mesub one
+  request, not one each: 50 checks of the same wallet on the same plan wait
+  for the same answer, or the same error. The guards share theirs with each
+  other, and `access`, `hasAccess` and `accessList` called from your code
+  with each other, since a guard's request gives up sooner.
 - A bad key, an unknown plan or a malformed wallet always throws, it is never
   turned into `false`.
 
 Reads from Mesub time out after 5 s and are retried twice, on network errors
 and on any error Mesub marks `retryable` (a 429 rate limit, a 5xx), honouring
 `Retry-After`; an error without Mesub's flag is retried on 408, 429 and 5xx,
-never on a 409. `create` is sent once and never retried, whatever happened:
-one that got no answer may still have reserved. A full cap of subscriptions
+never on a 409. A guard never retries a 429. `create` is sent once and never
+retried, whatever happened: one that got no answer may still have reserved. A full cap of subscriptions
 waiting for a signature (`pending_cap_reached`, a 429) frees up over an hour:
 the error's `retryAfter` says when. What `submit` does when no answer comes
 back is in [Subscribe from your server](#subscribe-from-your-server).

@@ -32,6 +32,11 @@ export interface CallOptions extends RequestOptions {
      * attempt is cut at it, and a wait that would outlast it is not waited.
      */
     deadline?: number;
+    /**
+     * False to throw a 429 at once, whatever it asks: a guard falls back
+     * rather than wait for the rate limit, and send more on top of it.
+     */
+    retryRateLimited?: boolean;
 }
 
 const INITIAL_RETRY_DELAY = 500;
@@ -87,6 +92,9 @@ export class Transport {
             const attempt = await this.#attempt(method, url, body, options);
             if (attempt.ok) return attempt.body;
             if (!attempt.retry || retry >= maxRetries) throw attempt.error;
+            if (options.retryRateLimited === false && attempt.error.status === 429) {
+                throw attempt.error;
+            }
 
             const wait = attempt.retryAfter ?? backoff(retry);
             // Not even a Retry-After is waited past the deadline: the caller

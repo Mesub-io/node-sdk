@@ -858,11 +858,8 @@ describe('decide, for the guards', () => {
     });
 
     // Mesub failing fast says nothing about the wallet either: 503, not 402.
-    it.each([
-        ['an outage', 503],
-        ['a rate limit', 429],
-    ])('says Mesub is unavailable on %s once the retries are spent', async (_label, status) => {
-        const { fetch } = mockFetch(nest(status, 'a'), nest(status, 'b'), nest(status, 'c'));
+    it('says Mesub is unavailable on an outage once the retries are spent', async () => {
+        const { fetch } = mockFetch(nest(503, 'a'), nest(503, 'b'), nest(503, 'c'));
 
         const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(1_500);
@@ -873,6 +870,49 @@ describe('decide, for the guards', () => {
             stale: true,
             unavailable: true,
         });
+    });
+
+    // Retrying a rate limit only adds to it, and holds the request (#34).
+    it('falls back at once on a 429, without retrying it', async () => {
+        const { fetch } = mockFetch(coded(429, 'rate_limited', 'Slow down.', true));
+
+        const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(decision).toEqual({
+            at: 0,
+            value: { access: false, answer: null, stale: true, unavailable: true },
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back on the stale answer on a 429', async () => {
+        const { fetch } = mockFetch(
+            json(200, answer({ revalidate_after: 0 })),
+            nest(429, 'Too Many Requests'),
+        );
+        const mesub = await guarded(fetch);
+        await mesub.decide(WALLET, 'pro');
+
+        const decision = timed(mesub.decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(decision.value).toEqual({
+            access: true,
+            answer: answer({ revalidate_after: 0 }),
+            stale: true,
+        });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('leaves hasAccess retrying a 429', async () => {
+        const { fetch } = mockFetch(nest(429, 'a'), json(200, answer()));
+
+        const result = timed((await guarded(fetch)).hasAccess(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect(result.value).toBe(true);
+        expect(fetch).toHaveBeenCalledTimes(2);
     });
 
     it('still throws an integration error', async () => {
@@ -1409,5 +1449,247 @@ describe('asked by customer', () => {
                 stale: true,
             });
         });
+    });
+});
+
+// Fifty calls for a customer not in the cache made fifty requests (#34).
+describe('concurrent lookups', () => {
+    beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(START);
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    /**
+     * A fetch that counts the calls to /v1/access and holds every answer
+     * until `release`, so all the calls are made while the first is in flight.
+     */
+    function held(respond: (url: URL) => Response | Error = () => json(200, answer())) {
+        const calls: URL[] = [];
+        let open!: () => void;
+        const gate = new Promise<void>((resolve) => (open = resolve));
+        const fetch = (async (input: string | URL | Request) => {
+            const url = new URL(String(input));
+            calls.push(url);
+            await gate;
+            const response = respond(url);
+            if (response instanceof Error) throw response;
+            return response;
+        }) as typeof globalThis.fetch;
+
+        return { fetch, calls, release: () => open() };
+    }
+
+    /** Lets the calls reach the cache and the flight before the answer comes. */
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    const fifty = <T>(call: () => Promise<T>) => Promise.all(Array.from({ length: 50 }, call));
+
+    it.each<[string, (mesub: Mesub) => Promise<unknown>, unknown]>([
+        ['access', (mesub: Mesub) => mesub.access(WALLET, 'pro'), answer()],
+        ['hasAccess', (mesub: Mesub) => mesub.hasAccess(WALLET, 'pro'), true],
+        [
+            'decide',
+            (mesub: Mesub) => mesub.decide(WALLET, 'pro'),
+            { access: true, answer: answer(), stale: false },
+        ],
+    ])('makes one request for fifty %s calls on one customer', async (_label, call, expected) => {
+        const { fetch, calls, release } = held();
+        const mesub = client(fetch);
+
+        const all = fifty(() => call(mesub));
+        await settled();
+        release();
+
+        expect(await all).toEqual(Array.from({ length: 50 }, () => expected));
+        expect(calls).toHaveLength(1);
+    });
+
+    it('makes one request for fifty accessList calls', async () => {
+        const list = { plans: [answer()], revalidate_after: 60 };
+        const { fetch, calls, release } = held(() => json(200, list));
+        const mesub = client(fetch);
+
+        const all = fifty(() => mesub.accessList(WALLET));
+        await settled();
+        release();
+
+        expect(await all).toHaveLength(50);
+        expect(calls).toHaveLength(1);
+    });
+
+    it('caches the shared answer once, then answers from it', async () => {
+        const set = vi.fn();
+        const memory = new MemoryStore<AccessAnswer | AccessList>();
+        const { fetch, calls, release } = held();
+        const mesub = client(fetch, {
+            get: (key) => memory.get(key),
+            set: (key, entry, ttlMs) => {
+                set(key);
+                memory.set(key, entry, ttlMs);
+            },
+        });
+
+        const all = fifty(() => mesub.hasAccess(WALLET, 'pro'));
+        await settled();
+        release();
+        await all;
+        await mesub.hasAccess(WALLET, 'pro');
+
+        expect(set).toHaveBeenCalledTimes(1);
+        expect(calls).toHaveLength(1);
+    });
+
+    it('keeps customers, kinds, plans and the list apart', async () => {
+        const { fetch, calls, release } = held((url) =>
+            url.searchParams.has('plan')
+                ? json(200, answer({ plan: url.searchParams.get('plan')! }))
+                : json(200, { plans: [], revalidate_after: 60 }),
+        );
+        const mesub = client(fetch);
+
+        const all = Promise.all([
+            mesub.access(WALLET, 'pro'),
+            mesub.access(OTHER_WALLET, 'pro'),
+            mesub.access(WALLET, 'team'),
+            mesub.access({ email: 'same@id.co' }, 'pro'),
+            mesub.access({ external_id: 'same@id.co' }, 'pro'),
+            mesub.accessList(WALLET),
+            mesub.access(WALLET, 'pro'),
+        ]);
+        await settled();
+        release();
+        await all;
+
+        expect(calls).toHaveLength(6);
+    });
+
+    it('never shares between two projects on one store', async () => {
+        const store = new MemoryStore<AccessAnswer | AccessList>();
+        const { fetch, calls, release } = held();
+        const one = client(fetch, store);
+        const two = client(fetch, store, { apiKey: 'SUB_other' });
+
+        const all = Promise.all([one.hasAccess(WALLET, 'pro'), two.hasAccess(WALLET, 'pro')]);
+        await settled();
+        release();
+        await all;
+
+        expect(calls).toHaveLength(2);
+    });
+
+    // A guard's request gives up a 429 and its deadline; your own call keeps its retries.
+    it('never shares between a guard and a call from your code', async () => {
+        const { fetch, calls, release } = held();
+        const mesub = client(fetch);
+
+        const all = Promise.all([
+            mesub.decide(WALLET, 'pro'),
+            mesub.decide(WALLET, 'pro'),
+            mesub.hasAccess(WALLET, 'pro'),
+            mesub.access(WALLET, 'pro'),
+        ]);
+        await settled();
+        release();
+        await all;
+
+        expect(calls).toHaveLength(2);
+    });
+
+    it('shares the failure too, and every guard falls back', async () => {
+        const { fetch, calls, release } = held(() => nest(503, 'down'));
+        const mesub = client(fetch);
+
+        const all = fifty(() => mesub.decide(WALLET, 'pro'));
+        await settled();
+        release();
+
+        expect(new Set((await all).map((decision) => decision.unavailable))).toEqual(
+            new Set([true]),
+        );
+        expect(calls).toHaveLength(1);
+    });
+
+    it('asks again once the shared request failed', async () => {
+        const answers = [nest(401, 'That API key is not valid.'), json(200, answer())];
+        const { fetch, calls, release } = held(() => answers.shift()!);
+        const mesub = client(fetch);
+        release();
+
+        await expect(mesub.access(WALLET, 'pro')).rejects.toMatchObject({ code: 'unauthorized' });
+        await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(answer());
+        expect(calls).toHaveLength(2);
+    });
+
+    it('asks again once the shared answer went stale', async () => {
+        const { fetch, calls, release } = held();
+        const mesub = client(fetch);
+        release();
+        await mesub.access(WALLET, 'pro');
+        vi.setSystemTime(START.getTime() + 61_000);
+
+        await mesub.access(WALLET, 'pro');
+
+        expect(calls).toHaveLength(2);
+    });
+
+    it('asks each time for attempts, which are never cached', async () => {
+        const { fetch, calls, release } = held(() => json(200, answer({ attempts: [] })));
+        const mesub = client(fetch);
+
+        const all = Promise.all([
+            mesub.access(WALLET, 'pro', { attempts: true }),
+            mesub.access(WALLET, 'pro', { attempts: true }),
+        ]);
+        await settled();
+        release();
+        await all;
+
+        expect(calls).toHaveLength(2);
+    });
+
+    // An answer sent before the subscription landed must not be cached after it (#33).
+    it('never caches an answer in flight when a subscription lands', async () => {
+        const subscription = {
+            id: 'sub_1',
+            status: 'active',
+            access: true,
+            payment_status: 'paid',
+            plan: 'pro',
+            wallet: WALLET,
+            email: null,
+            external_id: null,
+            current_period_start: '2026-09-30T12:00:00.000Z',
+            current_period_end: '2026-10-30T12:00:00.000Z',
+            next_charge_at: '2026-10-30T12:00:00.000Z',
+            next_retry_at: null,
+            retry_deadline: null,
+            access_until: '2026-10-30T12:00:00.000Z',
+            created_at: '2026-09-30T11:58:00.000Z',
+            confirmed_at: '2026-09-30T12:00:03.000Z',
+        };
+        const no = answer({ access: false, status: 'none', next_charge_at: null });
+        // Only /v1/access is held: the subscription is read while it is in flight.
+        const {
+            fetch: access,
+            calls,
+            release,
+        } = held(() => json(200, calls.length > 1 ? answer() : no));
+        const fetch = (async (input: string | URL | Request, init?: RequestInit) =>
+            new URL(String(input)).pathname === '/v1/access'
+                ? access(input, init)
+                : json(200, subscription)) as typeof globalThis.fetch;
+        const mesub = client(fetch);
+
+        const before = mesub.hasAccess(WALLET, 'pro');
+        await settled();
+        await mesub.subscriptions.retrieve('sub_1');
+        release();
+
+        await expect(before).resolves.toBe(false);
+        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
     });
 });
