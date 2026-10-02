@@ -11,6 +11,16 @@ export interface TransportConfig {
     maxRetries: number;
 }
 
+/** What one call may change from the client's configuration. */
+export interface CallOptions {
+    maxRetries?: number;
+    /**
+     * Epoch ms by which the call settles, retries and waits included: each
+     * attempt is cut at it, and a wait that would outlast it is not waited.
+     */
+    deadline?: number;
+}
+
 const INITIAL_RETRY_DELAY = 500;
 const MAX_RETRY_DELAY = 8_000;
 const MAX_RETRY_AFTER = 60_000;
@@ -27,23 +37,49 @@ export class Transport {
         this.#config = config;
     }
 
-    async get(path: string, query: Record<string, QueryValue> = {}): Promise<unknown> {
+    async get(
+        path: string,
+        query: Record<string, QueryValue> = {},
+        options: CallOptions = {},
+    ): Promise<unknown> {
         const url = new URL(this.#config.baseUrl + path);
         for (const [key, value] of Object.entries(query)) {
             if (value !== undefined) url.searchParams.set(key, String(value));
         }
+        const maxRetries = options.maxRetries ?? this.#config.maxRetries;
+        const { deadline } = options;
 
         for (let retry = 0; ; retry++) {
-            const attempt = await this.#attempt(url);
+            const attempt = await this.#attempt(url, deadline);
             if (attempt.ok) return attempt.body;
-            if (!attempt.retry || retry >= this.#config.maxRetries) throw attempt.error;
-            await sleep(attempt.retryAfter ?? backoff(retry));
+            if (!attempt.retry || retry >= maxRetries) throw attempt.error;
+
+            const wait = attempt.retryAfter ?? backoff(retry);
+            // Not even a Retry-After is waited past the deadline: the caller
+            // falls back now rather than at the end of a wait it cannot afford.
+            if (deadline !== undefined && Date.now() + wait >= deadline) {
+                throw attempt.error;
+            }
+            await sleep(wait);
         }
     }
 
-    async #attempt(url: URL): Promise<Attempt> {
+    async #attempt(url: URL, deadline: number | undefined): Promise<Attempt> {
+        const left = deadline === undefined ? Infinity : deadline - Date.now();
+
+        if (left <= 0) {
+            const error = new MesubError('No time was left to call Mesub.', {
+                status: null,
+                code: 'unavailable',
+            });
+            return { ok: false, error, retry: false, retryAfter: null };
+        }
+
+        // Cut at the deadline when it comes before the attempt's own timeout.
+        const timeout = Math.min(this.#config.timeout, left);
+        const cutByDeadline = timeout < this.#config.timeout;
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), this.#config.timeout);
+        const timer = setTimeout(() => controller.abort(), timeout);
 
         try {
             const response = await this.#config.fetch(url, {
@@ -70,10 +106,17 @@ export class Transport {
                 }
             }
 
-            const error = new MesubError(messageFrom(text, response.status), {
-                status: response.status,
-                code: codeForStatus(response.status),
-            });
+            const error =
+                response.status === 404 && !isMesubErrorBody(text)
+                    ? new MesubError(
+                          `${url.pathname} answered 404 with no Mesub error: is baseUrl ` +
+                              `(${this.#config.baseUrl}) the Mesub API?`,
+                          { status: 404, code: 'unexpected' },
+                      )
+                    : new MesubError(messageFrom(text, response.status), {
+                          status: response.status,
+                          code: codeForStatus(response.status),
+                      });
             return {
                 ok: false,
                 error,
@@ -81,6 +124,14 @@ export class Transport {
                 retryAfter: retryAfter(response.headers.get('retry-after')),
             };
         } catch (cause) {
+            if (controller.signal.aborted && cutByDeadline) {
+                const error = new MesubError(
+                    `Mesub did not answer within the ${Math.round(timeout)} ms left before the deadline.`,
+                    { status: null, code: 'unavailable', cause },
+                );
+                return { ok: false, error, retry: false, retryAfter: null };
+            }
+
             const message = controller.signal.aborted
                 ? `Mesub did not answer within ${this.#config.timeout} ms.`
                 : `Could not reach Mesub: ${cause instanceof Error ? cause.message : String(cause)}`;
@@ -135,6 +186,28 @@ function messageFrom(text: string, status: number): string {
     }
     if (typeof error === 'string' && error !== '') return error;
     return fallback;
+}
+
+/**
+ * Whether a 404 came from the Mesub API rather than from whatever else lives
+ * at a wrong `baseUrl`: a JSON error body, as Nest writes it (`statusCode`
+ * and `message`) or with a `code`. Nest's own answer for a route it does not
+ * have (`Cannot GET /api/v1/access`) is not one: a path prefix too many.
+ */
+function isMesubErrorBody(text: string): boolean {
+    let body: unknown;
+    try {
+        body = JSON.parse(text);
+    } catch {
+        return false;
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+
+    const { code, statusCode, message } = body as Record<string, unknown>;
+    if (typeof code === 'string') return true;
+    if (typeof statusCode !== 'number') return false;
+
+    return !(typeof message === 'string' && /^Cannot [A-Z]+ \//.test(message));
 }
 
 function sleep(ms: number): Promise<void> {

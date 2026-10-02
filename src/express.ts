@@ -31,8 +31,8 @@ export interface RequirePlanOptions {
  *
  * The subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie. Refusals answer 401 (no valid token),
- * 402 (no access) or 503 with Retry-After (Mesub unreachable while nobody
- * could be identified yet). Integration errors go to `next(err)`.
+ * 402 (Mesub said no) or 503 with Retry-After (Mesub unreachable, with no
+ * answer known for that subscriber). Integration errors go to `next(err)`.
  */
 export function requirePlan(plan: string, options: RequirePlanOptions = {}): RequestHandler {
     return async (req, res, next) => {

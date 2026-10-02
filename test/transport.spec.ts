@@ -127,6 +127,45 @@ describe('status mapping', () => {
     });
 });
 
+// A wrong baseUrl must not read as "no plan of yours is named pro".
+describe('a 404', () => {
+    it.each([
+        ['an HTML page', new Response('<h1>Not Found</h1>', { status: 404 })],
+        ['an empty body', new Response(null, { status: 404 })],
+        ['JSON from another API', json(404, { message: 'Not Found' })],
+        ['a JSON array', json(404, [])],
+        [
+            "Nest's answer for a route it does not have",
+            nest(404, 'Cannot GET /api/v1/access?wallet=w', 'Not Found'),
+        ],
+    ])('on %s asks whether baseUrl is right', async (_label, response) => {
+        const { fetch } = mockFetch(response);
+
+        const error = await transport(fetch)
+            .get('/v1/access')
+            .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).toMatchObject({ status: 404, code: 'unexpected' });
+        expect((error as MesubError).message).toBe(
+            '/v1/access answered 404 with no Mesub error: is baseUrl (https://api.test) the Mesub API?',
+        );
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ["the back's own error", nest(404, 'No plan of yours is named pro.', 'Not Found')],
+        ['a body with a code', json(404, { code: 'plan_not_found', message: 'No such plan.' })],
+    ])('stays plan_not_found on %s', async (_label, response) => {
+        const { fetch } = mockFetch(response);
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            status: 404,
+            code: 'plan_not_found',
+        });
+    });
+});
+
 describe('error messages', () => {
     it('joins an array message', async () => {
         const { fetch } = mockFetch(nest(400, ['wallet must be base58', 'plan is required']));
@@ -339,5 +378,99 @@ describe('timeouts and network errors', () => {
         await transport(fetch).get('/v1/access');
 
         expect(vi.getTimerCount()).toBe(0);
+    });
+});
+
+// The guards' budget: one deadline for the whole call, retries and waits included.
+describe('a deadline', () => {
+    it('cuts an attempt at the deadline, not at the 5 s timeout', async () => {
+        const { fetch } = mockFetch('hang', json(200, {}));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        const { error } = await result;
+
+        expect(error).toMatchObject({ status: null, code: 'unavailable' });
+        expect(error!.message).toBe(
+            'Mesub did not answer within the 2000 ms left before the deadline.',
+        );
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('still retries when the backoff fits before it', async () => {
+        const { fetch } = mockFetch(nest(503, 'x'), json(200, { ok: 1 }));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect((await result).value).toEqual({ ok: 1 });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('cuts the retry at what is left, not at a full timeout', async () => {
+        const { fetch } = mockFetch(nest(503, 'x'), 'hang');
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        const { error } = await result;
+
+        expect(error!.message).toBe(
+            'Mesub did not answer within the 1500 ms left before the deadline.',
+        );
+    });
+
+    it('never waits a Retry-After that outlasts it', async () => {
+        const { fetch } = mockFetch(json(429, { message: 'slow down' }, { 'retry-after': '30' }));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        const { error } = await result;
+
+        expect(error).toMatchObject({ status: 429, code: 'rate_limited', message: 'slow down' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits a Retry-After that fits', async () => {
+        const limited = json(429, { message: 'slow down' }, { 'retry-after': '1' });
+        const { fetch } = mockFetch(limited, json(200, { ok: 1 }));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() + 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect((await result).value).toEqual({ ok: 1 });
+    });
+
+    it('calls nothing once it has passed', async () => {
+        const { fetch } = mockFetch(json(200, {}));
+
+        const { error } = await settle(
+            transport(fetch).get('/v1/access', {}, { deadline: Date.now() - 1 }),
+        );
+
+        expect(error).toMatchObject({ code: 'unavailable' });
+        expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('lets maxRetries be lowered for one call', async () => {
+        const { fetch } = mockFetch(nest(503, 'x'), json(200, {}));
+
+        await expect(
+            transport(fetch).get('/v1/access', {}, { maxRetries: 0 }),
+        ).rejects.toMatchObject({ code: 'unavailable' });
+        expect(fetch).toHaveBeenCalledTimes(1);
     });
 });

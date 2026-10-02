@@ -14,7 +14,7 @@ import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'j
 import request from 'supertest';
 
 import type { AccessAnswer } from '../src/answer.js';
-import { Mesub } from '../src/index.js';
+import { Mesub, type MesubOptions } from '../src/index.js';
 import { MesubAccess, MesubError, RequirePlan, type RequirePlanOptions } from '../src/nest.js';
 
 const BASE = 'https://api.mesub.test';
@@ -63,16 +63,16 @@ async function token(over: { aud?: string; exp?: string } = {}) {
 
 interface Mesh {
     /** What /v1/access answers, per call. */
-    access?: () => Response | Promise<Response>;
+    access?: (init?: RequestInit) => Response | Promise<Response>;
     /** What the JWKS and /v1/project answer; healthy by default. */
     keys?: () => Response;
     project?: () => Response;
 }
 
 /** A Mesub whose API is a function, so each test says what it answers. */
-function mesub(mesh: Mesh = {}) {
+function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     const calls: string[] = [];
-    const fetch = vi.fn(async (input: string | URL | Request) => {
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
         calls.push(url.pathname);
         if (url.pathname === '/.well-known/jwks.json')
@@ -80,7 +80,7 @@ function mesub(mesh: Mesh = {}) {
         if (url.pathname === '/v1/project')
             return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
-            return (mesh.access ?? (() => Response.json(answer())))();
+            return (mesh.access ?? (() => Response.json(answer())))(init);
         throw new Error(`unexpected ${url.pathname}`);
     });
     const client = new Mesub({
@@ -88,9 +88,17 @@ function mesub(mesh: Mesh = {}) {
         baseUrl: BASE,
         fetch: fetch as unknown as typeof globalThis.fetch,
         maxRetries: 0,
+        ...options,
     });
 
     return { client, calls };
+}
+
+/** Mesub not answering at all, until the call gives up. */
+function hang(init?: RequestInit) {
+    return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+    });
 }
 
 const apps: INestApplication[] = [];
@@ -281,24 +289,42 @@ describe('RequirePlan', () => {
             expect(response.status).toBe(200);
             expect(response.body.stale).toBe(true);
         });
+    });
 
-        it('answers 402 for an unseen wallet during an outage', async () => {
+    describe('503, nobody knows yet', () => {
+        // 402 only means Mesub said no: failing, it said nothing about this wallet.
+        it.each([
+            ['an outage', 503],
+            ['a rate limit', 429],
+        ])('answers 503 with Retry-After for an unseen wallet on %s', async (_label, status) => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'down' }, { status: 503 }),
+                access: () => Response.json({ message: 'down' }, { status }),
             });
 
             const response = await request(await app(client))
                 .get('/pro')
                 .set('Authorization', `Bearer ${await token()}`);
 
-            expect(response.status).toBe(402);
-            expect(response.body).toEqual({ access: false, reason: 'no_access' });
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+            expect(response.body).toEqual({ access: false, reason: 'unavailable' });
         });
-    });
 
-    describe('503, nobody can be identified', () => {
         it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
             const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+            expect(response.body).toEqual({ access: false, reason: 'unavailable' });
+        });
+
+        // A guard holds a request for guardTimeout at most, never for an outage (#24).
+        it('answers 503 with Retry-After when Mesub does not answer within guardTimeout', async () => {
+            const { client } = mesub({ access: hang }, { guardTimeout: 50 });
 
             const response = await request(await app(client))
                 .get('/pro')
@@ -418,7 +444,7 @@ describe('RequirePlan', () => {
             ['an unknown plan', 404],
         ])('answers 500 on %s', async (_label, status) => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'nope' }, { status }),
+                access: () => Response.json({ message: 'nope', statusCode: status }, { status }),
             });
 
             const response = await request(await app(client))
@@ -431,7 +457,7 @@ describe('RequirePlan', () => {
 
         it('rethrows the MesubError untouched', async () => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'nope' }, { status: 404 }),
+                access: () => Response.json({ message: 'nope', statusCode: 404 }, { status: 404 }),
             });
             const guard = new (RequirePlan('pro', { client }))();
             const headers = { authorization: `Bearer ${await token()}` };

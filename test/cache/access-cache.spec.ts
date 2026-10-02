@@ -29,6 +29,23 @@ describe('AccessCache', () => {
             expect(AccessCache.key(WALLET, 'pro')).toBe(`mesub:access:pro:${WALLET}`);
         });
 
+        it('puts the scope between the prefix and the plan', () => {
+            expect(AccessCache.key(WALLET, 'pro', 'proj_1')).toBe(
+                `mesub:access:proj_1:pro:${WALLET}`,
+            );
+        });
+
+        it('reads and writes in the scope it is given only', async () => {
+            const { cache } = setup();
+            await cache.write(WALLET, 'pro', { access: true, revalidate_after: 60 }, 'proj_1');
+
+            await expect(cache.read(WALLET, 'pro', 'proj_1')).resolves.toMatchObject({
+                fresh: true,
+            });
+            await expect(cache.read(WALLET, 'pro', 'proj_2')).resolves.toBeUndefined();
+            await expect(cache.read(WALLET, 'pro')).resolves.toBeUndefined();
+        });
+
         it('differs by plan and by wallet', () => {
             const keys = new Set([
                 AccessCache.key(WALLET, 'pro'),

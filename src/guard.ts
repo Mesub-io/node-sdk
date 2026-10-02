@@ -53,7 +53,10 @@ export function defaultClient(): Mesub {
  * - no token, or one that fails verification: `unauthenticated`
  * - the keys or the project id could not be fetched: `unavailable`, since
  *   nobody can be identified, so not even the outage fallback can apply
- * - the fallback of `hasAccess` otherwise, through `decide`
+ * - the fallback of `hasAccess` otherwise, through `decide`, within the
+ *   client's `guardTimeout`; `unavailable` when Mesub failed (outage, rate
+ *   limit) or the budget ran out on a wallet with nothing cached: 402 only
+ *   ever means Mesub said no
  *
  * An integration error (a bad API key, an unknown plan) is thrown.
  */
@@ -82,6 +85,10 @@ export async function guard(
     }
 
     const decision = await client.decide(subscriber.wallet, plan);
+
+    // Mesub failed or did not answer within the budget, and nothing was cached
+    // for that wallet: not a no, an outage, like the keys failing above.
+    if (decision.unavailable) return { allowed: false, reason: 'unavailable', decision };
 
     return decision.access
         ? { allowed: true, subscriber, decision }

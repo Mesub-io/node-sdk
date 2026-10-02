@@ -48,6 +48,10 @@ describe('new Mesub()', () => {
         expect(() => new Mesub()).not.toThrow(MesubError);
     });
 
+    it.each([0, -1, Number.NaN])('refuses a guardTimeout of %s', (guardTimeout) => {
+        expect(() => new Mesub({ apiKey: 'sk', guardTimeout })).toThrow(/guardTimeout/);
+    });
+
     it('calls https://api.mesub.io by default', async () => {
         const { url } = await firstCall({ apiKey: 'sk' });
         expect(url.href).toBe('https://api.mesub.io/v1/access?wallet=w');
