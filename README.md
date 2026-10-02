@@ -161,11 +161,13 @@ called without one, they throw a `TypeError` instead of asking.
 - A bad key, an unknown plan or a malformed wallet always throws, it is never
   turned into `false`.
 
-Calls to Mesub time out after 5 s and are retried twice, on network errors,
-408, 409, 429 and 5xx, honouring `Retry-After`. These are HTTP retries of the
-SDK's own calls, unrelated to a plan's pull retries. `access` and `hasAccess`,
-called from your own code, keep exactly that: `guardTimeout` binds the guards
-only.
+Reads from Mesub time out after 5 s and are retried twice, on network errors,
+408, 429 and 5xx, honouring `Retry-After`, unless the error body says
+`retryable: false`; a 409 is final. Writes (POST) are sent once and never
+retried, whatever happened: one that got no answer may still have been done.
+These are HTTP retries of the SDK's own calls, unrelated to a plan's pull
+retries. `access` and `hasAccess`, called from your own code, keep exactly
+that: `guardTimeout` binds the guards only.
 
 ## Options
 
