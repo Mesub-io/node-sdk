@@ -404,7 +404,8 @@ describe('requirePlan', () => {
             ['an unknown plan', 404, 'plan_not_found'],
         ])('forwards %s to next(err)', async (_label, status, code) => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'nope', statusCode: status }, { status }),
+                access: () =>
+                    Response.json({ message: 'nope', statusCode: status, code }, { status }),
             });
 
             const response = await request(app(client))

@@ -457,7 +457,11 @@ describe('RequirePlan', () => {
 
         it('rethrows the MesubError untouched', async () => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'nope', statusCode: 404 }, { status: 404 }),
+                access: () =>
+                    Response.json(
+                        { message: 'nope', statusCode: 404, code: 'plan_not_found' },
+                        { status: 404 },
+                    ),
             });
             const guard = new (RequirePlan('pro', { client }))();
             const headers = { authorization: `Bearer ${await token()}` };

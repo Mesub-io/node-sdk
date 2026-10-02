@@ -1,6 +1,6 @@
 import { MesubError } from '../src/errors.js';
 import { Transport } from '../src/transport.js';
-import { json, mockFetch, nest } from './helpers.js';
+import { coded, json, mockFetch, nest } from './helpers.js';
 
 function transport(fetch: typeof globalThis.fetch, overrides: { maxRetries?: number } = {}) {
     return new Transport({
@@ -84,10 +84,11 @@ describe('status mapping', () => {
     it.each([
         [400, 'invalid_request'],
         [401, 'unauthorized'],
-        [403, 'unexpected'],
-        [404, 'plan_not_found'],
+        [403, 'forbidden'],
+        [404, 'not_found'],
         // A conflict is final: asking again cannot change the answer.
-        [409, 'unexpected'],
+        [409, 'conflict'],
+        [413, 'unexpected'],
         [422, 'unexpected'],
     ])('maps %i to %s, without retrying', async (status, code) => {
         const { fetch } = mockFetch(nest(status, 'nope'));
@@ -156,15 +157,188 @@ describe('a 404', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    it("asks the same on the back's coded answer for a route it does not have", async () => {
+        const { fetch } = mockFetch(coded(404, 'not_found', 'Cannot GET /api/v1/access?wallet=w'));
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            status: 404,
+            code: 'unexpected',
+            apiCode: null,
+            message:
+                '/v1/access answered 404 with no Mesub error: is baseUrl (https://api.test) the Mesub API?',
+        });
+    });
+
     it.each([
-        ["the back's own error", nest(404, 'No plan of yours is named pro.', 'Not Found')],
-        ['a body with a code', json(404, { code: 'plan_not_found', message: 'No such plan.' })],
-    ])('stays plan_not_found on %s', async (_label, response) => {
+        ['a coded body', coded(404, 'plan_not_found', 'No plan of yours is named pro.')],
+        ['a bare code', json(404, { code: 'plan_not_found', message: 'No such plan.' })],
+    ])('is plan_not_found on %s', async (_label, response) => {
         const { fetch } = mockFetch(response);
 
         await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
             status: 404,
             code: 'plan_not_found',
+            apiCode: 'plan_not_found',
+        });
+    });
+
+    it.each([
+        ['a subscription', coded(404, 'subscription_not_found', 'No such subscription.')],
+        ['any other code', coded(404, 'not_found', 'Nothing here.')],
+        ["Nest's error without a code", nest(404, 'No plan of yours is named pro.', 'Not Found')],
+    ])('is not_found on %s', async (_label, response) => {
+        const { fetch } = mockFetch(response);
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            status: 404,
+            code: 'not_found',
+        });
+    });
+});
+
+// The back's stable codes (#180): `code` and `retryable` on every error body.
+describe("the back's error codes", () => {
+    it.each([
+        [400, 'invalid_request', 'invalid_request'],
+        [400, 'mint_not_on_chain', 'invalid_request'],
+        [401, 'invalid_api_key', 'unauthorized'],
+        [401, 'missing_api_key', 'unauthorized'],
+        [403, 'forbidden', 'forbidden'],
+        [403, 'origin_not_allowed', 'forbidden'],
+        [403, 'terms_expired', 'forbidden'],
+        [404, 'plan_not_found', 'plan_not_found'],
+        [404, 'subscription_not_found', 'not_found'],
+        [409, 'conflict', 'conflict'],
+        [409, 'already_subscribed', 'conflict'],
+        [409, 'plan_ended', 'conflict'],
+        [413, 'payload_too_large', 'unexpected'],
+    ])('maps %i %s to %s, with the code as apiCode', async (status, apiCode, code) => {
+        const { fetch } = mockFetch(coded(status, apiCode, 'nope'));
+
+        const error = await transport(fetch)
+            .get('/v1/access')
+            .catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).toMatchObject({ status, code, apiCode, retryable: false, message: 'nope' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        [429, 'rate_limited', 'rate_limited'],
+        [500, 'internal_error', 'unavailable'],
+        [503, 'unavailable', 'unavailable'],
+        [503, 'network_unavailable', 'unavailable'],
+        [409, 'subscription_changed', 'conflict'],
+    ])(
+        'retries %i %s, which the back marks retryable, then throws %s',
+        async (status, apiCode, code) => {
+            const { fetch } = mockFetch(
+                coded(status, apiCode, 'a', true),
+                coded(status, apiCode, 'b', true),
+                coded(status, apiCode, 'c', true),
+            );
+
+            const result = settle(transport(fetch).get('/v1/access'));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toMatchObject({ status, code, apiCode, retryable: true, message: 'c' });
+            expect(fetch).toHaveBeenCalledTimes(3);
+        },
+    );
+
+    it('does not retry a 409 the back marks not retryable', async () => {
+        const { fetch } = mockFetch(coded(409, 'terms_changed', 'Start again from the terms.'));
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            code: 'conflict',
+            apiCode: 'terms_changed',
+            retryable: false,
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the body on the error', async () => {
+        const { fetch } = mockFetch(coded(409, 'already_subscribed', 'Already subscribed.'));
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            body: {
+                statusCode: 409,
+                error: 'Conflict',
+                message: 'Already subscribed.',
+                code: 'already_subscribed',
+                retryable: false,
+            },
+        });
+    });
+
+    it('keeps a body that is not JSON as its text, with no apiCode', async () => {
+        const { fetch } = mockFetch(new Response('<h1>Forbidden</h1>', { status: 403 }));
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            code: 'forbidden',
+            apiCode: null,
+            retryable: false,
+            body: '<h1>Forbidden</h1>',
+        });
+    });
+
+    // The 1000 subscriptions waiting for a signature: an hour, not a second.
+    describe('the pending cap', () => {
+        const capped = (headers: Record<string, string> = {}) =>
+            coded(
+                429,
+                'pending_cap_reached',
+                'Too many subscriptions are waiting for a signature in this project. Try again later.',
+                true,
+                headers,
+            );
+
+        it('is not retried like a rate limit', async () => {
+            const { fetch } = mockFetch(capped());
+
+            const error = await transport(fetch)
+                .get('/v1/access')
+                .catch((e: unknown) => e);
+
+            expect(error).toMatchObject({
+                status: 429,
+                code: 'rate_limited',
+                apiCode: 'pending_cap_reached',
+                retryable: true,
+            });
+            expect(fetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('is retried when Mesub says when, after that wait', async () => {
+            const { fetch } = mockFetch(capped({ 'retry-after': '2' }), json(200, { ok: 1 }));
+            const result = settle(transport(fetch).get('/v1/access'));
+
+            await vi.advanceTimersByTimeAsync(1_999);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
+
+            expect((await result).value).toEqual({ ok: 1 });
+        });
+
+        it('is retried when x-should-retry says so, even without a Retry-After', async () => {
+            const { fetch } = mockFetch(capped({ 'x-should-retry': 'true' }), json(200, { ok: 1 }));
+
+            const result = settle(transport(fetch).get('/v1/access'));
+            await vi.runAllTimersAsync();
+
+            expect((await result).value).toEqual({ ok: 1 });
+            expect(fetch).toHaveBeenCalledTimes(2);
+        });
+
+        it('is not retried on a Retry-After it cannot read', async () => {
+            const { fetch } = mockFetch(capped({ 'retry-after': 'later' }));
+
+            await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+                apiCode: 'pending_cap_reached',
+            });
+            expect(fetch).toHaveBeenCalledTimes(1);
         });
     });
 });
@@ -372,6 +546,17 @@ describe('Retry-After', () => {
 });
 
 describe('timeouts and network errors', () => {
+    it('marks them retryable, with no apiCode and no body', async () => {
+        const { fetch } = mockFetch(new TypeError('fetch failed'));
+
+        await expect(transport(fetch, { maxRetries: 0 }).get('/v1/access')).rejects.toMatchObject({
+            status: null,
+            apiCode: null,
+            retryable: true,
+            body: undefined,
+        });
+    });
+
     it('aborts an attempt after 5 s and retries it', async () => {
         const { fetch } = mockFetch('hang', json(200, { ok: 1 }));
         const result = settle(transport(fetch).get('/v1/access'));

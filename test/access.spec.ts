@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 
 import type { AccessAnswer, AccessList, CacheStore, MesubOptions } from '../src/index.js';
 import { Mesub, MemoryStore, MesubError } from '../src/index.js';
-import { json, mockFetch, nest } from './helpers.js';
+import { coded, json, mockFetch, nest } from './helpers.js';
 
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 const OTHER_WALLET = 'SysvarC1ock11111111111111111111111111111111';
@@ -279,7 +279,13 @@ describe('access', () => {
                 .catch((caught: unknown) => caught);
 
             expect(error).toBeInstanceOf(MesubError);
-            expect(error).toMatchObject({ status: 200, code: 'unexpected' });
+            expect(error).toMatchObject({
+                status: 200,
+                code: 'unexpected',
+                apiCode: null,
+                retryable: false,
+                body,
+            });
             expect((error as MesubError).message).toBe(
                 `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
             );
@@ -508,7 +514,11 @@ describe('access', () => {
     });
     describe('when Mesub cannot answer', () => {
         it.each([
-            ['a refused plan', nest(404, 'No plan of yours is named pro.'), 'plan_not_found'],
+            [
+                'a refused plan',
+                coded(404, 'plan_not_found', 'No plan of yours is named pro.'),
+                'plan_not_found',
+            ],
             ['a bad key', nest(401, 'That API key is not valid.'), 'unauthorized'],
             [
                 'a bad wallet',
@@ -685,13 +695,17 @@ describe('hasAccess', () => {
     describe('an integration error', () => {
         it.each([
             ['a bad key', nest(401, 'That API key is not valid.'), 'unauthorized'],
-            ['an unknown plan', nest(404, 'No plan of yours is named pro.'), 'plan_not_found'],
+            [
+                'an unknown plan',
+                coded(404, 'plan_not_found', 'No plan of yours is named pro.'),
+                'plan_not_found',
+            ],
             [
                 'a malformed wallet',
                 nest(400, ['wallet must be a base58 Solana address']),
                 'invalid_request',
             ],
-            ['a forbidden call', nest(403, 'Forbidden'), 'unexpected'],
+            ['a forbidden call', nest(403, 'Forbidden'), 'forbidden'],
         ])('throws on %s, and never answers false', async (_label, failure, code) => {
             const { fetch } = mockFetch(failure);
 

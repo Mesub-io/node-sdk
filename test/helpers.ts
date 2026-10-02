@@ -1,3 +1,5 @@
+import { STATUS_CODES } from 'node:http';
+
 import { vi } from 'vitest';
 
 export type FetchCall = { url: URL; init: RequestInit };
@@ -29,4 +31,19 @@ export function json(status: number, body: unknown, headers: Record<string, stri
 
 export function nest(status: number, message: string | string[], error = 'Error') {
     return json(status, { message, error, statusCode: status });
+}
+
+/** The back's error body since its error codes (#180): Nest's, plus `code` and `retryable`. */
+export function coded(
+    status: number,
+    code: string,
+    message: string,
+    retryable = false,
+    headers: Record<string, string> = {},
+) {
+    return json(
+        status,
+        { statusCode: status, error: STATUS_CODES[status], message, code, retryable },
+        headers,
+    );
 }
