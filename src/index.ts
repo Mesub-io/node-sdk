@@ -1,8 +1,8 @@
 /** `@mesub/node`: the client, its types and errors, and the memory cache. */
 export { Mesub } from './client.js';
 export type { Decision, MesubOptions } from './client.js';
-export { MesubError } from './errors.js';
-export type { MesubErrorCode, MesubErrorOptions } from './errors.js';
+export { MesubError, MesubSubmitError } from './errors.js';
+export type { MesubErrorCode, MesubErrorOptions, MesubSubmitErrorOptions } from './errors.js';
 export type {
     AccessAnswer,
     AccessList,
@@ -19,6 +19,7 @@ export type {
     ServerSubscription,
     ServerSubscriptionList,
     ServerSubscriptionStatus,
+    SubmitOptions,
     SubmitParams,
     SubmitResult,
     SubscribeCosts,

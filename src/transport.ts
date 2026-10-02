@@ -63,11 +63,17 @@ export class Transport {
     }
 
     /**
-     * A POST with a JSON body, sent once: never retried, whatever the status,
-     * a timeout or a network error. A write that got no answer may still have
-     * been done, so its caller reads the state back rather than sends it again.
+     * A POST with a JSON body, sent once: never retried here, whatever the
+     * status, a timeout or a network error. A write that got no answer may
+     * still have been done: its caller decides, knowing the route, whether
+     * the same body may be sent again (`submit` does, Mesub-io/backend#190)
+     * or the state read back.
      */
-    async post(path: string, body: unknown, options: RequestOptions = {}): Promise<unknown> {
+    async post(
+        path: string,
+        body: unknown,
+        options: Omit<CallOptions, 'maxRetries'> = {},
+    ): Promise<unknown> {
         return this.#send('POST', new URL(this.#config.baseUrl + path), body, options);
     }
 
@@ -290,8 +296,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Rejects with the signal's reason as soon as it aborts. */
-function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+/** @internal Rejects with the signal's reason as soon as it aborts. */
+export function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
     return new Promise((resolve, reject) => {
         const stop = () => {
             clearTimeout(timer);

@@ -1,5 +1,11 @@
-import { type ListParams, Mesub, MesubError, type ServerSubscription } from '../src/index.js';
-import { json, mockFetch, nest } from './helpers.js';
+import {
+    type ListParams,
+    Mesub,
+    MesubError,
+    MesubSubmitError,
+    type ServerSubscription,
+} from '../src/index.js';
+import { type FetchCall, coded, json, mockFetch, nest } from './helpers.js';
 
 const WALLET = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU';
 const SIGNATURE = '5'.repeat(88);
@@ -159,6 +165,13 @@ describe('subscriptions.create', () => {
 
 describe('subscriptions.submit', () => {
     const signed = { transaction: 'AQAAAA==', terms_signature: SIGNATURE };
+    const SENT = JSON.stringify(signed);
+    const unavailable = (headers: Record<string, string> = { 'retry-after': '10' }) =>
+        coded(503, 'network_unavailable', 'The Solana network did not answer.', true, headers);
+
+    /** The submits sent, by body: always the same one. */
+    const posts = (calls: FetchCall[]) =>
+        calls.filter(({ init }) => init.method === 'POST').map(({ init }) => init.body);
 
     it('posts the signed transaction and terms, and answers what settled', async () => {
         const { fetch, calls } = mockFetch(json(201, { subscription: subscription() }));
@@ -171,40 +184,15 @@ describe('subscriptions.submit', () => {
         expect(JSON.parse(calls[0]!.init.body as string)).toEqual(signed);
     });
 
-    it('answers a pending with its reason', async () => {
+    it("answers Mesub's own pending with its reason", async () => {
         const reason = 'The transaction expired before it landed.';
         const { fetch } = mockFetch(json(201, { subscription: pending(), reason }));
 
         const result = await mesub(fetch).subscriptions.submit('sub_1', signed);
 
         expect(result).toEqual({ subscription: pending(), reason });
+        expect(fetch).toHaveBeenCalledTimes(1);
     });
-
-    it.each([
-        ['no subscription', { reason: 'x' }, 'subscription is missing'],
-        [
-            'a subscription without a status',
-            { subscription: { ...subscription(), status: undefined } },
-            'subscription.status is missing',
-        ],
-        [
-            'a reason that is not a string',
-            { subscription: pending(), reason: 7 },
-            'reason is not a string',
-        ],
-    ])(
-        'throws unexpected on an answer with %s, never sending again',
-        async (_label, body, problem) => {
-            const { fetch } = mockFetch(json(201, body));
-
-            await expect(mesub(fetch).subscriptions.submit('sub_1', signed)).rejects.toMatchObject({
-                status: 201,
-                code: 'unexpected',
-                message: `Mesub answered POST /v1/subscriptions/:id/submit with an answer this SDK cannot read: ${problem}.`,
-            });
-            expect(fetch).toHaveBeenCalledTimes(1);
-        },
-    );
 
     it('escapes the id in the path', async () => {
         const { fetch, calls } = mockFetch(json(201, { subscription: subscription() }));
@@ -226,87 +214,486 @@ describe('subscriptions.submit', () => {
         const { error } = await settle(mesub(fetch).subscriptions.submit('sub_1', signed));
 
         expect(error).toMatchObject({ status: 403, apiCode: 'terms_used' });
+        expect(error).not.toBeInstanceOf(MesubSubmitError);
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('waits 90 s by default, then reads back once instead of sending again', async () => {
-        const { fetch, calls } = mockFetch('hang', json(200, subscription()));
-        const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+    describe('an answer it cannot read', () => {
+        it.each([
+            ['no subscription', { reason: 'x' }],
+            [
+                'a subscription without a status',
+                { subscription: { ...subscription(), status: undefined } },
+            ],
+            ['a reason that is not a string', { subscription: pending(), reason: 7 }],
+        ])('with %s is read back, never sent again', async (_label, body) => {
+            const { fetch, calls } = mockFetch(json(201, body), json(200, subscription()));
 
-        await vi.advanceTimersByTimeAsync(89_999);
-        expect(fetch).toHaveBeenCalledTimes(1);
-        await vi.advanceTimersByTimeAsync(1);
+            const result = await mesub(fetch).subscriptions.submit('sub_1', signed);
 
-        // Landed: the submit answers it as if Mesub had.
-        expect((await result).value).toEqual({ subscription: subscription() });
-        expect(fetch).toHaveBeenCalledTimes(2);
-        expect(calls[1]!.init.method).toBe('GET');
-        expect(calls[1]!.url.href).toBe('https://api.test/v1/subscriptions/sub_1');
-    });
-
-    it('takes a timeout of the call', async () => {
-        const { fetch } = mockFetch('hang', json(200, subscription()));
-        const result = settle(
-            mesub(fetch).subscriptions.submit('sub_1', signed, { timeout: 120_000 }),
-        );
-
-        await vi.advanceTimersByTimeAsync(119_999);
-        expect(fetch).toHaveBeenCalledTimes(1);
-        await vi.advanceTimersByTimeAsync(1);
-
-        expect((await result).value).toEqual({ subscription: subscription() });
-    });
-
-    it('answers what it read back with a reason when nothing landed', async () => {
-        const { fetch } = mockFetch(new TypeError('fetch failed'), json(200, pending()));
-
-        const result = await mesub(fetch).subscriptions.submit('sub_1', signed);
-
-        expect(result).toEqual({
-            subscription: pending(),
-            reason:
-                'The submit got no answer (Could not reach Mesub: fetch failed), ' +
-                'and the subscription read back is pending.',
+            // The row may be active: it is, so it is answered, not an error.
+            expect(result).toEqual({ subscription: subscription() });
+            expect(posts(calls)).toHaveLength(1);
+            expect(calls[1]!.init.method).toBe('GET');
+            expect(calls[1]!.url.pathname).toBe('/v1/subscriptions/sub_1');
         });
-        expect(fetch).toHaveBeenCalledTimes(2);
+
+        it('throws unexpected with what it read back when that is not active', async () => {
+            const body = { subscription: { id: 'sub_1' } };
+            const { fetch, calls } = mockFetch(json(201, body), json(200, pending()));
+
+            const { error } = await settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+
+            expect(error).toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({
+                status: 201,
+                code: 'unexpected',
+                retryable: false,
+                subscription: pending(),
+                sends: 1,
+                body,
+            });
+            expect(error!.message).toBe(
+                'Mesub answered POST /v1/subscriptions/:id/submit with an answer this SDK ' +
+                    'cannot read: subscription.status is missing. The subscription read back ' +
+                    'is pending: read it again with retrieve before creating anew.',
+            );
+            expect(posts(calls)).toHaveLength(1);
+        });
+
+        it('reads back a 2xx that is not JSON too', async () => {
+            const { fetch, calls } = mockFetch(
+                new Response('<html>ok</html>', { status: 201 }),
+                json(200, subscription()),
+            );
+
+            const result = await mesub(fetch).subscriptions.submit('sub_1', signed);
+
+            expect(result).toEqual({ subscription: subscription() });
+            expect(posts(calls)).toHaveLength(1);
+        });
     });
 
-    it('reads back after a 5xx too', async () => {
-        const { fetch } = mockFetch(nest(502, 'Bad Gateway'), json(200, subscription()));
+    // Safe since Mesub-io/backend#190 and #202: the same transaction and terms
+    // signature are answered from the chain, never co-signed again.
+    describe('when a send gets no answer', () => {
+        it('sends the same request again after the Retry-After, and answers that', async () => {
+            const { fetch, calls } = mockFetch(
+                unavailable(),
+                json(201, { subscription: subscription() }),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
 
-        const result = await mesub(fetch).subscriptions.submit('sub_1', signed);
+            await vi.advanceTimersByTimeAsync(9_999);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
 
-        expect(result).toEqual({ subscription: subscription() });
-        expect(fetch).toHaveBeenCalledTimes(2);
-    });
+            expect((await result).value).toEqual({ subscription: subscription() });
+            expect(posts(calls)).toEqual([SENT, SENT]);
+            expect(calls[1]!.url.pathname).toBe('/v1/subscriptions/sub_1/submit');
+        });
 
-    it("throws the submit's own error when the read back fails too", async () => {
-        const failure = new TypeError('fetch failed');
-        const { fetch } = mockFetch(failure, failure, failure, failure);
+        it('waits the Retry-After Mesub asks for', async () => {
+            const { fetch } = mockFetch(
+                unavailable({ 'retry-after': '3' }),
+                json(201, { subscription: subscription() }),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
 
-        const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
-        await vi.runAllTimersAsync();
-        const { error } = await result;
+            await vi.advanceTimersByTimeAsync(2_999);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
 
-        expect(error).toMatchObject({ status: null, code: 'unavailable' });
-        expect(error!.cause).toBe(failure);
-        // The submit once, then the read with its own retries: never a second submit.
-        const posts = vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'POST');
-        expect(posts).toHaveLength(1);
-    });
+            expect((await result).value).toEqual({ subscription: subscription() });
+        });
 
-    it('does not read back when the caller aborted', async () => {
-        const controller = new AbortController();
-        const { fetch } = mockFetch('hang', json(200, subscription()));
-        const result = settle(
-            mesub(fetch).subscriptions.submit('sub_1', signed, { signal: controller.signal }),
+        it('waits 10 s when Mesub names no wait, as after a network error', async () => {
+            const { fetch } = mockFetch(
+                new TypeError('fetch failed'),
+                nest(502, 'Bad Gateway'),
+                json(201, { subscription: subscription() }),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+
+            await vi.advanceTimersByTimeAsync(9_999);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(fetch).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(10_000);
+
+            expect((await result).value).toEqual({ subscription: subscription() });
+            expect(fetch).toHaveBeenCalledTimes(3);
+        });
+
+        it("answers a replay's pending with Mesub's reason", async () => {
+            const reason = 'The transaction expired before it landed.';
+            const { fetch } = mockFetch(
+                unavailable(),
+                json(201, { subscription: pending(), reason }),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+
+            expect((await result).value).toEqual({ subscription: pending(), reason });
+        });
+
+        it('replays an error Mesub marks retryable, then reads back', async () => {
+            const { fetch, calls } = mockFetch(
+                coded(500, 'internal_error', 'Something broke.', true),
+                coded(409, 'subscription_changed', 'Ask again.', true),
+                json(201, { subscription: subscription() }),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+
+            expect((await result).value).toEqual({ subscription: subscription() });
+            expect(posts(calls)).toEqual([SENT, SENT, SENT]);
+        });
+
+        it('sends three times at most, then throws with what it read back', async () => {
+            const { fetch, calls } = mockFetch('hang', 'hang', 'hang', json(200, pending()));
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, {
+                    timeout: 10_000,
+                    budget: 60_000,
+                }),
+            );
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toBeInstanceOf(MesubSubmitError);
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({
+                status: null,
+                code: 'unavailable',
+                retryable: true,
+                subscription: pending(),
+                sends: 3,
+            });
+            expect(error!.message).toBe(
+                'Mesub never said what became of the submit, sent 3 times: Mesub did not answer ' +
+                    'within 10000 ms. The subscription read back is pending: read it again ' +
+                    'with retrieve before creating anew.',
+            );
+            expect(posts(calls)).toEqual([SENT, SENT, SENT]);
+            expect(calls[3]!.init.method).toBe('GET');
+            expect(fetch).toHaveBeenCalledTimes(4);
+        });
+
+        it('keeps to 120 s by default: 90 s, a 10 s wait, and what is left', async () => {
+            const { fetch } = mockFetch('hang', 'hang', json(200, pending()));
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+
+            await vi.advanceTimersByTimeAsync(99_999);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(fetch).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(19_999);
+            expect(fetch).toHaveBeenCalledTimes(2);
+            await vi.advanceTimersByTimeAsync(1);
+            const { error } = await result;
+
+            // Cut at the budget: no third send, the read back instead.
+            expect(error).toMatchObject({ code: 'unavailable', subscription: pending(), sends: 2 });
+            expect(fetch).toHaveBeenCalledTimes(3);
+        });
+
+        it('takes a timeout and a budget of the call', async () => {
+            const { fetch } = mockFetch(
+                new TypeError('fetch failed'),
+                new TypeError('fetch failed'),
+                json(200, pending()),
+            );
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, { budget: 15_000 }),
+            );
+            await vi.runAllTimersAsync();
+
+            // Sent at 0 and 10 s: a third at 20 s would be past the budget.
+            expect((await result).error).toMatchObject({ sends: 2, subscription: pending() });
+        });
+
+        it.each([0, -1, Number.NaN, Infinity])(
+            'refuses a budget of %s, sending nothing',
+            async (budget) => {
+                const { fetch } = mockFetch();
+
+                await expect(
+                    mesub(fetch).subscriptions.submit('sub_1', signed, { budget }),
+                ).rejects.toBeInstanceOf(TypeError);
+                expect(fetch).not.toHaveBeenCalled();
+            },
         );
 
-        controller.abort();
-        await vi.runAllTimersAsync();
+        it('does not wait a Retry-After that outlasts the budget', async () => {
+            const { fetch } = mockFetch(
+                unavailable({ 'retry-after': '200' }),
+                json(200, pending()),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.advanceTimersByTimeAsync(0);
 
-        expect((await result).error).toMatchObject({ name: 'AbortError' });
-        expect(fetch).toHaveBeenCalledTimes(1);
+            expect((await result).error).toMatchObject({
+                status: 503,
+                code: 'unavailable',
+                apiCode: 'network_unavailable',
+                retryAfter: 200_000,
+                sends: 1,
+            });
+            expect(fetch).toHaveBeenCalledTimes(2);
+        });
+
+        it('answers what it read back when that landed', async () => {
+            const { fetch } = mockFetch(
+                'hang',
+                'hang',
+                'hang',
+                json(200, subscription({ status: 'cancelled' })),
+            );
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, {
+                    timeout: 1_000,
+                    budget: 60_000,
+                }),
+            );
+            await vi.runAllTimersAsync();
+
+            expect((await result).value).toEqual({
+                subscription: subscription({ status: 'cancelled' }),
+            });
+        });
+
+        it('reads back a 5xx Mesub marks not retryable, without sending it again', async () => {
+            const { fetch, calls } = mockFetch(
+                coded(500, 'internal_error', 'Something broke.', false),
+                json(200, pending()),
+            );
+
+            const { error } = await settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+
+            expect(error).toMatchObject({ status: 500, subscription: pending(), sends: 1 });
+            expect(posts(calls)).toHaveLength(1);
+        });
+
+        it('throws with a null subscription when the read back fails too', async () => {
+            const failure = new TypeError('fetch failed');
+            const { fetch } = mockFetch(failure, failure, failure, failure, failure, failure);
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({ code: 'unavailable', subscription: null, sends: 3 });
+            expect(error!.message).toMatch(/Reading the subscription back failed too: /);
+            expect((error!.cause as MesubError).cause).toBe(failure);
+        });
+
+        it("throws Mesub's refusal of a replay as is", async () => {
+            const { fetch } = mockFetch(
+                unavailable(),
+                coded(409, 'transaction_expired', 'This transaction expired before it was sent.'),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).not.toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({ status: 409, apiCode: 'transaction_expired' });
+            expect(fetch).toHaveBeenCalledTimes(2);
+        });
+
+        // The first send may have been co-signed, and the row has moved on
+        // since: the merchant gets the row, not a bare 409.
+        it('reads back a replay refused as not awaiting a signature', async () => {
+            const refusal = () =>
+                coded(
+                    409,
+                    'not_awaiting_signature',
+                    'This subscription is not waiting for a signature.',
+                );
+            const expired = subscription({
+                status: 'expired',
+                access: false,
+                payment_status: 'none',
+                access_until: null,
+                confirmed_at: null,
+            });
+            const { fetch, calls } = mockFetch(
+                'hang',
+                refusal(),
+                json(200, expired),
+                'hang',
+                refusal(),
+                json(200, subscription()),
+            );
+            const options = { timeout: 1_000 };
+
+            const first = settle(mesub(fetch).subscriptions.submit('sub_1', signed, options));
+            await vi.runAllTimersAsync();
+            const { error } = await first;
+
+            expect(error).toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({
+                status: 409,
+                code: 'conflict',
+                apiCode: 'not_awaiting_signature',
+                retryable: false,
+                subscription: expired,
+                sends: 2,
+            });
+            expect(error!.message).toBe(
+                'This subscription is not waiting for a signature. The subscription read ' +
+                    'back is expired: read it again with retrieve before creating anew.',
+            );
+            expect(posts(calls)).toEqual([SENT, SENT]);
+
+            // Landed after all: answered.
+            const second = settle(mesub(fetch).subscriptions.submit('sub_1', signed, options));
+            await vi.runAllTimersAsync();
+            expect((await second).value).toEqual({ subscription: subscription() });
+        });
+
+        it('throws not awaiting a signature as is when no send was lost', async () => {
+            const { fetch } = mockFetch(
+                coded(409, 'not_awaiting_signature', 'Not waiting for a signature.'),
+            );
+
+            const { error } = await settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+
+            expect(error).not.toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({ status: 409, apiCode: 'not_awaiting_signature' });
+            expect(fetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('throws a retryable refusal as is when every send got one', async () => {
+            const limited = () => coded(429, 'rate_limited', 'Slow down.', true);
+            const { fetch } = mockFetch(limited(), limited(), limited());
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            // Nothing was done: no read back.
+            expect(error).not.toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({ status: 429, code: 'rate_limited' });
+            expect(fetch).toHaveBeenCalledTimes(3);
+        });
+
+        it('reads back when a retryable refusal follows a send that got no answer', async () => {
+            const limited = () => coded(429, 'rate_limited', 'Slow down.', true);
+            const { fetch } = mockFetch(unavailable(), limited(), limited(), json(200, pending()));
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+
+            const { error } = await result;
+
+            // The last answer's fields, the last send's error as the cause.
+            expect(error).toMatchObject({
+                status: 429,
+                code: 'unavailable',
+                apiCode: 'rate_limited',
+                retryable: true,
+                subscription: pending(),
+                sends: 3,
+            });
+            expect((error!.cause as MesubError).apiCode).toBe('rate_limited');
+        });
+
+        it('keeps the last response it got when later sends got none', async () => {
+            const { fetch } = mockFetch(unavailable(), 'hang', 'hang', json(200, pending()));
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, {
+                    timeout: 1_000,
+                    budget: 60_000,
+                }),
+            );
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toMatchObject({
+                status: 503,
+                code: 'unavailable',
+                apiCode: 'network_unavailable',
+                retryAfter: 10_000,
+                sends: 3,
+            });
+            expect(error!.cause).toMatchObject({ status: null, code: 'unavailable' });
+            expect(error!.message).toMatch(
+                /^Mesub never said what became of the submit, sent 3 times: Mesub did not answer within 1000 ms\. /,
+            );
+        });
+    });
+
+    // A submit never takes longer than its budget plus 10 s: 130 s by default.
+    describe('the read back', () => {
+        it('gives up 10 s after the budget, retries included', async () => {
+            const { fetch } = mockFetch('hang', 'hang', 'hang', 'hang', 'hang');
+            const started = Date.now();
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toMatchObject({ code: 'unavailable', subscription: null, sends: 2 });
+            expect(Date.now() - started).toBe(130_000);
+        });
+
+        it('waits no Retry-After past those 10 s', async () => {
+            const busy = () => coded(503, 'unavailable', 'Busy.', true, { 'retry-after': '30' });
+            const { fetch } = mockFetch('hang', 'hang', busy(), json(200, pending()));
+            const started = Date.now();
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toMatchObject({ subscription: null });
+            expect(Date.now() - started).toBe(120_000);
+            expect(fetch).toHaveBeenCalledTimes(3);
+        });
+    });
+
+    describe('an abort', () => {
+        it('stops a send, with no read back', async () => {
+            const controller = new AbortController();
+            const { fetch } = mockFetch('hang', json(200, subscription()));
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, { signal: controller.signal }),
+            );
+
+            controller.abort();
+            await vi.runAllTimersAsync();
+
+            expect((await result).error).toMatchObject({ name: 'AbortError' });
+            expect(fetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('stops the wait before a replay, sending nothing more', async () => {
+            const controller = new AbortController();
+            const { fetch } = mockFetch(unavailable(), json(201, { subscription: subscription() }));
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, { signal: controller.signal }),
+            );
+
+            await vi.advanceTimersByTimeAsync(5_000);
+            controller.abort();
+            await vi.runAllTimersAsync();
+
+            expect((await result).error).toMatchObject({ name: 'AbortError' });
+            expect(fetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('stops the read back', async () => {
+            const controller = new AbortController();
+            const { fetch } = mockFetch(json(201, { subscription: { id: 'sub_1' } }), 'hang');
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, { signal: controller.signal }),
+            );
+
+            await vi.advanceTimersByTimeAsync(0);
+            controller.abort();
+            await vi.runAllTimersAsync();
+
+            expect((await result).error).toMatchObject({ name: 'AbortError' });
+            expect(fetch).toHaveBeenCalledTimes(2);
+        });
     });
 });
 
