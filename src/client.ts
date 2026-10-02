@@ -4,6 +4,7 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
+import { apiKeyOf, baseUrlOf, numberOf } from './options.js';
 import { Subscriptions } from './subscriptions.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
@@ -83,42 +84,47 @@ export class Mesub {
     private readonly guardTimeout: number;
 
     constructor(options: MesubOptions = {}) {
-        const apiKey = options.apiKey || process.env['MESUB_API_KEY'];
-        if (!apiKey) {
-            throw new Error(
-                'Missing Mesub API key: pass `new Mesub({ apiKey })` or set MESUB_API_KEY.',
-            );
+        // Every option is checked here, before anything is built: a TypeError
+        // now rather than a 401 or a 1 ms timeout on every call.
+        const apiKey = apiKeyOf(options.apiKey);
+        const baseUrl = baseUrlOf(options.baseUrl, DEFAULT_BASE_URL);
+        if (options.fetch !== undefined && typeof options.fetch !== 'function') {
+            throw new TypeError('fetch must be a function.');
         }
+        // Resolved per call so a fetch patched after construction is still used.
+        const fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+        // NaN or 0 would cut every call before it starts.
+        this.guardTimeout = numberOf('guardTimeout', options.guardTimeout, DEFAULT_GUARD_TIMEOUT, {
+            delay: true,
+        });
 
         this.transport = new Transport({
             apiKey,
-            baseUrl: (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, ''),
-            // Resolved per call so a fetch patched after construction is still used.
-            fetch: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
-            timeout: options.timeout ?? 5_000,
-            maxRetries: options.maxRetries ?? 2,
+            baseUrl,
+            fetch,
+            timeout: numberOf('timeout', options.timeout, 5_000, { delay: true }),
+            maxRetries: numberOf('maxRetries', options.maxRetries, 2, {
+                zero: true,
+                integer: true,
+            }),
         });
         this.subscriptions = new Subscriptions(this.transport);
         const store = options.cache ?? new MemoryStore<AccessAnswer | AccessList>();
         const staleness =
-            options.maxStaleMs === undefined ? {} : { maxStaleMs: options.maxStaleMs };
+            options.maxStaleMs === undefined
+                ? {}
+                : { maxStaleMs: numberOf('maxStaleMs', options.maxStaleMs, 0, { zero: true }) };
         // One store for both: their keys never meet (`mesub:access:` and
         // `mesub:access-list:`), so each reads back only what it wrote.
         this.cache = new AccessCache(store as CacheStore<AccessAnswer>, staleness);
         this.lists = new AccessCache(store as CacheStore<AccessList>, staleness);
-        this.guardTimeout = options.guardTimeout ?? DEFAULT_GUARD_TIMEOUT;
-        // NaN or 0 would cut every guard's call before it starts.
-        if (!(this.guardTimeout > 0)) {
-            throw new Error('guardTimeout must be a positive number of milliseconds.');
-        }
         let cacheScope: Promise<string> | undefined;
         this.cacheScope = () => (cacheScope ??= hashScope(apiKey));
         let cacheSecret: Promise<HmacKey> | undefined;
         this.cacheSecret = () => (cacheSecret ??= importSecret(apiKey));
-        const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
         this.tokens = new TokenVerifier({
             baseUrl,
-            fetch: options.fetch ?? ((input, init) => globalThis.fetch(input, init)),
+            fetch,
             projectId: () => this.projectId(),
         });
     }
