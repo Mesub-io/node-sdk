@@ -12,6 +12,8 @@ export default defineConfig({
         express: 'src/express.ts',
         next: 'src/next.ts',
         nest: 'src/nest.ts',
+        // The fake Mesub, for merchants' tests: loaded only by its own entry.
+        testing: 'src/testing.ts',
     },
     format: ['esm', 'cjs'],
     // Shared chunks in CJS too: without them each entry inlines its own copy

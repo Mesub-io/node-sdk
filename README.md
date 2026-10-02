@@ -416,6 +416,45 @@ A `submit` whose outcome Mesub never told throws a `MesubSubmitError`, a
 `MesubError` that also carries the `subscription` read back and its `sends`:
 see [Subscribe from your server](#subscribe-from-your-server).
 
+## Test your integration
+
+`@mesub/node/testing` is a fake Mesub for your own tests: it answers what the
+SDK asks (`/v1/access`, `/v1/project`, `/v1/subscriptions`, the public keys)
+from what each test sets, through a `fetch` handed to the client. No network,
+no Mesub account, and nothing of it in your production bundle.
+
+```ts
+import { FakeMesub } from '@mesub/node/testing';
+
+const fake = new FakeMesub(); // or { plans: ['pro'] }: any other slug is plan_not_found
+const mesub = fake.client(); // a real Mesub, wired to the fake
+
+fake.grant(wallet, 'pro'); // active and paid
+fake.grant({ external_id: 'user_42' }, 'pro', { wallet }); // by your own id
+fake.deny(wallet, 'team', { status: 'stopped' }); // or setAccess(...) for any answer
+
+await mesub.hasAccess(wallet, 'pro'); // true
+
+// A guard, end to end: a token signed by the fake, for its project.
+app.get('/api/reports', requirePlan('pro', { client: mesub }), handler);
+await request(app)
+    .get('/api/reports')
+    .set('Authorization', `Bearer ${await fake.token(wallet)}`);
+
+fake.fail('outage'); // every access and subscriptions call answers 503, until fail(null)
+fake.fail({ status: 429, code: 'rate_limited', retryAfter: 2 });
+fake.requests; // every call received: method, path, query, headers, body
+fake.reset(); // between tests
+```
+
+Its answers are stale at once (`revalidate_after: 0`), so a change shows on
+the next call while the outage fallback still has them; pass
+`revalidate_after` to test the cache. A customer is answered as named: a
+wallet granted is not found by its external id. `subscriptions.create` then
+`submit` land at once and grant the plan; `addSubscription` adds one for
+`retrieve` and `list`. Pass `fake.fetch` to your own `new Mesub()` with
+`fake.apiKey` and `fake.baseUrl` if you build the client yourself.
+
 ## Requirements
 
 Node 20 or later. Express, Next and `@nestjs/common` are optional peer
@@ -429,7 +468,8 @@ pnpm test          # unit tests, against a fake Mesub
 pnpm typecheck
 pnpm lint
 pnpm build         # dist/, ESM and CJS, with declaration files
-pnpm check:exports # every entry resolves through import and require, and shares one MesubError
+pnpm check:exports # every entry resolves through import and require, shares one MesubError,
+                   # and the fake Mesub stays in @mesub/node/testing
 ```
 
 The pre-push hook runs all of it, as CI does on Node 20, 22 and 24.
