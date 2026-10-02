@@ -6,6 +6,7 @@ function transport(fetch: typeof globalThis.fetch, overrides: { maxRetries?: num
     return new Transport({
         apiKey: 'sk_test',
         baseUrl: 'https://api.test',
+        headers: {},
         fetch,
         timeout: 5_000,
         maxRetries: overrides.maxRetries ?? 2,

@@ -6,6 +6,8 @@ export type QueryValue = string | number | boolean | undefined;
 export interface TransportConfig {
     apiKey: string;
     baseUrl: string;
+    /** Sent with every call, before the SDK's own, which they never replace. */
+    headers: Record<string, string>;
     fetch: typeof fetch;
     timeout: number;
     maxRetries: number;
@@ -55,7 +57,7 @@ export class Transport {
         query: Record<string, QueryValue> = {},
         options: CallOptions = {},
     ): Promise<unknown> {
-        const url = new URL(this.#config.baseUrl + path);
+        const url = endpoint(this.#config.baseUrl, path);
         for (const [key, value] of Object.entries(query)) {
             if (value !== undefined) url.searchParams.set(key, String(value));
         }
@@ -74,7 +76,7 @@ export class Transport {
         body: unknown,
         options: Omit<CallOptions, 'maxRetries'> = {},
     ): Promise<unknown> {
-        return this.#send('POST', new URL(this.#config.baseUrl + path), body, options);
+        return this.#send('POST', endpoint(this.#config.baseUrl, path), body, options);
     }
 
     async #send(method: Method, url: URL, body: unknown, options: CallOptions): Promise<unknown> {
@@ -128,6 +130,7 @@ export class Transport {
             const response = await this.#config.fetch(url, {
                 method,
                 headers: {
+                    ...this.#config.headers,
                     Authorization: `Bearer ${this.#config.apiKey}`,
                     Accept: 'application/json',
                     'User-Agent': `@mesub/node/${VERSION}`,
@@ -190,6 +193,16 @@ export class Transport {
             signal?.removeEventListener('abort', stop);
         }
     }
+}
+
+/**
+ * @internal A path under the base URL, which may carry its own path:
+ * `https://proxy.example.com/mesub` and `/v1/access` make
+ * `https://proxy.example.com/mesub/v1/access`. Never `new URL(path, base)`,
+ * which drops the base's path for a path starting with `/`.
+ */
+export function endpoint(baseUrl: string, path: string): URL {
+    return new URL(baseUrl + path);
 }
 
 /**

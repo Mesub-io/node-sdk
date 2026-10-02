@@ -305,7 +305,9 @@ that: `guardTimeout` binds the guards only.
 ```ts
 new Mesub({
     apiKey, // default: process.env.MESUB_API_KEY
-    baseUrl, // default: https://api.mesub.io
+    baseUrl, // default: https://api.mesub.io, may carry a path
+    issuer, // the tokens' iss, default: baseUrl
+    headers, // extra headers on every call, e.g. for a proxy
     timeout, // per attempt, ms, default 5000
     maxRetries, // default 2
     fetch, // a custom fetch, e.g. bound to your own agent
@@ -321,6 +323,26 @@ the option: a `baseUrl` that is not https (plain http only to `localhost` or
 number of milliseconds, `maxRetries` or `maxStaleMs` below 0, or the
 publishable `PUB_` key where the secret `SUB_` one goes. On an edge runtime
 without `process.env` (Cloudflare Workers), pass `apiKey` yourself.
+
+Behind a proxy, `baseUrl` may carry a path: every call, the public keys
+included, goes under it (`https://proxy.example.com/mesub/v1/access`,
+`.../mesub/.well-known/jwks.json`). The access tokens still name Mesub's own
+URL as their issuer, so say which, and add whatever the proxy asks for, such
+as a Cloudflare Access service token:
+
+```ts
+new Mesub({
+    baseUrl: 'https://proxy.example.com/mesub',
+    issuer: 'https://api.mesub.io',
+    headers: {
+        'CF-Access-Client-Id': process.env.CF_ACCESS_CLIENT_ID!,
+        'CF-Access-Client-Secret': process.env.CF_ACCESS_CLIENT_SECRET!,
+    },
+});
+```
+
+`headers` cannot replace the SDK's own (`Authorization`, `User-Agent`,
+`Accept`, `Content-Type`), and the API key is never sent for the public keys.
 
 The memory cache is per process and emptied on restart. A store is two
 methods, so Redis is a few lines, and keeps the outage fallback across
