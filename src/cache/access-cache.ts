@@ -76,6 +76,10 @@ export class AccessCache<T extends Revalidating> {
     }
 
     async write(who: string, plan: string | null, value: T, scope?: string): Promise<void> {
+        // NaN or Infinity would make an entry that never goes stale, and a TTL
+        // Redis refuses. The client checks every answer first; this is the floor.
+        if (!Number.isFinite(value.revalidate_after)) return;
+
         const now = this.now();
         const freshUntil = now + Math.max(0, value.revalidate_after) * 1000;
         const keepUntil = freshUntil + this.maxStaleMs;
