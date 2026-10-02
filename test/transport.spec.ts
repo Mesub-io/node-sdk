@@ -37,12 +37,14 @@ describe('Transport.get', () => {
         await expect(transport(fetch).get('/v1/access')).resolves.toEqual({ active: true });
     });
 
-    it('sends the key, Accept and User-Agent, as a GET', async () => {
+    it('sends the key, Accept and User-Agent, as a GET with no body', async () => {
         const { fetch, calls } = mockFetch(json(200, {}));
         await transport(fetch).get('/v1/access');
 
         const headers = calls[0]!.init.headers as Record<string, string>;
         expect(calls[0]!.init.method).toBe('GET');
+        expect(calls[0]!.init.body).toBeUndefined();
+        expect(headers['Content-Type']).toBeUndefined();
         expect(headers['Authorization']).toBe('Bearer sk_test');
         expect(headers['Accept']).toBe('application/json');
         expect(headers['User-Agent']).toMatch(/^@mesub\/node\/\d+\.\d+\.\d+/);
@@ -84,6 +86,8 @@ describe('status mapping', () => {
         [401, 'unauthorized'],
         [403, 'unexpected'],
         [404, 'plan_not_found'],
+        // A conflict is final: asking again cannot change the answer.
+        [409, 'unexpected'],
         [422, 'unexpected'],
     ])('maps %i to %s, without retrying', async (status, code) => {
         const { fetch } = mockFetch(nest(status, 'nope'));
@@ -98,7 +102,6 @@ describe('status mapping', () => {
 
     it.each([
         [408, 'unexpected'],
-        [409, 'unexpected'],
         [429, 'rate_limited'],
         [500, 'unavailable'],
         [502, 'unavailable'],
@@ -268,6 +271,46 @@ describe('x-should-retry', () => {
 
         await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 400 });
         expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+// Mesub-io/backend#180: every error body says whether asking again may work.
+describe("the body's retryable", () => {
+    it('forbids a retry on a status that is retried', async () => {
+        const { fetch } = mockFetch(json(503, { message: 'down', code: 'x', retryable: false }));
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 503 });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('allows a retry on a status that is not retried', async () => {
+        const { fetch } = mockFetch(
+            json(409, { message: 'changed', code: 'subscription_changed', retryable: true }),
+            json(200, { ok: 1 }),
+        );
+
+        const result = settle(transport(fetch).get('/v1/access'));
+        await vi.runAllTimersAsync();
+
+        expect((await result).value).toEqual({ ok: 1 });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('gives way to x-should-retry', async () => {
+        const { fetch } = mockFetch(json(503, { retryable: true }, { 'x-should-retry': 'false' }));
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 503 });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('is ignored when it is not a boolean', async () => {
+        const { fetch } = mockFetch(json(503, { retryable: 'no' }), json(200, {}));
+
+        const result = settle(transport(fetch).get('/v1/access'));
+        await vi.runAllTimersAsync();
+        await result;
+
+        expect(fetch).toHaveBeenCalledTimes(2);
     });
 });
 
@@ -471,6 +514,152 @@ describe('a deadline', () => {
         await expect(
             transport(fetch).get('/v1/access', {}, { maxRetries: 0 }),
         ).rejects.toMatchObject({ code: 'unavailable' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('per-call options', () => {
+    it('uses the timeout of the call over the client one', async () => {
+        const { fetch } = mockFetch('hang', json(200, { ok: 1 }));
+        const result = settle(transport(fetch).get('/v1/access', {}, { timeout: 8_000 }));
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(3_000 + 500);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect((await result).value).toEqual({ ok: 1 });
+    });
+
+    it('stops an attempt on the signal, with its reason, and never retries', async () => {
+        const controller = new AbortController();
+        const { fetch } = mockFetch('hang', json(200, {}));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { signal: controller.signal }),
+        );
+
+        await vi.advanceTimersByTimeAsync(100);
+        const reason = new Error('the user left');
+        controller.abort(reason);
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toBe(reason);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('stops the wait before a retry on the signal', async () => {
+        const controller = new AbortController();
+        const { fetch } = mockFetch(nest(503, 'x'), json(200, {}));
+        const result = settle(
+            transport(fetch).get('/v1/access', {}, { signal: controller.signal }),
+        );
+
+        await vi.advanceTimersByTimeAsync(100);
+        controller.abort();
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ name: 'AbortError' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('calls nothing with a signal already aborted', async () => {
+        const { fetch } = mockFetch(json(200, {}));
+
+        const { error } = await settle(
+            transport(fetch).get('/v1/access', {}, { signal: AbortSignal.abort() }),
+        );
+
+        expect(error).toMatchObject({ name: 'AbortError' });
+        expect(fetch).not.toHaveBeenCalled();
+    });
+});
+
+// A write is never sent twice: a submit replayed after a timeout finds its
+// terms spent while the first one lands.
+describe('Transport.post', () => {
+    it('sends the body as JSON, with the key, and returns the parsed answer', async () => {
+        const { fetch, calls } = mockFetch(json(201, { id: 'sub_1' }));
+
+        await expect(
+            transport(fetch).post('/v1/subscriptions', { plan: 'pro', wallet: 'W' }),
+        ).resolves.toEqual({ id: 'sub_1' });
+
+        const { url, init } = calls[0]!;
+        const headers = init.headers as Record<string, string>;
+        expect(url.href).toBe('https://api.test/v1/subscriptions');
+        expect(init.method).toBe('POST');
+        expect(init.body).toBe('{"plan":"pro","wallet":"W"}');
+        expect(headers['Content-Type']).toBe('application/json');
+        expect(headers['Authorization']).toBe('Bearer sk_test');
+        expect(headers['Accept']).toBe('application/json');
+    });
+
+    it.each([408, 409, 429, 500, 503])('does not retry a %i', async (status) => {
+        const { fetch } = mockFetch(nest(status, 'no'), json(201, {}));
+
+        const result = settle(transport(fetch).post('/v1/subscriptions', {}));
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ status, message: 'no' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry even when the body or a header says it may', async () => {
+        const { fetch } = mockFetch(
+            json(
+                429,
+                { code: 'pending_cap_reached', retryable: true },
+                { 'x-should-retry': 'true' },
+            ),
+            json(201, {}),
+        );
+
+        const result = settle(transport(fetch).post('/v1/subscriptions', {}));
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ status: 429, code: 'rate_limited' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry a network error', async () => {
+        const { fetch } = mockFetch(new TypeError('fetch failed'), json(201, {}));
+
+        const result = settle(transport(fetch).post('/v1/subscriptions', {}));
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ status: null, code: 'unavailable' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits the timeout of the call, then gives up without retrying', async () => {
+        const { fetch } = mockFetch('hang', json(201, {}));
+        const result = settle(
+            transport(fetch).post('/v1/subscriptions/s/submit', {}, { timeout: 90_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(89_999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await vi.runAllTimersAsync();
+        const { error } = await result;
+
+        expect(error).toMatchObject({ status: null, code: 'unavailable' });
+        expect(error!.message).toBe('Mesub did not answer within 90000 ms.');
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops on the signal', async () => {
+        const controller = new AbortController();
+        const { fetch } = mockFetch('hang');
+        const result = settle(
+            transport(fetch).post('/v1/subscriptions', {}, { signal: controller.signal }),
+        );
+
+        controller.abort();
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ name: 'AbortError' });
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 });
