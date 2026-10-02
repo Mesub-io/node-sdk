@@ -247,6 +247,24 @@ describe('access', () => {
             expect(key).not.toContain('SUB_test');
         });
 
+        // An id the answer does not carry is no scope: never `undefined` in the key (#27).
+        it('scopes by a hash of the API key when /v1/project answers without an id', async () => {
+            const set = vi.fn();
+            const { fetch } = mockFetch(json(200, answer()));
+            const mesub = new Mesub({
+                apiKey: 'SUB_test',
+                baseUrl: 'https://api.mesub.test',
+                fetch: withProject(fetch, () => json(200, {})),
+                cache: { get: () => undefined, set },
+            });
+
+            await mesub.access(WALLET, 'pro');
+
+            const key = set.mock.calls[0]![0] as string;
+            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:${WALLET}$`));
+            expect(key).not.toContain('undefined');
+        });
+
         it('hashes two API keys apart', async () => {
             const keys: string[] = [];
             const scoped = (apiKey: string) =>

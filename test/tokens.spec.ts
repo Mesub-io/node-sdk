@@ -163,6 +163,67 @@ describe('verifyToken', () => {
         });
     });
 
+    describe('when /v1/project answers without a project id (#27)', () => {
+        const answers: [string, unknown][] = [
+            ['no id', {}],
+            ['an empty id', { id: '' }],
+            ['a number', { id: 123 }],
+            ['null', { id: null }],
+            ['nothing at all', null],
+        ];
+
+        it.each(answers)('refuses to verify when it answers %s', async (_label, body) => {
+            const { mesub } = server(undefined, () => Response.json(body));
+
+            expect(await codeOf(mesub.verifyToken(await token()))).toBe('unavailable');
+        });
+
+        // Without an audience jose skips the check: any project's token would pass.
+        it.each(answers)(
+            "never accepts another project's token when it answers %s",
+            async (_label, body) => {
+                const { mesub } = server(undefined, () => Response.json(body));
+
+                for (const aud of ['proj_2', 'undefined', '']) {
+                    const error = await mesub
+                        .verifyToken(await token({ aud }))
+                        .catch((caught: unknown) => caught);
+                    expect(error).toBeInstanceOf(MesubError);
+                }
+            },
+        );
+
+        it('asks again on the next call instead of keeping the empty answer', async () => {
+            let first = true;
+            const { mesub, calls } = server(undefined, () => {
+                if (!first) return Response.json({ id: PROJECT });
+                first = false;
+                return Response.json({});
+            });
+
+            expect(await codeOf(mesub.verifyToken(await token()))).toBe('unavailable');
+            await expect(mesub.verifyToken(await token())).resolves.toMatchObject({
+                wallet: WALLET,
+            });
+            expect(calls.project).toBe(2);
+        });
+
+        it('checks the audience again once a real id comes back', async () => {
+            let first = true;
+            const { mesub } = server(undefined, () => {
+                if (!first) return Response.json({ id: PROJECT });
+                first = false;
+                return Response.json({ id: '' });
+            });
+
+            await mesub.verifyToken(await token()).catch(() => undefined);
+
+            expect(await codeOf(mesub.verifyToken(await token({ aud: 'proj_2' })))).toBe(
+                'invalid_token',
+            );
+        });
+    });
+
     // The whole point of aud: a token from merchant A is useless at merchant B.
     it('refuses a token issued for another project', async () => {
         const { mesub } = server();

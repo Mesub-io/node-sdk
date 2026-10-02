@@ -99,6 +99,14 @@ export class TokenVerifier {
         // Outside the try: when it fails, it already throws the right MesubError.
         const audience = await this.config.projectId();
 
+        // Never verify without an audience: jose would skip the check (#27).
+        if (typeof audience !== 'string' || audience === '') {
+            throw new MesubError('No project id to check the token against.', {
+                status: null,
+                code: 'unavailable',
+            });
+        }
+
         try {
             // Signature, expiry, project and issuer, all at once. `algorithms`
             // is what refuses a token signed HS256, or not signed at all.

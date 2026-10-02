@@ -124,9 +124,17 @@ export class Mesub {
     private projectId(call: CallOptions = {}): Promise<string> {
         this.projectIdOnce ??= this.transport.get('/v1/project', {}, call).then(
             (answer) => {
-                const { id } = answer as { id: string };
+                const { id } = (answer ?? {}) as { id?: unknown };
 
-                if (typeof id === 'string' && id !== '') this.knownProjectId = id;
+                // Anything else would reach jose as no audience, which skips the
+                // check: a token of any project would pass (#27). Not kept, so
+                // the next call asks again.
+                if (typeof id !== 'string' || id === '') {
+                    this.projectIdOnce = undefined;
+                    throw missingProjectId();
+                }
+
+                this.knownProjectId = id;
                 return id;
             },
             (error: unknown) => {
@@ -275,4 +283,12 @@ async function hashScope(apiKey: string): Promise<string> {
     const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0'));
 
     return `key-${hex.join('').slice(0, 16)}`;
+}
+
+/** `/v1/project` answered without an id: like an outage, nobody can be identified. */
+function missingProjectId(): MesubError {
+    return new MesubError('Mesub answered /v1/project without a project id.', {
+        status: null,
+        code: 'unavailable',
+    });
 }

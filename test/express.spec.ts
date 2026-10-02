@@ -327,6 +327,19 @@ describe('requirePlan', () => {
                 .set('Authorization', `Bearer ${await token()}`)
                 .expect(503);
         });
+
+        // A token of another project must not get in when the id is missing (#27).
+        it.each([
+            ['no id', {}],
+            ['an empty id', { id: '' }],
+        ])('answers 503, never 200, when /v1/project answers %s', async (_label, body) => {
+            const { client } = mesub({ project: () => Response.json(body) });
+
+            await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token({ aud: 'proj_other' })}`)
+                .expect(503);
+        });
     });
 
     describe('onDenied', () => {
