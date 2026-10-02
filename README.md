@@ -93,7 +93,7 @@ All three answer a refusal themselves:
 | Status  | When                                                                                                                               | Body                                             |
 | ------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
 | **401** | No token, or one that is forged, expired, or for another project                                                                   | `{ access: false, reason: 'unauthenticated' }`   |
-| **402** | Mesub said this subscriber has no access to that plan                                                                              | `{ access: false, reason: 'no_access', status }` |
+| **402** | Mesub said this subscriber has no access to that plan, or to any of the list                                                       | `{ access: false, reason: 'no_access', status }` |
 | **503** | Nobody can be identified, or Mesub failed (outage, rate limit, `guardTimeout` run out) on a wallet it never saw. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
 
 `onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
@@ -102,6 +102,48 @@ thrown if it returns. It may be async: it is awaited, and what it throws or
 rejects with goes where an integration error goes. A broken integration (a
 bad API key, an unknown plan) is never a refusal: Express gets it through
 `next(err)`, Next and Nest through a thrown error, answered 500.
+
+### Which plan
+
+The plan is a slug, a list, or a function of the request giving either:
+
+```ts
+requirePlan('pro'); // that plan
+requirePlan(['pro', 'team']); // any one of them
+
+// worked out per request, from a list you wrote
+const PLANS = new Map([
+    ['reports', ['pro', 'team']],
+    ['exports', ['team']],
+]);
+requirePlan((req) => PLANS.get(String(req.params.feature)) ?? 'team');
+```
+
+`withMesub` takes the same as `{ plan }`, `RequirePlan` as its first argument.
+For a list, the plans are asked at once and read in order: the first that
+grants lets the request through, without waiting for the ones after it, and
+`mesub.plan` with `mesub.answer` say which plan it was and what Mesub
+answered for it. Each plan keeps its own outage fallback, within the one
+`guardTimeout`:
+
+| None of the plans grants, and                         | Answer                                                         |
+| ----------------------------------------------------- | -------------------------------------------------------------- |
+| Mesub said no for every one                           | **402**, with the `status` of the first plan of the list       |
+| Mesub failed on one it never answered for this wallet | **503** with `Retry-After`: nobody knows yet whether it grants |
+
+The plan comes from what the route serves, never from what the request asks
+for: `(req) => req.query.tier` lets anyone pick the plan they are checked
+against. Map the request to a list you wrote, as above, or guard with every
+plan the route accepts and serve according to `mesub.plan`. A function runs
+only once the Mesub token verifies, so an anonymous request never reaches it.
+
+A guard asks about **3 plans at most**, what a Dev project holds: each one is
+a call to Mesub on every request, against your key's 1000 calls a minute.
+
+An unknown plan is a broken integration, like a bad API key, unless a plan
+earlier in the list already let the request through. An empty list, an empty
+slug, or more than 3 plans is thrown when the guard is built, or on the
+request for a function.
 
 ## Without a middleware
 

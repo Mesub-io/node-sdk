@@ -2,22 +2,29 @@
 import type { Mesub } from './client.js';
 import {
     accessOf,
+    checkPlan,
     type Denial,
     defaultClient,
     denialBody,
     denialOf,
     guard,
     type MesubAccess,
+    type PlanOption,
+    plansOf,
     type TokenOption,
     tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
 export { MesubError } from './errors.js';
-export type { Denial, DenialReason, MesubAccess } from './guard.js';
+export type { Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 
 export interface WithMesubOptions {
-    plan: string;
+    /**
+     * A slug, a list of which any one will do (`['pro', 'team']`), or either
+     * worked out per request. `mesub.plan` says which one let it through.
+     */
+    plan: PlanOption<Request>;
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
     /**
@@ -55,11 +62,13 @@ export function withMesub<Context = unknown>(
     handler: MesubRouteHandler<Context>,
     options: WithMesubOptions,
 ): (request: Request, context: Context) => Promise<Response> {
+    checkPlan(options.plan);
+
     return async (request, context) => {
         const outcome = await guard(
             options.client ?? defaultClient(),
             tokensOf(request, options.token),
-            options.plan,
+            () => plansOf(options.plan, request),
         );
 
         if (outcome.allowed) return handler(request, accessOf(outcome), context);

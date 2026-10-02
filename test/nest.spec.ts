@@ -15,7 +15,14 @@ import request from 'supertest';
 
 import type { AccessAnswer } from '../src/answer.js';
 import { Mesub, type MesubOptions } from '../src/index.js';
-import { MesubAccess, MesubError, RequirePlan, type RequirePlanOptions } from '../src/nest.js';
+import {
+    MesubAccess,
+    MesubError,
+    type MesubRequest,
+    type PlanOption,
+    RequirePlan,
+    type RequirePlanOptions,
+} from '../src/nest.js';
 
 const BASE = 'https://api.mesub.test';
 const PROJECT = 'proj_1';
@@ -73,7 +80,7 @@ async function token(over: { aud?: string; exp?: string } = {}) {
 
 interface Mesh {
     /** What /v1/access answers, per call. */
-    access?: (init?: RequestInit) => Response | Promise<Response>;
+    access?: (init?: RequestInit, url?: URL) => Response | Promise<Response>;
     /** What the JWKS and /v1/project answer; healthy by default. */
     keys?: () => Response;
     project?: () => Response;
@@ -90,7 +97,7 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
         if (url.pathname === '/v1/project')
             return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
-            return (mesh.access ?? (() => Response.json(answer())))(init);
+            return (mesh.access ?? (() => Response.json(answer())))(init, url);
         throw new Error(`unexpected ${url.pathname}`);
     });
     const client = new Mesub({
@@ -102,6 +109,13 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     });
 
     return { client, calls };
+}
+
+/** What /v1/access answers, per plan asked. */
+function perPlan(
+    answers: Record<string, (init?: RequestInit) => Response | Promise<Response>>,
+): NonNullable<Mesh['access']> {
+    return (init, url) => answers[url!.searchParams.get('plan')!]!(init);
 }
 
 /** Mesub not answering at all, until the call gives up. */
@@ -118,11 +132,15 @@ afterEach(async () => {
 });
 
 /** A Nest app with a guarded route echoing `@MesubAccess()`, and a guarded controller. */
-async function app(client: Mesub, options: Omit<RequirePlanOptions, 'client'> = {}) {
+async function app(
+    client: Mesub,
+    options: Omit<RequirePlanOptions, 'client'> = {},
+    plan: PlanOption<MesubRequest> = 'pro',
+) {
     @Controller()
     class RouteController {
         @Get('pro')
-        @UseGuards(RequirePlan('pro', { ...options, client }))
+        @UseGuards(RequirePlan(plan, { ...options, client }))
         pro(@MesubAccess() mesub: MesubAccess, @Query('wallet') _wallet?: string) {
             return mesub;
         }
@@ -173,6 +191,7 @@ describe('RequirePlan', () => {
             expect(response.body).toEqual({
                 userId: 'user_1',
                 wallet: WALLET,
+                plan: 'pro',
                 answer: answer(),
                 stale: false,
             });
@@ -436,6 +455,73 @@ describe('RequirePlan', () => {
             const response = await request(await app(client)).get('/pro');
 
             expect(response.headers['retry-after']).toBeUndefined();
+        });
+    });
+
+    // #38: any one of several plans, or the plan worked out per request.
+    describe('which plan', () => {
+        const no = () => Response.json(answer({ access: false, status: 'none' }));
+        const yes = () => Response.json(answer({ plan: 'team' }));
+
+        it('lets through on the first plan of the list that grants, and says which', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no, team: yes }) });
+
+            const response = await request(await app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body).toMatchObject({ plan: 'team', answer: { plan: 'team' } });
+        });
+
+        it('answers 402 when none grants', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no, team: no }) });
+
+            await request(await app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(402);
+        });
+
+        it('asks about the plan a function picks for the request', async () => {
+            const { client } = mesub({ access: perPlan({ team: yes }) });
+            const tier = (request: MesubRequest) =>
+                (request.headers as Record<string, string>)['x-tier'] ?? 'pro';
+
+            const response = await request(await app(client, {}, tier))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .set('x-tier', 'team');
+
+            expect(response.status).toBe(200);
+            expect(response.body.plan).toBe('team');
+        });
+
+        it('refuses an empty list when built, and answers 500 on one a function gives', async () => {
+            const { client } = mesub();
+
+            expect(() => RequirePlan([], { client })).toThrow(TypeError);
+            await request(await app(client, {}, () => []))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(500);
+        });
+
+        it('refuses more than three plans, and never runs the function without a token', async () => {
+            const { client } = mesub();
+            const plan = vi.fn(() => ['pro', 'team', 'max', 'org']);
+
+            expect(() => RequirePlan(['pro', 'team', 'max', 'org'], { client })).toThrow(TypeError);
+            await request(await app(client, {}, plan))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(500);
+
+            plan.mockClear();
+            await request(await app(client, {}, plan))
+                .get('/pro')
+                .expect(401);
+            expect(plan).not.toHaveBeenCalled();
         });
     });
 
