@@ -109,7 +109,8 @@ await mesub.access(wallet, 'pro', { attempts: true }); // plus the last pull att
 
 ## Who to ask about
 
-`access`, `hasAccess` and `accessList` take a customer, named by exactly one of:
+`access`, `hasAccess`, `accessList` and `subscriptions.list` take a customer,
+named by exactly one of:
 
 ```ts
 await mesub.hasAccess({ external_id: user.id }, 'pro'); // your own id for them
@@ -140,6 +141,90 @@ const { plans } = await mesub.accessList({ external_id: user.id });
 It is cached on its own, for its own `revalidate_after`, and throws like
 `access` when Mesub cannot answer. `access` and `hasAccess` always need a plan:
 called without one, they throw a `TypeError` instead of asking.
+
+## Subscribe from your server
+
+Your server opens the subscription and relays the signatures; your front only
+has the wallet sign. No Mesub account is involved, and the API key never
+leaves your server.
+
+1. **Create**, on your server: Mesub reserves the subscription and builds what
+   the wallet signs.
+
+    ```ts
+    const { subscription, transaction, terms, costs } = await mesub.subscriptions.create({
+        plan: 'pro',
+        wallet, // the wallet that signs and pays
+        email, // optional: where the subscriber's notices go
+        external_id: user.id, // optional: your own id, handed back as given
+    });
+    // Send subscription.id, transaction, terms and costs to your front.
+    ```
+
+2. **Sign**, in your front, terms first, within five minutes
+   (`terms.expires_at`), and without sending the transaction:
+
+    ```ts
+    import bs58 from 'bs58';
+    import { VersionedTransaction } from '@solana/web3.js';
+
+    // Show terms.message and costs (lamports) to the subscriber first.
+    const signature = await wallet.signMessage(new TextEncoder().encode(terms.message));
+    const terms_signature = bs58.encode(signature);
+
+    const unsigned = VersionedTransaction.deserialize(Buffer.from(transaction, 'base64'));
+    const signed = await wallet.signTransaction(unsigned);
+    const signedTransaction = Buffer.from(signed.serialize()).toString('base64');
+    // Send terms_signature and signedTransaction back to your server.
+    ```
+
+3. **Submit**, on your server: Mesub checks both signatures, co-signs, sends
+   the transaction and waits for the chain, up to a minute or so.
+
+    ```ts
+    const { subscription, reason } = await mesub.subscriptions.submit(id, {
+        transaction: signedTransaction,
+        terms_signature,
+    });
+
+    if (subscription.access) {
+        // active (or cancelled, if the wallet set an end): grant the plan
+    } else {
+        // pending: nothing landed (reason says why); read it again later, or create again
+        // failed: what landed is not what Mesub built
+    }
+    ```
+
+`submit` waits 90 s by default (`{ timeout }` changes it) and is **never sent
+twice**: a second submit would find its terms spent while the first one lands.
+When no answer comes back (a timeout, a network error, a 5xx), it reads the
+subscription back once with `retrieve` and answers that instead: `active` if
+it landed, otherwise its status with a `reason` saying the submit got no
+answer. A `pending` read then may still land: read it again a little later
+(Mesub also settles it on its own within the hour). If even that read fails,
+the submit's own `MesubError` is thrown.
+
+Refusals throw a `MesubError` (see [Errors](#errors)): its `code` says the
+kind, its `apiCode` which one, e.g. `forbidden` / `terms_expired` (sign the
+terms again), `conflict` / `transaction_expired` (create again), `conflict` /
+`insufficient_balance` or `already_subscribed` on create, and `not_found` /
+`subscription_not_found` for an id Mesub does not know.
+
+Reading back:
+
+```ts
+await mesub.subscriptions.retrieve(id); // status, access, dates, wallet, email, external_id
+await mesub.subscriptions.list({ external_id: user.id }); // { data, has_more }, newest first
+for await (const sub of mesub.subscriptions.listAll({ email: 'a@b.co', plan: 'pro' })) {
+    // every page, one call per page
+}
+```
+
+`list` names the customer as `access` does (see
+[Who to ask about](#who-to-ask-about)): exactly one of `wallet`, `external_id`
+and `email`, trimmed and lowercased the same way, a `TypeError` otherwise. It
+also answers `expired` checkouts, which nobody signed: `access` is false on
+them.
 
 ## When Mesub does not answer
 

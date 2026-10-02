@@ -13,5 +13,18 @@ export type {
     ServedAttempt,
     SubscriptionStatus,
 } from './answer.js';
+export type { Subscriptions } from './subscriptions.js';
+export type {
+    ListParams,
+    ServerSubscription,
+    ServerSubscriptionList,
+    ServerSubscriptionStatus,
+    SubmitParams,
+    SubmitResult,
+    SubscribeCosts,
+    SubscribeParams,
+    SubscribeTransaction,
+} from './subscriptions.js';
+export type { RequestOptions } from './transport.js';
 export * from './cache/index.js';
 export { type HeaderSource, TOKEN_COOKIE, tokenFrom, type VerifiedToken } from './tokens.js';
