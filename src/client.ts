@@ -4,7 +4,7 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
-import { apiKeyOf, baseUrlOf, numberOf } from './options.js';
+import { apiKeyOf, baseUrlOf, headersOf, issuerOf, numberOf } from './options.js';
 import { Subscriptions } from './subscriptions.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
@@ -27,8 +27,24 @@ export interface Decision {
 export interface MesubOptions {
     /** Secret API key. Defaults to `process.env.MESUB_API_KEY`. */
     apiKey?: string;
-    /** Defaults to `https://api.mesub.io`. */
+    /**
+     * Defaults to `https://api.mesub.io`. May carry a path, e.g. behind a
+     * proxy at `https://proxy.example.com/mesub`: every call, the public keys
+     * included, is made under it.
+     */
     baseUrl?: string;
+    /**
+     * What the access tokens' `iss` must be: Mesub's own public API URL.
+     * Defaults to `baseUrl`; set it when `baseUrl` is a proxy, e.g.
+     * `https://api.mesub.io`.
+     */
+    issuer?: string;
+    /**
+     * Extra headers sent with every call to Mesub, the public keys included:
+     * e.g. a Cloudflare Access service token for the proxy in front. Cannot
+     * set Authorization, User-Agent, Accept nor Content-Type.
+     */
+    headers?: Record<string, string>;
     /** A custom `fetch`, e.g. one bound to your own agent. Defaults to the global one. */
     fetch?: typeof fetch;
     /** Per attempt, in milliseconds. Defaults to 5000. */
@@ -88,6 +104,8 @@ export class Mesub {
         // now rather than a 401 or a 1 ms timeout on every call.
         const apiKey = apiKeyOf(options.apiKey);
         const baseUrl = baseUrlOf(options.baseUrl, DEFAULT_BASE_URL);
+        const issuer = issuerOf(options.issuer, baseUrl);
+        const headers = headersOf(options.headers);
         if (options.fetch !== undefined && typeof options.fetch !== 'function') {
             throw new TypeError('fetch must be a function.');
         }
@@ -101,6 +119,7 @@ export class Mesub {
         this.transport = new Transport({
             apiKey,
             baseUrl,
+            headers,
             fetch,
             timeout: numberOf('timeout', options.timeout, 5_000, { delay: true }),
             maxRetries: numberOf('maxRetries', options.maxRetries, 2, {
@@ -124,6 +143,8 @@ export class Mesub {
         this.cacheSecret = () => (cacheSecret ??= importSecret(apiKey));
         this.tokens = new TokenVerifier({
             baseUrl,
+            issuer,
+            headers,
             fetch,
             projectId: () => this.projectId(),
         });

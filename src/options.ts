@@ -59,6 +59,13 @@ export function baseUrlOf(given: unknown, fallback: string): string {
         throw new TypeError(`baseUrl must be an absolute URL, not ${JSON.stringify(given)}.`);
     }
 
+    // Every path is appended to it: a query or a fragment would swallow them.
+    if (url.search !== '' || url.hash !== '' || given.includes('?') || given.includes('#')) {
+        throw new TypeError(
+            `baseUrl must have no query nor fragment, not ${JSON.stringify(given)}.`,
+        );
+    }
+
     const local = url.protocol === 'http:' && LOOPBACK.has(url.hostname);
     if (url.protocol !== 'https:' && !local) {
         throw new TypeError(
@@ -98,4 +105,51 @@ export function numberOf(
     }
 
     return given;
+}
+
+/**
+ * What the access tokens' `iss` must be: the Mesub API's own public URL,
+ * which is the base URL unless a proxy stands in front of it.
+ */
+export function issuerOf(given: unknown, baseUrl: string): string {
+    if (given === undefined) return baseUrl;
+    if (typeof given !== 'string' || given === '') {
+        throw new TypeError('issuer must be a non-empty string: the Mesub API URL tokens name.');
+    }
+
+    return given;
+}
+
+/** Headers the SDK sets itself, and no extra header may replace. */
+const OWN_HEADERS = new Set(['authorization', 'user-agent', 'accept', 'content-type']);
+
+/**
+ * Extra headers for every call, the JWKS included: for a proxy or an access
+ * gateway in front of Mesub. Valid names and values only, and none of the
+ * SDK's own, so the API key can never be swapped for another.
+ */
+export function headersOf(given: unknown): Record<string, string> {
+    if (given === undefined) return {};
+    if (typeof given !== 'object' || given === null || Array.isArray(given)) {
+        throw new TypeError('headers must be an object of header names to string values.');
+    }
+
+    const headers: Record<string, string> = {};
+
+    for (const [name, value] of Object.entries(given)) {
+        if (typeof value !== 'string') {
+            throw new TypeError(`headers.${name} must be a string.`);
+        }
+        if (OWN_HEADERS.has(name.toLowerCase())) {
+            throw new TypeError(`headers cannot set ${name}: the SDK sets it itself.`);
+        }
+        try {
+            new Headers([[name, value]]);
+        } catch {
+            throw new TypeError(`headers.${name} is not a valid header name and value.`);
+        }
+        headers[name] = value;
+    }
+
+    return headers;
 }

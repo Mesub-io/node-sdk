@@ -1,6 +1,8 @@
 import { createRemoteJWKSet, customFetch, errors as joseErrors, jwtVerify } from 'jose';
 
 import { MesubError } from './errors.js';
+import { endpoint } from './transport.js';
+import { VERSION } from './version.js';
 
 /** Where `@mesub/react` also writes the access token, for page loads and server rendering. */
 export const TOKEN_COOKIE = 'mesub-token';
@@ -81,7 +83,12 @@ function invalidToken(cause?: unknown): MesubError {
 }
 
 export interface TokenVerifierConfig {
+    /** Where the public keys are: `<baseUrl>/.well-known/jwks.json`. */
     baseUrl: string;
+    /** What `iss` must be: the back's PUBLIC_API_URL. */
+    issuer: string;
+    /** The client's extra headers, sent for the keys too. */
+    headers: Record<string, string>;
     fetch: typeof fetch;
     /** The key's project id, fetched once: what `aud` must be. */
     projectId: () => Promise<string>;
@@ -97,9 +104,11 @@ export class TokenVerifier {
     private readonly issuer: string;
 
     constructor(private readonly config: TokenVerifierConfig) {
-        this.issuer = config.baseUrl;
-        this.jwks = createRemoteJWKSet(new URL('/.well-known/jwks.json', config.baseUrl), {
+        this.issuer = config.issuer;
+        // Under the base URL's own path, behind a proxy at `/mesub` too.
+        this.jwks = createRemoteJWKSet(endpoint(config.baseUrl, '/.well-known/jwks.json'), {
             [customFetch]: config.fetch,
+            headers: { ...config.headers, 'User-Agent': `@mesub/node/${VERSION}` },
             timeoutDuration: 5_000,
         });
     }
