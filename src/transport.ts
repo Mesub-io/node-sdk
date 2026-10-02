@@ -63,11 +63,17 @@ export class Transport {
     }
 
     /**
-     * A POST with a JSON body, sent once: never retried, whatever the status,
-     * a timeout or a network error. A write that got no answer may still have
-     * been done, so its caller reads the state back rather than sends it again.
+     * A POST with a JSON body, sent once: never retried here, whatever the
+     * status, a timeout or a network error. A write that got no answer may
+     * still have been done: its caller decides, knowing the route, whether
+     * the same body may be sent again (`submit` does, Mesub-io/backend#190)
+     * or the state read back.
      */
-    async post(path: string, body: unknown, options: RequestOptions = {}): Promise<unknown> {
+    async post(
+        path: string,
+        body: unknown,
+        options: Omit<CallOptions, 'maxRetries'> = {},
+    ): Promise<unknown> {
         return this.#send('POST', new URL(this.#config.baseUrl + path), body, options);
     }
 
@@ -147,21 +153,21 @@ export class Transport {
             }
 
             const answered = parsed(text);
+            const asked = retryAfter(response.headers.get('retry-after'));
             const error =
                 response.status === 404 && !isMesubErrorBody(answered)
                     ? new MesubError(
                           `${url.pathname} answered 404 with no Mesub error: is baseUrl ` +
                               `(${this.#config.baseUrl}) the Mesub API?`,
-                          { status: 404, code: 'unexpected', body: answered },
+                          { status: 404, code: 'unexpected', body: answered, retryAfter: asked },
                       )
-                    : errorFrom(response.status, answered);
-            const wait = retryAfter(response.headers.get('retry-after'));
+                    : errorFrom(response.status, answered, asked);
 
             return {
                 ok: false,
                 error,
-                retry: shouldRetry(response, error, wait),
-                retryAfter: wait,
+                retry: shouldRetry(response, error),
+                retryAfter: asked === null ? null : Math.min(asked, MAX_RETRY_AFTER),
             };
         } catch (cause) {
             if (signal?.aborted) throw signal.reason;
@@ -189,17 +195,14 @@ export class Transport {
 /**
  * Whether a GET is sent again (a POST never is): `x-should-retry` first, as
  * the Stainless-generated clients (OpenAI, Anthropic) read it, then the
- * pending cap, then the error's own `retryable`, which is Mesub's flag when
- * the body has one and the status's otherwise.
+ * error's own `retryable`, which is Mesub's flag when the body has one and
+ * the status's otherwise. The pending cap (`pending_cap_reached`) is only
+ * ever a create's, a POST, so it needs no rule of its own here.
  */
-function shouldRetry(response: Response, error: MesubError, wait: number | null): boolean {
+function shouldRetry(response: Response, error: MesubError): boolean {
     const header = response.headers.get('x-should-retry');
     if (header === 'true') return true;
     if (header === 'false') return false;
-    // Not a rate limit that passes in a second: the project's subscriptions
-    // waiting for a signature stop counting an hour after they were last
-    // touched. Sent again only when Mesub says when.
-    if (error.apiCode === 'pending_cap_reached') return wait !== null;
     return error.retryable;
 }
 
@@ -209,7 +212,7 @@ function shouldRetry(response: Response, error: MesubError, wait: number | null)
  * stable `code` and a `retryable` flag. Without them, as from a proxy in
  * front, the status alone decides.
  */
-function errorFrom(status: number, body: unknown): MesubError {
+function errorFrom(status: number, body: unknown, retryAfter: number | null): MesubError {
     const { code, retryable } = isRecord(body) ? body : {};
     const apiCode = typeof code === 'string' ? code : null;
 
@@ -219,6 +222,7 @@ function errorFrom(status: number, body: unknown): MesubError {
         apiCode,
         retryable: typeof retryable === 'boolean' ? retryable : retryableStatus(status),
         body,
+        retryAfter,
     });
 }
 
@@ -230,13 +234,16 @@ function retryableStatus(status: number): boolean {
     return status === 408 || status === 429 || status >= 500;
 }
 
-/** Milliseconds from a `Retry-After` in seconds or as an HTTP date, capped. */
+/**
+ * Milliseconds from a `Retry-After` in seconds or as an HTTP date, as sent:
+ * what the error carries. A GET waits it capped at `MAX_RETRY_AFTER`.
+ */
 function retryAfter(header: string | null): number | null {
     if (header === null || header.trim() === '') return null;
     const seconds = Number(header);
     const ms = Number.isNaN(seconds) ? Date.parse(header) - Date.now() : seconds * 1000;
-    if (Number.isNaN(ms) || ms < 0) return null;
-    return Math.min(ms, MAX_RETRY_AFTER);
+    if (!Number.isFinite(ms) || ms < 0) return null;
+    return ms;
 }
 
 /** 500 ms, then 1 s, ... up to 8 s, minus up to 25% of jitter. */
@@ -289,8 +296,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Rejects with the signal's reason as soon as it aborts. */
-function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+/** @internal Rejects with the signal's reason as soon as it aborts. */
+export function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
     return new Promise((resolve, reject) => {
         const stop = () => {
             clearTimeout(timer);

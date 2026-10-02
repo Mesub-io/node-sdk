@@ -109,7 +109,8 @@ await mesub.access(wallet, 'pro', { attempts: true }); // plus the last pull att
 
 ## Who to ask about
 
-`access`, `hasAccess` and `accessList` take a customer, named by exactly one of:
+`access`, `hasAccess`, `accessList` and `subscriptions.list` take a customer,
+named by exactly one of:
 
 ```ts
 await mesub.hasAccess({ external_id: user.id }, 'pro'); // your own id for them
@@ -141,6 +142,132 @@ It is cached on its own, for its own `revalidate_after`, and throws like
 `access` when Mesub cannot answer. `access` and `hasAccess` always need a plan:
 called without one, they throw a `TypeError` instead of asking.
 
+## Subscribe from your server
+
+Your server opens the subscription and relays the signatures; your front only
+has the wallet sign. No Mesub account is involved, and the API key never
+leaves your server.
+
+1. **Create**, on your server: Mesub reserves the subscription and builds what
+   the wallet signs.
+
+    ```ts
+    const { subscription, transaction, terms, costs } = await mesub.subscriptions.create({
+        plan: 'pro',
+        wallet, // the wallet that signs and pays
+        email, // optional: where the subscriber's notices go
+        external_id: user.id, // optional: your own id, handed back as given
+    });
+    // Send subscription.id, transaction, terms and costs to your front.
+    ```
+
+2. **Sign**, in your front, terms first, within five minutes
+   (`terms.expires_at`), and without sending the transaction:
+
+    ```ts
+    import bs58 from 'bs58';
+    import { VersionedTransaction } from '@solana/web3.js';
+
+    // Show terms.message and costs (lamports) to the subscriber first.
+    const signature = await wallet.signMessage(new TextEncoder().encode(terms.message));
+    const terms_signature = bs58.encode(signature);
+
+    const unsigned = VersionedTransaction.deserialize(Buffer.from(transaction, 'base64'));
+    const signed = await wallet.signTransaction(unsigned);
+    const signedTransaction = Buffer.from(signed.serialize()).toString('base64');
+    // Send terms_signature and signedTransaction back to your server.
+    ```
+
+3. **Submit**, on your server: Mesub checks both signatures, co-signs, sends
+   the transaction and waits for the chain, up to a minute or so.
+
+    ```ts
+    import { MesubSubmitError } from '@mesub/node';
+
+    try {
+        const { subscription, reason } = await mesub.subscriptions.submit(id, {
+            transaction: signedTransaction,
+            terms_signature,
+        });
+
+        if (subscription.access) {
+            // active (or cancelled, if the wallet set an end): grant the plan
+        } else {
+            // pending: Mesub read the chain, and this transaction did not land
+            //   and no longer can (reason says why): create again for a new one
+            // failed: what landed is not what Mesub built
+        }
+    } catch (error) {
+        if (error instanceof MesubSubmitError) {
+            // Mesub never said what became of it: the wallet may have paid.
+            // error.subscription is the row read back (null if that failed):
+            // read it again with retrieve before creating anew.
+        }
+        throw error;
+    }
+    ```
+
+One send of `submit` waits up to 90 s (`{ timeout }` changes it). When it
+gets no answer that says what became of it (a timeout, a network error, a
+5xx, Mesub's `network_unavailable` while the Solana network does not answer),
+or an error Mesub marks `retryable`, `submit` sends **the same request** again,
+the same transaction and terms signature, up to twice: after the
+`Retry-After` Mesub asks for, or 10 s, and only within the whole call's
+budget, 120 s by default (`{ budget }`, in ms, changes it). Mesub recognises
+a request it already co-signed, signs nothing again, and answers it from the
+chain: `active` if it landed, or `pending` with its reason if it did not.
+
+This relies on Mesub-io/backend#190 and #202 being deployed, as they are on
+every Mesub environment this SDK talks to: a back without them would refuse
+the second send with `terms_missing`, thrown as is.
+
+When no send got an answer, `submit` reads the subscription back once, for
+10 s at most, retries included. It returns it if it is `active` or
+`cancelled` (it landed), and otherwise throws a `MesubSubmitError`: a
+`MesubError` with `code` `unavailable`, how many `sends` it made, and the
+`subscription` it read back, or `null` if that read failed too. Its
+`status`, `apiCode`, `body` and `retryAfter` are those of the last send that
+got a response (a 503, a 429), all null when none did (timeouts, network
+errors); its `cause` is the last send's own error. A `pending` one may still
+land: read it again a little later (Mesub also settles it on its own within
+the hour), and only create anew once it is `expired`. The same read back
+follows an answer the SDK cannot read (thrown as `unexpected`), and a replay
+refused with `not_awaiting_signature` after a send that got no answer, since
+the row has moved on (thrown as that `conflict`, with the row).
+
+So `submit` takes at most its budget plus 10 s: **130 s by default**. That is
+past Cloudflare's 100 s (a 524 to your front) and past many serverless
+functions' limit: there, lower it, e.g. `{ timeout: 25_000, budget: 40_000 }`
+for a 60 s function. A short `timeout` does not stop the request already
+sent: Mesub may still co-sign it and the transaction land after `submit`
+threw, so read the subscription back later rather than create anew.
+
+An abort through `{ signal }` stops the sends, the waits and the read back,
+and rejects with the signal's reason. A send already out may have been
+co-signed: read the subscription back before anything else.
+
+Refusals throw a `MesubError` (see [Errors](#errors)): its `code` says the
+kind, its `apiCode` which one, e.g. `forbidden` / `terms_expired` (sign the
+terms again), `conflict` / `transaction_expired` (create again), `conflict` /
+`insufficient_balance` or `already_subscribed` on create, and `not_found` /
+`subscription_not_found` for an id Mesub does not know.
+
+Reading back:
+
+```ts
+await mesub.subscriptions.retrieve(id); // status, access, dates, wallet, email, external_id
+await mesub.subscriptions.list({ external_id: user.id }); // { data, has_more }, newest first
+for await (const sub of mesub.subscriptions.listAll({ email: 'a@b.co', plan: 'pro' })) {
+    // every page, one call per page
+}
+```
+
+`list` names the customer as `access` does (see
+[Who to ask about](#who-to-ask-about)): exactly one of `wallet`, `external_id`
+and `email`, trimmed and lowercased the same way, a `TypeError` otherwise. It
+also answers `expired` checkouts, which nobody signed: `access` is false on
+them.
+
 ## When Mesub does not answer
 
 - **Verifying a token** needs Mesub only on the first token after a start, and
@@ -164,10 +291,11 @@ called without one, they throw a `TypeError` instead of asking.
 Reads from Mesub time out after 5 s and are retried twice, on network errors
 and on any error Mesub marks `retryable` (a 429 rate limit, a 5xx), honouring
 `Retry-After`; an error without Mesub's flag is retried on 408, 429 and 5xx,
-never on a 409. A full cap of subscriptions waiting for a signature
-(`pending_cap_reached`) is a 429 too, but frees up over an hour: it is retried
-only when Mesub sends a `Retry-After`. Writes (POST) are sent once and never
-retried, whatever happened: one that got no answer may still have been done.
+never on a 409. `create` is sent once and never retried, whatever happened:
+one that got no answer may still have reserved. A full cap of subscriptions
+waiting for a signature (`pending_cap_reached`, a 429) frees up over an hour:
+the error's `retryAfter` says when. What `submit` does when no answer comes
+back is in [Subscribe from your server](#subscribe-from-your-server).
 These are HTTP retries of the SDK's own calls, unrelated to a plan's pull
 retries. `access` and `hasAccess`, called from your own code, keep exactly
 that: `guardTimeout` binds the guards only.
@@ -241,7 +369,14 @@ It also carries what Mesub answered:
   keep a default branch.
 - `retryable`: whether the same call, sent again unchanged, may succeed later.
   Mesub's own flag when it sent one, what the status says otherwise.
+- `retryAfter`: how long Mesub asked to wait before that, in milliseconds,
+  from the response's `Retry-After` (on a 429, or a 503 such as
+  `network_unavailable`), or `null` when it sent none.
 - `body`: the error body, parsed when it is JSON.
+
+A `submit` whose outcome Mesub never told throws a `MesubSubmitError`, a
+`MesubError` that also carries the `subscription` read back and its `sends`:
+see [Subscribe from your server](#subscribe-from-your-server).
 
 ## Requirements
 

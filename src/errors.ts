@@ -1,3 +1,5 @@
+import type { ServerSubscription } from './subscriptions.js';
+
 /**
  * Stable codes to branch on, one per kind of failure; `apiCode` tells the
  * causes within one apart. `unexpected` covers any status without its own
@@ -27,6 +29,8 @@ export interface MesubErrorOptions {
     retryable?: boolean;
     /** What Mesub answered, when it answered. */
     body?: unknown;
+    /** Milliseconds, from the response's `Retry-After`. Defaults to null. */
+    retryAfter?: number | null;
     cause?: unknown;
 }
 
@@ -54,6 +58,14 @@ export class MesubError extends Error {
      * undefined when no response came back.
      */
     readonly body: unknown;
+    /**
+     * How long Mesub asked to wait before the same call is sent again, in
+     * milliseconds, from the response's `Retry-After`, as sent: a 429
+     * (`rate_limited`, or `pending_cap_reached` on create, which may be most
+     * of an hour) or a 503 (`network_unavailable`, about 10 s). Null when
+     * the response had none, or none came back.
+     */
+    readonly retryAfter: number | null;
 
     constructor(message: string, options: MesubErrorOptions) {
         super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -64,6 +76,47 @@ export class MesubError extends Error {
             options.retryable ??
             (options.code === 'unavailable' || options.code === 'rate_limited');
         this.body = options.body;
+        this.retryAfter = options.retryAfter ?? null;
+    }
+}
+
+/** What a `MesubSubmitError` carries beyond a `MesubError`'s. */
+export interface MesubSubmitErrorOptions extends MesubErrorOptions {
+    subscription: ServerSubscription | null;
+    sends: number;
+}
+
+/**
+ * A submit whose outcome Mesub never told, thrown with the subscription read
+ * back. The wallet may have paid: `subscription` is never `active` nor
+ * `cancelled` (those are returned), and null when that read failed too. Read
+ * it again with `retrieve` before creating anew; a `pending` one may still
+ * land, and Mesub settles it on its own within the hour. Three cases:
+ *
+ * - no send got an answer that says (a timeout, a network error, a 5xx,
+ *   after the replays): `code` is `unavailable` and `retryable` true, since
+ *   the same submit, sent again with the same transaction and terms
+ *   signature, co-signs nothing more and is answered from the chain
+ *   (Mesub-io/backend#190). `status`, `apiCode`, `body` and `retryAfter` are
+ *   those of the last send that got a response (a 503, a 429), or all null
+ *   when none did (timeouts, network errors);
+ * - a replay refused with `not_awaiting_signature` after a send that got no
+ *   answer: the row moved on (`failed`, `expired`), and the error is that
+ *   refusal's, `conflict`, not retryable;
+ * - a 2xx this SDK cannot read: `unexpected`, not retryable, its fields.
+ *
+ * `cause` is always the last send's own error.
+ */
+export class MesubSubmitError extends MesubError {
+    /** The subscription as read back after the last send, or null if that read failed. */
+    readonly subscription: ServerSubscription | null;
+    /** How many times the submit was sent, the same request each time. */
+    readonly sends: number;
+
+    constructor(message: string, options: MesubSubmitErrorOptions) {
+        super(message, options);
+        this.subscription = options.subscription;
+        this.sends = options.sends;
     }
 }
 

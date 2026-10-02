@@ -1,10 +1,21 @@
 import type { AccessAnswer, AccessList, ServedAttempt } from './answer.js';
 import { MesubError } from './errors.js';
+import type {
+    ServerSubscription,
+    ServerSubscriptionList,
+    SubmitResult,
+    SubscribeTransaction,
+} from './subscriptions.js';
 
 /** One field of an answer: how to tell it is right, and what it should have been. */
 interface Field {
     check: (value: unknown) => boolean;
     expected: string;
+    /**
+     * A field newer than some backs still serving: absent, it is set to this
+     * value rather than refused, so the answer still holds its type.
+     */
+    absent?: null;
 }
 
 const STRING: Field = { check: (value) => typeof value === 'string', expected: 'a string' };
@@ -13,11 +24,15 @@ const STRING_OR_NULL: Field = {
     expected: 'a string or null',
 };
 const BOOLEAN: Field = { check: (value) => typeof value === 'boolean', expected: 'a boolean' };
+const OBJECT: Field = { check: isObject, expected: 'an object' };
+const LIST_OF: Field = { check: Array.isArray, expected: 'a list' };
 const DATE: Field = { check: isDate, expected: 'a date' };
 const DATE_OR_NULL: Field = {
     check: (value) => value === null || isDate(value),
     expected: 'a date or null',
 };
+/** `retry_deadline`, served since Mesub-io/backend#191: null when a back predates it. */
+const RETRY_DEADLINE: Field = { ...DATE_OR_NULL, absent: null };
 /**
  * What the cache turns into its dates: NaN or Infinity would never go stale.
  * A negative one is read as 0 there, so it is let through.
@@ -47,6 +62,7 @@ const ANSWER = {
     access_until: DATE_OR_NULL,
     next_charge_at: DATE_OR_NULL,
     next_retry_at: DATE_OR_NULL,
+    retry_deadline: RETRY_DEADLINE,
     revalidate_after: SECONDS,
 } satisfies Record<Exclude<keyof AccessAnswer, 'attempts'>, Field>;
 
@@ -90,7 +106,7 @@ export function accessListFrom(body: unknown): AccessList {
 }
 
 const LIST = {
-    plans: { check: Array.isArray, expected: 'a list' },
+    plans: LIST_OF,
     revalidate_after: SECONDS,
 } satisfies Record<keyof AccessList, Field>;
 
@@ -110,17 +126,140 @@ function plansProblem(body: unknown): string | null {
     return null;
 }
 
-/** The transport hands back 2xx bodies only, and /v1/access answers 200. */
-function unreadable(problem: string, body: unknown): MesubError {
+/**
+ * Every field of a `ServerSubscription`, as `GET /v1/subscriptions/:id`
+ * answers it and as `submit` and `list` embed it. Its status is only checked
+ * to be a string, like an access answer's.
+ */
+const SUBSCRIPTION = {
+    id: STRING,
+    status: STRING,
+    access: BOOLEAN,
+    payment_status: STRING,
+    plan: STRING_OR_NULL,
+    wallet: STRING,
+    email: STRING_OR_NULL,
+    external_id: STRING_OR_NULL,
+    current_period_start: DATE_OR_NULL,
+    current_period_end: DATE_OR_NULL,
+    next_charge_at: DATE_OR_NULL,
+    next_retry_at: DATE_OR_NULL,
+    retry_deadline: RETRY_DEADLINE,
+    access_until: DATE_OR_NULL,
+    created_at: DATE,
+    confirmed_at: DATE_OR_NULL,
+} satisfies Record<keyof ServerSubscription, Field>;
+
+const SUBSCRIPTION_LIST = {
+    data: LIST_OF,
+    has_more: BOOLEAN,
+} satisfies Record<keyof ServerSubscriptionList, Field>;
+
+/** What the front needs to have the wallet sign; the costs are only shown. */
+const SUBSCRIBE_TRANSACTION = {
+    subscription: OBJECT,
+    transaction: STRING,
+    last_valid_block_height: STRING,
+    costs: OBJECT,
+    terms: OBJECT,
+} satisfies Record<keyof SubscribeTransaction, Field>;
+
+/** One subscription, from `retrieve`, or read back after a submit. */
+export function serverSubscriptionFrom(body: unknown): ServerSubscription {
+    const problem = problemWith(body, SUBSCRIPTION);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/subscriptions/:id');
+
+    return body as ServerSubscription;
+}
+
+/** One page of `list`: each subscription checked like `retrieve`'s. */
+export function serverSubscriptionListFrom(body: unknown): ServerSubscriptionList {
+    const problem =
+        problemWith(body, SUBSCRIPTION_LIST) ??
+        firstProblem((body as { data: unknown[] }).data, 'data', SUBSCRIPTION);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/subscriptions');
+
+    return body as ServerSubscriptionList;
+}
+
+/** What `create` answered: what the wallet signs, and the subscription's id. */
+export function subscribeTransactionFrom(body: unknown): SubscribeTransaction {
+    const problem =
+        problemWith(body, SUBSCRIBE_TRANSACTION) ??
+        problemWith(
+            (body as SubscribeTransaction).subscription,
+            { id: STRING, status: STRING },
+            'subscription',
+        ) ??
+        problemWith(
+            (body as SubscribeTransaction).terms,
+            { message: STRING, expires_at: DATE },
+            'terms',
+        );
+
+    if (problem !== null) throw unreadable(problem, body, 'POST /v1/subscriptions', 201);
+
+    return body as SubscribeTransaction;
+}
+
+/** What `submit` answered: the subscription as it settled, and a reason when one came. */
+export function submitResultFrom(body: unknown): SubmitResult {
+    const problem =
+        problemWith(body, { subscription: OBJECT }) ??
+        problemWith((body as SubmitResult).subscription, SUBSCRIPTION, 'subscription') ??
+        reasonProblem((body as SubmitResult).reason);
+
+    if (problem !== null) {
+        throw unreadable(problem, body, 'POST /v1/subscriptions/:id/submit', 201);
+    }
+
+    return body as SubmitResult;
+}
+
+function reasonProblem(reason: unknown): string | null {
+    return reason === undefined || typeof reason === 'string' ? null : 'reason is not a string';
+}
+
+/** The first item of a list that is not of those fields, or null when all are. */
+function firstProblem(
+    items: unknown[],
+    label: string,
+    fields: Record<string, Field>,
+): string | null {
+    for (const [index, item] of items.entries()) {
+        const problem = problemWith(item, fields, `${label}[${index}]`);
+
+        if (problem !== null) return problem;
+    }
+
+    return null;
+}
+
+/**
+ * The transport hands back 2xx bodies only: /v1/access and the reads answer
+ * 200, the POSTs 201.
+ */
+function unreadable(
+    problem: string,
+    body: unknown,
+    route = '/v1/access',
+    status = 200,
+): MesubError {
     return new MesubError(
-        `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
-        { status: 200, code: 'unexpected', body },
+        `Mesub answered ${route} with an answer this SDK cannot read: ${problem}.`,
+        { status, code: 'unexpected', body },
     );
 }
 
-/** The first field that is missing or of the wrong type, or null when all are right. */
+/**
+ * The first field that is missing or of the wrong type, or null when all are
+ * right. A missing field with an `absent` value is set to it on the body,
+ * which is the answer just parsed, never one the caller handed in.
+ */
 function problemWith(body: unknown, fields: Record<string, Field>, label?: string): string | null {
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    if (!isObject(body)) {
         return `${label ?? 'the body'} is not an object`;
     }
 
@@ -129,6 +268,10 @@ function problemWith(body: unknown, fields: Record<string, Field>, label?: strin
     for (const [name, field] of Object.entries(fields)) {
         const value = (body as Record<string, unknown>)[name];
 
+        if (value === undefined && 'absent' in field) {
+            (body as Record<string, unknown>)[name] = field.absent;
+            continue;
+        }
         if (value === undefined) return `${prefix}${name} is missing`;
         if (!field.check(value)) return `${prefix}${name} is not ${field.expected}`;
     }
@@ -155,4 +298,8 @@ function attemptsProblem(body: unknown, label?: string): string | null {
 
 function isDate(value: unknown): boolean {
     return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function isObject(value: unknown): boolean {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
