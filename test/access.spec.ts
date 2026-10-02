@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { AccessAnswer, CacheStore, MesubOptions } from '../src/index.js';
 import { Mesub, MemoryStore, MesubError } from '../src/index.js';
 import { json, mockFetch, nest } from './helpers.js';
@@ -27,6 +29,10 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
 }
 
 const PROJECT = 'proj_1';
+
+function sha256(text: string): string {
+    return createHash('sha256').update(text).digest('hex');
+}
 
 /** `/v1/project` answers `project`; every other call goes to `fetch`. */
 function withProject(
@@ -184,7 +190,7 @@ describe('access', () => {
             await client(fetch, { get: () => undefined, set }).access(WALLET, 'pro');
 
             expect(set).toHaveBeenCalledWith(
-                `mesub:access:${PROJECT}:pro:${WALLET}`,
+                `mesub:access:key-${sha256('SUB_test').slice(0, 16)}:pro:${WALLET}`,
                 expect.objectContaining({ value: answer() }),
                 expect.any(Number),
             );
@@ -193,9 +199,21 @@ describe('access', () => {
 
     // Two projects sharing one Redis must never read each other's answers.
     describe('the cache scope', () => {
-        it('asks /v1/project once, then keeps it', async () => {
+        it('is a hash of the API key, never the key itself', async () => {
+            const set = vi.fn();
+            const { fetch } = mockFetch(json(200, answer()));
+
+            await client(fetch, { get: () => undefined, set }).access(WALLET, 'pro');
+
+            const key = set.mock.calls[0]![0] as string;
+            expect(key).toBe(`mesub:access:key-${sha256('SUB_test').slice(0, 16)}:pro:${WALLET}`);
+            expect(key).not.toContain('SUB_test');
+        });
+
+        // The scope needs no network: nothing to wait for during an outage.
+        it('never asks /v1/project for it', async () => {
             const project = vi.fn(() => json(200, { id: PROJECT }));
-            const { fetch } = mockFetch(json(200, answer()), json(200, answer({ plan: 'team' })));
+            const { fetch, calls } = mockFetch(json(200, answer()), json(200, answer()));
             const mesub = new Mesub({
                 apiKey: 'SUB_test',
                 baseUrl: 'https://api.mesub.test',
@@ -204,9 +222,10 @@ describe('access', () => {
             });
 
             await mesub.access(WALLET, 'pro');
-            await mesub.access(WALLET, 'team');
+            await mesub.decide(WALLET, 'team');
 
-            expect(project).toHaveBeenCalledOnce();
+            expect(project).not.toHaveBeenCalled();
+            expect(calls).toHaveLength(2);
         });
 
         it('keeps two projects sharing one store apart', async () => {
@@ -268,64 +287,56 @@ describe('access', () => {
         it('hashes two API keys apart', async () => {
             const keys: string[] = [];
             const scoped = (apiKey: string) =>
-                new Mesub({
-                    apiKey,
-                    baseUrl: 'https://api.mesub.test',
-                    fetch: withProject(mockFetch(json(200, answer())).fetch, () =>
-                        nest(503, 'Service Unavailable'),
-                    ),
-                    cache: { get: () => undefined, set: (key) => void keys.push(key) },
-                });
+                client(
+                    mockFetch(json(200, answer())).fetch,
+                    {
+                        get: () => undefined,
+                        set: (key) => void keys.push(key),
+                    },
+                    { apiKey },
+                );
 
             await scoped('SUB_one').access(WALLET, 'pro');
             await scoped('SUB_two').access(WALLET, 'pro');
 
             expect(keys[0]).not.toBe(keys[1]);
+            expect(keys.join()).not.toMatch(/SUB_one|SUB_two/);
         });
 
-        // A single attempt: the scope must not add the retries of an outage.
-        it('asks /v1/project once per call while it fails, without retrying', async () => {
-            const project = vi.fn(() => nest(503, 'Service Unavailable'));
-            const { fetch } = mockFetch(
-                json(200, answer({ revalidate_after: 0 })),
-                json(200, answer()),
-            );
-            const mesub = new Mesub({
+        // A restart in the middle of an outage, with Redis: what was written
+        // before is read back, so the guards serve it instead of a 503.
+        it('reads back, after a restart, what the previous process wrote', async () => {
+            const store = new MemoryStore<AccessAnswer>();
+            const before = answer({ revalidate_after: 0 });
+            await client(mockFetch(json(200, before)).fetch, store).hasAccess(WALLET, 'pro');
+            const restarted = new Mesub({
                 apiKey: 'SUB_test',
                 baseUrl: 'https://api.mesub.test',
-                fetch: withProject(fetch, project),
-                maxRetries: 2,
-            });
-
-            await mesub.hasAccess(WALLET, 'pro');
-            await mesub.hasAccess(WALLET, 'pro');
-
-            expect(project).toHaveBeenCalledTimes(2);
-        });
-
-        it('moves to the project scope once /v1/project answers', async () => {
-            const set = vi.fn();
-            let up = false;
-            const { fetch } = mockFetch(json(200, answer()), json(200, answer()));
-            const mesub = new Mesub({
-                apiKey: 'SUB_test',
-                baseUrl: 'https://api.mesub.test',
-                fetch: withProject(fetch, () =>
-                    up ? json(200, { id: PROJECT }) : new TypeError('fetch failed'),
+                fetch: withProject(mockFetch(nest(503, 'Service Unavailable')).fetch, () =>
+                    nest(503, 'Service Unavailable'),
                 ),
                 maxRetries: 0,
-                cache: { get: () => undefined, set },
+                cache: store,
             });
 
-            await mesub.access(WALLET, 'pro');
-            up = true;
-            await mesub.access(WALLET, 'pro');
+            await expect(restarted.decide(WALLET, 'pro')).resolves.toEqual({
+                access: true,
+                answer: before,
+                stale: true,
+            });
+        });
 
-            expect(set.mock.calls[0]![0]).toMatch(/^mesub:access:key-/);
-            expect(set.mock.calls[1]![0]).toBe(`mesub:access:${PROJECT}:pro:${WALLET}`);
+        // A new key starts a new scope: the old entries expire on their TTL.
+        it('starts afresh after the API key is rotated', async () => {
+            const store = new MemoryStore<AccessAnswer>();
+            await client(mockFetch(json(200, answer())).fetch, store).hasAccess(WALLET, 'pro');
+            const { fetch, calls } = mockFetch(json(200, answer()));
+
+            await client(fetch, store, { apiKey: 'SUB_rotated' }).hasAccess(WALLET, 'pro');
+
+            expect(calls).toHaveLength(1);
         });
     });
-
     describe('when Mesub cannot answer', () => {
         it.each([
             ['a refused plan', nest(404, 'No plan of yours is named pro.'), 'plan_not_found'],
@@ -508,8 +519,14 @@ describe('decide, for the guards', () => {
     });
 
     /** Today's retries, so the budget is what cuts the call short. */
-    function guarded(fetch: typeof globalThis.fetch, options: MesubOptions = {}) {
-        return client(fetch, undefined, { maxRetries: 2, ...options });
+    async function guarded(fetch: typeof globalThis.fetch, options: MesubOptions = {}) {
+        return hashed(client(fetch, undefined, { maxRetries: 2, ...options }));
+    }
+
+    /** The key hash is real crypto, settled off the fake clock: done before any timing. */
+    async function hashed(mesub: Mesub) {
+        await mesub['cacheScope']();
+        return mesub;
     }
 
     /** Starts it and records when it settled, so fake timers can run first. */
@@ -524,7 +541,7 @@ describe('decide, for the guards', () => {
 
     it('answers within 2 s when Mesub hangs, from the stale answer', async () => {
         const { fetch } = mockFetch(json(200, answer({ revalidate_after: 0 })), 'hang', 'hang');
-        const mesub = guarded(fetch);
+        const mesub = await guarded(fetch);
         await mesub.decide(WALLET, 'pro');
 
         const decision = timed(mesub.decide(WALLET, 'pro'));
@@ -542,7 +559,7 @@ describe('decide, for the guards', () => {
     it('says Mesub is unavailable when it times out on a wallet it never saw', async () => {
         const { fetch } = mockFetch('hang');
 
-        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(2_000);
 
         expect(decision.value).toEqual({
@@ -556,7 +573,7 @@ describe('decide, for the guards', () => {
     it('takes another budget from guardTimeout', async () => {
         const { fetch } = mockFetch('hang');
 
-        const decision = timed(guarded(fetch, { guardTimeout: 500 }).decide(WALLET, 'pro'));
+        const decision = timed((await guarded(fetch, { guardTimeout: 500 })).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(500);
 
         expect(decision.at).toBe(500);
@@ -565,7 +582,7 @@ describe('decide, for the guards', () => {
     it('does not wait a Retry-After of 30 s', async () => {
         const { fetch } = mockFetch(json(429, { message: 'slow down' }, { 'retry-after': '30' }));
 
-        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(0);
 
         expect(decision).toEqual({
@@ -577,7 +594,7 @@ describe('decide, for the guards', () => {
     it('retries within the budget, and recovers', async () => {
         const { fetch } = mockFetch(nest(503, 'down'), json(200, answer()));
 
-        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(500);
 
         expect(decision.value).toEqual({ access: true, answer: answer(), stale: false });
@@ -590,7 +607,7 @@ describe('decide, for the guards', () => {
     ])('says Mesub is unavailable on %s once the retries are spent', async (_label, status) => {
         const { fetch } = mockFetch(nest(status, 'a'), nest(status, 'b'), nest(status, 'c'));
 
-        const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
+        const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(1_500);
 
         expect(decision.value).toEqual({
@@ -604,34 +621,30 @@ describe('decide, for the guards', () => {
     it('still throws an integration error', async () => {
         const { fetch } = mockFetch(nest(401, 'That API key is not valid.'));
 
-        await expect(guarded(fetch).decide(WALLET, 'pro')).rejects.toMatchObject({
+        await expect((await guarded(fetch)).decide(WALLET, 'pro')).rejects.toMatchObject({
             code: 'unauthorized',
         });
     });
 
-    it('fits the /v1/project lookup in the budget too', async () => {
-        const { fetch } = mockFetch('hang');
-        const mesub = new Mesub({
-            apiKey: 'SUB_test',
-            baseUrl: 'https://api.mesub.test',
-            fetch: (async (input: string | URL | Request, init?: RequestInit) =>
-                fetch(input, init)) as typeof globalThis.fetch,
-        });
+    // The cache scope costs no call: the whole budget goes to /v1/access.
+    it('spends none of the budget on /v1/project', async () => {
+        const { fetch, calls } = mockFetch('hang');
+        const mesub = await hashed(
+            new Mesub({ apiKey: 'SUB_test', baseUrl: 'https://api.mesub.test', fetch }),
+        );
 
-        const decision = mesub.decide(WALLET, 'pro');
+        const decision = timed(mesub.decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(2_000);
 
-        // The key hash is real crypto, settled off the fake clock: awaited, not timed.
-        await expect(decision).resolves.toMatchObject({ access: false, unavailable: true });
-        expect(Date.now() - START.getTime()).toBe(2_000);
-        expect(fetch).toHaveBeenCalledOnce();
+        expect(decision).toMatchObject({ at: 2_000, value: { unavailable: true } });
+        expect(calls.map((call) => call.url.pathname)).toEqual(['/v1/access']);
     });
 
     // Called directly, hasAccess keeps the client's own timeout and retries.
     it('leaves hasAccess to the client timeout and retries', async () => {
         const { fetch } = mockFetch('hang', 'hang', 'hang');
 
-        const result = timed(guarded(fetch).hasAccess(WALLET, 'pro'));
+        const result = timed((await guarded(fetch)).hasAccess(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(2_000);
         expect(result.at).toBeUndefined();
         await vi.advanceTimersByTimeAsync(14_500);

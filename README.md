@@ -165,12 +165,12 @@ const redisStore: CacheStore<AccessAnswer> = {
 const mesub = new Mesub({ cache: redisStore });
 ```
 
-Keys read `mesub:access:<project>:<plan>:<wallet>`, so several projects can
-share one Redis. The project id is the one `/v1/project` answers for your key,
-asked once per process; while Mesub cannot answer it, a hash of the API key
-(never the key itself) stands in. Keys written by 0.1, without the project,
-are no longer read and expire on their own TTL: after an upgrade, each wallet
-costs one call to Mesub before it is cached again.
+Keys read `mesub:access:key-<hash>:<plan>:<wallet>`, so several projects can
+share one Redis. `<hash>` is the start of your API key's SHA-256, never the key
+itself: it needs no call to Mesub, so a server restarted during an outage still
+reads what was cached before. Rotating the API key starts a fresh cache: each
+wallet costs one call to Mesub, and the old keys expire on their own TTL. So
+do keys written by 0.1, without the hash, which are no longer read.
 
 ## Errors
 
