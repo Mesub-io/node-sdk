@@ -98,6 +98,11 @@ export class Mesub {
     /** What hashes emails and external ids in the cache keys: the API key, imported once. */
     private readonly cacheSecret: () => Promise<HmacKey>;
     private readonly guardTimeout: number;
+    /**
+     * The `/v1/access` requests in flight, by cache key: a call for the same
+     * answer waits for that one rather than send its own (#34).
+     */
+    private readonly flights = new Map<string, Promise<unknown>>();
 
     constructor(options: MesubOptions = {}) {
         // Every option is checked here, before anything is built: a TypeError
@@ -235,16 +240,19 @@ export class Mesub {
         }
 
         // Checked like `access`'s answer, before it reaches the cache.
-        const list = accessListFrom(
-            await this.transport.get('/v1/access', {
-                [asked.kind]: asked.value,
-                attempts: attempts || undefined,
-            }),
+        const request = async () =>
+            accessListFrom(
+                await this.transport.get('/v1/access', {
+                    [asked.kind]: asked.value,
+                    attempts: attempts || undefined,
+                }),
+            );
+
+        if (!slot) return request();
+
+        return this.shared(flightKey('call', slot, null), request, (list) =>
+            this.lists.write(slot.who, null, list, slot.scope),
         );
-
-        if (slot) await this.lists.write(slot.who, null, list, slot.scope);
-
-        return list;
     }
 
     /**
@@ -267,23 +275,61 @@ export class Mesub {
 
         // Throws a MesubError on any failure, which goes straight to the caller;
         // an answer of the wrong shape too, before it reaches the cache.
-        const answer = accessAnswerFrom(
-            await this.transport.get(
-                '/v1/access',
-                {
-                    [asked.kind]: asked.value,
-                    plan,
-                    // Left out when not asked: the transport drops undefined values.
-                    attempts: attempts || undefined,
-                },
-                call,
-            ),
-        );
+        const request = async () =>
+            accessAnswerFrom(
+                await this.transport.get(
+                    '/v1/access',
+                    {
+                        [asked.kind]: asked.value,
+                        plan,
+                        // Left out when not asked: the transport drops undefined values.
+                        attempts: attempts || undefined,
+                    },
+                    call,
+                ),
+            );
 
         // A heavy answer must not replace the light one a guard reads.
-        if (slot) await this.cache.write(slot.who, plan, answer, slot.scope);
+        if (!slot) return request();
 
-        return answer;
+        // A guard's request is cut at its deadline and never retries a 429:
+        // shared between guards only, so a call from your code keeps its
+        // retries, and a guard never waits past its budget behind one.
+        const mode = call.deadline === undefined ? 'call' : 'guard';
+
+        return this.shared(flightKey(mode, slot, plan), request, (answer) =>
+            this.cache.write(slot.who, plan, answer, slot.scope),
+        );
+    }
+
+    /**
+     * One request in flight per key (#34): fifty calls for a customer not in
+     * the cache made fifty requests to Mesub, and as many 429s to retry. The
+     * first sends it, the others wait for its answer or its error. Its answer
+     * is cached once, unless a subscription that landed dropped the flight
+     * meanwhile: then it is answered, not cached.
+     */
+    private shared<T>(
+        key: string,
+        request: () => Promise<T>,
+        keep: (value: T) => Promise<void>,
+    ): Promise<T> {
+        const pending = this.flights.get(key);
+
+        if (pending) return pending as Promise<T>;
+
+        const flight: Promise<T> = request().then(async (value) => {
+            if (this.flights.get(key) === flight) await keep(value);
+            return value;
+        });
+        const land = () => {
+            if (this.flights.get(key) === flight) this.flights.delete(key);
+        };
+
+        this.flights.set(key, flight);
+        void flight.then(land, land);
+
+        return flight;
     }
 
     /**
@@ -324,6 +370,13 @@ export class Mesub {
         try {
             for (const asked of customersOf(subscription)) {
                 const slot = await this.slotOf(asked);
+
+                // A request sent before it landed may answer the old no: its
+                // callers get it, the cache does not, and the next call asks again.
+                for (const mode of ['call', 'guard'] as const) {
+                    if (plan !== null) this.flights.delete(flightKey(mode, slot, plan));
+                    this.flights.delete(flightKey(mode, slot, null));
+                }
 
                 if (plan !== null) {
                     await this.cache.forget(slot.who, plan, slot.scope, (answer) => !answer.access);
@@ -377,7 +430,9 @@ export class Mesub {
         plan: string,
         deadline?: number,
     ): Promise<Decision> {
-        const call: CallOptions = deadline === undefined ? {} : { deadline };
+        // A guard does not wait out a rate limit: it falls back at once.
+        const call: CallOptions =
+            deadline === undefined ? {} : { deadline, retryRateLimited: false };
         // A malformed customer or a missing plan is thrown before anything is asked.
         const asked = customerOf(customer);
         const slug = planOf(plan);
@@ -414,6 +469,15 @@ type HmacKey = Awaited<ReturnType<typeof crypto.subtle.importKey>>;
 interface Slot {
     scope: string;
     who: string;
+}
+
+/**
+ * What a request in flight is shared under: its cache key, and whether a
+ * guard sent it. The key holds the project's scope, the kind of identifier
+ * and the plan, or the list's own prefix, so two of them never meet.
+ */
+function flightKey(mode: 'call' | 'guard', slot: Slot, plan: string | null): string {
+    return `${mode}|${AccessCache.key(slot.who, plan, slot.scope)}`;
 }
 
 /** Every way a subscription's customer can be asked about: its wallet, external id and email. */

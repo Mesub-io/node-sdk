@@ -615,6 +615,28 @@ describe('timeouts and network errors', () => {
     });
 });
 
+// The guards' rule (#34): a rate limit is not waited out, it is fallen back on.
+describe('retryRateLimited: false', () => {
+    it('throws a 429 at once, even one Mesub marks retryable', async () => {
+        const { fetch } = mockFetch(coded(429, 'rate_limited', 'Slow down.', true));
+
+        await expect(
+            transport(fetch).get('/v1/access', {}, { retryRateLimited: false }),
+        ).rejects.toMatchObject({ status: 429, code: 'rate_limited' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('still retries a 503', async () => {
+        const { fetch } = mockFetch(nest(503, 'down'), json(200, { ok: true }));
+
+        const result = settle(transport(fetch).get('/v1/access', {}, { retryRateLimited: false }));
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect((await result).value).toEqual({ ok: true });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+});
+
 // The guards' budget: one deadline for the whole call, retries and waits included.
 describe('a deadline', () => {
     it('cuts an attempt at the deadline, not at the 5 s timeout', async () => {
