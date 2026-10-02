@@ -1,5 +1,9 @@
 import {
+    type AccessAnswer,
+    type AccessList,
+    type CacheStore,
     type ListParams,
+    MemoryStore,
     Mesub,
     MesubError,
     MesubSubmitError,
@@ -908,5 +912,180 @@ describe('subscriptions.list', () => {
 
         expect(rows).toEqual([]);
         expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+// Right after a submit lands, a cached no must not keep the subscriber out (#33).
+describe('the access cache once a subscription lands', () => {
+    const signed = { transaction: 'AQAAAA==', terms_signature: SIGNATURE };
+
+    function access(over: Partial<AccessAnswer> = {}): AccessAnswer {
+        return {
+            wallet: WALLET,
+            plan: 'pro',
+            access: false,
+            status: 'none',
+            payment_status: 'none',
+            subscribed_since: null,
+            first_subscribed_at: null,
+            current_period_end: null,
+            cancelled_at: null,
+            access_until: null,
+            next_charge_at: null,
+            next_retry_at: null,
+            retry_deadline: null,
+            revalidate_after: 60,
+            ...over,
+        };
+    }
+
+    const granted = access({ access: true, status: 'active', payment_status: 'paid' });
+
+    function withCache(
+        fetch: typeof globalThis.fetch,
+        cache: CacheStore<AccessAnswer | AccessList>,
+    ) {
+        return new Mesub({ apiKey: 'sk_test', baseUrl: 'https://api.test', fetch, cache });
+    }
+
+    const asked = (calls: FetchCall[]) =>
+        calls.filter(({ url }) => url.pathname === '/v1/access').length;
+
+    it('asks Mesub again for the wallet after a submit that landed', async () => {
+        const { fetch, calls } = mockFetch(
+            json(200, access()),
+            json(201, { subscription: subscription() }),
+            json(200, granted),
+        );
+        const client = mesub(fetch);
+        await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+
+        await client.subscriptions.submit('sub_1', signed);
+
+        await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        expect(asked(calls)).toBe(2);
+    });
+
+    it('drops the answers by external id and email, and the list, too', async () => {
+        const list: AccessList = { plans: [], revalidate_after: 60 };
+        const { fetch, calls } = mockFetch(
+            json(200, access({ wallet: null })),
+            json(200, access({ wallet: null })),
+            json(200, list),
+            json(201, { subscription: subscription({ status: 'cancelled' }) }),
+            json(200, granted),
+            json(200, granted),
+            json(200, { plans: [granted], revalidate_after: 60 }),
+        );
+        const client = mesub(fetch);
+        await client.access({ external_id: 'cus_42' }, 'pro');
+        // Normalised as Mesub reads it: the subscription's `a@b.co` is the same customer.
+        await client.access({ email: ' A@b.co' }, 'pro');
+        await client.accessList(WALLET);
+
+        await client.subscriptions.submit('sub_1', signed);
+
+        await expect(client.hasAccess({ external_id: 'cus_42' }, 'pro')).resolves.toBe(true);
+        await expect(client.hasAccess({ email: 'a@b.co' }, 'pro')).resolves.toBe(true);
+        await expect(client.accessList(WALLET)).resolves.toEqual({
+            plans: [granted],
+            revalidate_after: 60,
+        });
+        expect(asked(calls)).toBe(6);
+    });
+
+    it('keeps a cached yes, and the answers of other plans', async () => {
+        const { fetch, calls } = mockFetch(
+            json(200, access({ plan: 'team' })),
+            json(
+                200,
+                access({ wallet: 'OtherWallet1111111111111111111111111111111', access: true }),
+            ),
+            json(200, { plans: [granted], revalidate_after: 60 }),
+            json(201, { subscription: subscription() }),
+        );
+        const client = mesub(fetch);
+        await client.access(WALLET, 'team');
+        await client.access({ email: 'a@b.co' }, 'pro');
+        await client.accessList({ external_id: 'cus_42' });
+
+        await client.subscriptions.submit('sub_1', signed);
+
+        await expect(client.hasAccess(WALLET, 'team')).resolves.toBe(false);
+        await expect(client.hasAccess({ email: 'a@b.co' }, 'pro')).resolves.toBe(true);
+        await client.accessList({ external_id: 'cus_42' });
+        expect(asked(calls)).toBe(3);
+    });
+
+    it('keeps the cached no after a submit Mesub answered pending', async () => {
+        const { fetch, calls } = mockFetch(
+            json(200, access()),
+            json(201, { subscription: pending(), reason: 'Not landed yet.' }),
+        );
+        const client = mesub(fetch);
+        await client.hasAccess(WALLET, 'pro');
+
+        await client.subscriptions.submit('sub_1', signed);
+
+        await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        expect(asked(calls)).toBe(1);
+    });
+
+    it.each([
+        [
+            'retrieve',
+            () => json(200, subscription()),
+            (client: Mesub) => client.subscriptions.retrieve('sub_1'),
+        ],
+        [
+            'list',
+            () =>
+                json(200, {
+                    data: [subscription({ status: 'expired' }), subscription()],
+                    has_more: false,
+                }),
+            (client: Mesub) => client.subscriptions.list({ wallet: WALLET }),
+        ],
+    ])('drops it after %s found the subscription active', async (_label, answer, read) => {
+        const { fetch, calls } = mockFetch(json(200, access()), answer(), json(200, granted));
+        const client = mesub(fetch);
+        await client.hasAccess(WALLET, 'pro');
+
+        await read(client);
+
+        await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        expect(asked(calls)).toBe(2);
+    });
+
+    it('makes it stale in a store without delete, so Mesub is asked again', async () => {
+        const memory = new MemoryStore<AccessAnswer | AccessList>();
+        const store: CacheStore<AccessAnswer | AccessList> = {
+            get: (key) => memory.get(key),
+            set: (key, entry, ttlMs) => memory.set(key, entry, ttlMs),
+        };
+        const { fetch, calls } = mockFetch(
+            json(200, access()),
+            json(201, { subscription: subscription() }),
+            json(200, granted),
+        );
+        const client = withCache(fetch, store);
+        await client.hasAccess(WALLET, 'pro');
+
+        await client.subscriptions.submit('sub_1', signed);
+
+        await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        expect(asked(calls)).toBe(2);
+    });
+
+    it('still answers the submit when the store fails', async () => {
+        const fail = () => {
+            throw new Error('ECONNREFUSED');
+        };
+        const { fetch } = mockFetch(json(201, { subscription: subscription() }));
+        const client = withCache(fetch, { get: fail, set: fail, delete: fail });
+
+        await expect(client.subscriptions.submit('sub_1', signed)).resolves.toEqual({
+            subscription: subscription(),
+        });
     });
 });

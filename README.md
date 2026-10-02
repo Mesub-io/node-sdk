@@ -246,6 +246,15 @@ An abort through `{ signal }` stops the sends, the waits and the read back,
 and rejects with the signal's reason. A send already out may have been
 co-signed: read the subscription back before anything else.
 
+A subscription `submit` returns with `access` (`active`, or `cancelled`
+before its end) drops the `/v1/access` answers this client cached for that
+customer that still say no: by wallet, and by external id and email when the
+subscription has them, for its plan and in `accessList`. So `hasAccess` right
+after asks Mesub again, rather than answering the no it cached a few seconds
+before. `retrieve` and `list` do the same for each subscription they find
+with `access`. Another server sharing no store with this one keeps its own
+cached no until its `revalidate_after` runs out.
+
 Refusals throw a `MesubError` (see [Errors](#errors)): its `code` says the
 kind, its `apiCode` which one, e.g. `forbidden` / `terms_expired` (sign the
 terms again), `conflict` / `transaction_expired` (create again), `conflict` /
@@ -353,7 +362,7 @@ release and cannot be set, so Mesub can change an answer for newer releases
 without breaking one already installed: upgrading the package is what moves
 you to a newer version. Mesub does not read it yet.
 
-The memory cache is per process and emptied on restart. A store is two
+The memory cache is per process and emptied on restart. A store is three
 methods, so Redis is a few lines, and keeps the outage fallback across
 restarts and servers:
 
@@ -365,10 +374,18 @@ const redisStore: CacheStore<AccessAnswer | AccessList> = {
     set: async (key, entry, ttlMs) => {
         await redis.set(key, JSON.stringify(entry), 'PX', ttlMs);
     },
+    delete: async (key) => {
+        await redis.del(key);
+    },
 };
 
 const mesub = new Mesub({ cache: redisStore });
 ```
+
+`delete` is what drops a cached no once a subscription lands (see
+[Subscribe from your server](#subscribe-from-your-server)). It is optional:
+a store without it gets that answer rewritten as stale instead, which also
+makes the next call ask Mesub.
 
 Keys read `mesub:access:key-<hash>:<plan>:<kind>:<id>`, and
 `mesub:access-list:key-<hash>:<kind>:<id>` for `accessList`, so several

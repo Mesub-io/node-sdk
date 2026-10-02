@@ -191,10 +191,19 @@ interface Unsettled {
 
 export class Subscriptions {
     readonly #transport: Transport;
+    /**
+     * Told of every subscription `submit`, `retrieve` and `list` answer, so
+     * the client drops the cached access answers one that landed outdates.
+     */
+    readonly #seen: (subscription: ServerSubscription) => Promise<void>;
 
     /** @internal */
-    constructor(transport: Transport) {
+    constructor(
+        transport: Transport,
+        seen: (subscription: ServerSubscription) => Promise<void> = async () => {},
+    ) {
         this.#transport = transport;
+        this.#seen = seen;
     }
 
     /**
@@ -246,12 +255,24 @@ export class Subscriptions {
      * An abort through `options.signal` stops everything, sends, waits and
      * the read back, and rejects with the signal's reason; a send already out
      * may have been co-signed, so read the subscription back.
+     *
+     * A subscription returned with `access` (`active`, or `cancelled` before
+     * its end) drops the `/v1/access` answers cached for that customer (its
+     * wallet, external id and email) that still say no: `hasAccess` right
+     * after asks Mesub again.
      */
     async submit(
         id: string,
         params: SubmitParams,
         options: SubmitOptions = {},
     ): Promise<SubmitResult> {
+        const result = await this.#submit(id, params, options);
+
+        await this.#seen(result.subscription);
+        return result;
+    }
+
+    async #submit(id: string, params: SubmitParams, options: SubmitOptions): Promise<SubmitResult> {
         const path = `${pathOf(id)}/submit`;
         // Built once: every send carries exactly this body.
         const body = { transaction: params.transaction, terms_signature: params.terms_signature };
@@ -388,9 +409,17 @@ export class Subscriptions {
         }
     }
 
-    /** One subscription of your project, by id. */
+    /**
+     * One subscription of your project, by id. Found with `access`, it drops
+     * the access answers cached that still say no, as `submit` does.
+     */
     async retrieve(id: string, options: RequestOptions = {}): Promise<ServerSubscription> {
-        return serverSubscriptionFrom(await this.#transport.get(pathOf(id), {}, options));
+        const subscription = serverSubscriptionFrom(
+            await this.#transport.get(pathOf(id), {}, options),
+        );
+
+        await this.#seen(subscription);
+        return subscription;
     }
 
     /**
@@ -399,6 +428,8 @@ export class Subscriptions {
      *
      * The customer is named as for `access`, and normalised the same way;
      * none or two of `wallet`, `external_id` and `email` throws a TypeError.
+     * Each one with `access` drops the access answers cached that still say
+     * no, as `submit` does.
      */
     async list(params: ListParams, options: RequestOptions = {}): Promise<ServerSubscriptionList> {
         const { kind, value } = customerOf(params);
@@ -410,9 +441,12 @@ export class Subscriptions {
             starting_after,
         };
 
-        return serverSubscriptionListFrom(
+        const page = serverSubscriptionListFrom(
             await this.#transport.get('/v1/subscriptions', query, options),
         );
+
+        for (const subscription of page.data) await this.#seen(subscription);
+        return page;
     }
 
     /**

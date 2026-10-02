@@ -32,6 +32,19 @@ describe('MemoryStore', () => {
         expect(s.size).toBe(1);
     });
 
+    it('deletes a key, and leaves the others', () => {
+        const s = store();
+        s.set('a', entry('A'), 60_000);
+        s.set('b', entry('B'), 60_000);
+
+        s.delete('a');
+        s.delete('missing');
+
+        expect(s.get('a')).toBeUndefined();
+        expect(s.get('b')?.value).toBe('B');
+        expect(s.size).toBe(1);
+    });
+
     it('keeps 10,000 entries by default', () => {
         expect(DEFAULT_MAX_ENTRIES).toBe(10_000);
     });

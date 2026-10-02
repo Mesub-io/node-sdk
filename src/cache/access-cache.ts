@@ -94,4 +94,36 @@ export class AccessCache<T extends Revalidating> {
             // A store that cannot write costs a cached answer, never the request.
         }
     }
+
+    /**
+     * Drops the cached answer when `outdated` says it no longer holds, so the
+     * next call asks Mesub. A store without `delete` gets it back as stale
+     * instead: never served as is again, only as the outage fallback.
+     */
+    async forget(
+        who: string,
+        plan: string | null,
+        scope: string | undefined,
+        outdated: (value: T) => boolean,
+    ): Promise<void> {
+        const key = AccessCache.key(who, plan, scope);
+
+        try {
+            const entry = await this.store.get(key);
+
+            if (!entry || !outdated(entry.value)) return;
+            if (this.store.delete) {
+                await this.store.delete(key);
+                return;
+            }
+
+            const now = this.now();
+
+            if (now < entry.keepUntil) {
+                await this.store.set(key, { ...entry, freshUntil: now }, entry.keepUntil - now);
+            }
+        } catch {
+            // A store that fails costs a fresh answer, never the request.
+        }
+    }
 }
