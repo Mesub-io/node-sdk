@@ -315,6 +315,13 @@ new Mesub({
 });
 ```
 
+They are checked once, by `new Mesub()`, which throws a `TypeError` naming
+the option: a `baseUrl` that is not https (plain http only to `localhost` or
+`127.0.0.1`: every call carries the key), a timeout that is not a positive
+number of milliseconds, `maxRetries` or `maxStaleMs` below 0, or the
+publishable `PUB_` key where the secret `SUB_` one goes. On an edge runtime
+without `process.env` (Cloudflare Workers), pass `apiKey` yourself.
+
 The memory cache is per process and emptied on restart. A store is two
 methods, so Redis is a few lines, and keeps the outage fallback across
 restarts and servers:
