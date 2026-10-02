@@ -1,3 +1,5 @@
+import { API_VERSION_HEADER } from './version.js';
+
 /**
  * The client's options, checked once at `new Mesub()`: a wrong one throws a
  * TypeError there, never a 401 or a 1 ms timeout on every call later.
@@ -121,7 +123,13 @@ export function issuerOf(given: unknown, baseUrl: string): string {
 }
 
 /** Headers the SDK sets itself, and no extra header may replace. */
-const OWN_HEADERS = new Set(['authorization', 'user-agent', 'accept', 'content-type']);
+const OWN_HEADERS = new Set([
+    'authorization',
+    'user-agent',
+    'accept',
+    'content-type',
+    API_VERSION_HEADER.toLowerCase(),
+]);
 
 /**
  * Extra headers for every call, the JWKS included: for a proxy or an access

@@ -2,7 +2,7 @@ import { createRemoteJWKSet, customFetch, errors as joseErrors, jwtVerify } from
 
 import { MesubError } from './errors.js';
 import { endpoint } from './transport.js';
-import { VERSION } from './version.js';
+import { API_VERSION, API_VERSION_HEADER, VERSION } from './version.js';
 
 /** Where `@mesub/react` also writes the access token, for page loads and server rendering. */
 export const TOKEN_COOKIE = 'mesub-token';
@@ -108,7 +108,11 @@ export class TokenVerifier {
         // Under the base URL's own path, behind a proxy at `/mesub` too.
         this.jwks = createRemoteJWKSet(endpoint(config.baseUrl, '/.well-known/jwks.json'), {
             [customFetch]: config.fetch,
-            headers: { ...config.headers, 'User-Agent': `@mesub/node/${VERSION}` },
+            headers: {
+                ...config.headers,
+                'User-Agent': `@mesub/node/${VERSION}`,
+                [API_VERSION_HEADER]: API_VERSION,
+            },
             timeoutDuration: 5_000,
         });
     }

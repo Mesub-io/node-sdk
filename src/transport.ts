@@ -1,5 +1,5 @@
 import { MesubError, codeFor } from './errors.js';
-import { VERSION } from './version.js';
+import { API_VERSION, API_VERSION_HEADER, VERSION } from './version.js';
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -134,6 +134,7 @@ export class Transport {
                     Authorization: `Bearer ${this.#config.apiKey}`,
                     Accept: 'application/json',
                     'User-Agent': `@mesub/node/${VERSION}`,
+                    [API_VERSION_HEADER]: API_VERSION,
                     ...(body !== undefined && { 'Content-Type': 'application/json' }),
                 },
                 ...(body !== undefined && { body: JSON.stringify(body) }),
