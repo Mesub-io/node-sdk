@@ -45,6 +45,7 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         access_until: null,
         next_charge_at: null,
         next_retry_at: null,
+        retry_deadline: null,
         revalidate_after: 60,
         ...over,
     };

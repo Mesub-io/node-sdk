@@ -23,6 +23,7 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         access_until: null,
         next_charge_at: '2026-10-01T00:00:00.000Z',
         next_retry_at: null,
+        retry_deadline: null,
         revalidate_after: 60,
         ...over,
     };
@@ -245,6 +246,11 @@ describe('access', () => {
                 without('next_charge_at', 0),
                 'next_charge_at is not a date or null',
             ],
+            [
+                'a retry_deadline that is not a date',
+                without('retry_deadline', 'soon'),
+                'retry_deadline is not a date or null',
+            ],
             ['attempts that are not a list', without('attempts', {}), 'attempts is not a list'],
             [
                 'an attempt without an amount',
@@ -289,6 +295,29 @@ describe('access', () => {
             expect((error as MesubError).message).toBe(
                 `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
             );
+        });
+
+        // Served since Mesub-io/backend#191: a back from before still answers.
+        it('reads a missing retry_deadline as null, and a date as is', async () => {
+            const deadline = '2026-10-30T11:58:00.000Z';
+            const { fetch } = mockFetch(
+                json(200, without('retry_deadline')),
+                json(200, answer({ retry_deadline: deadline })),
+            );
+            const mesub = client(fetch);
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(answer());
+            await expect(mesub.access(OTHER_WALLET, 'pro')).resolves.toMatchObject({
+                retry_deadline: deadline,
+            });
+        });
+
+        it('takes a superseded status', async () => {
+            const { fetch } = mockFetch(json(200, answer({ status: 'superseded', access: false })));
+
+            await expect(client(fetch).access(WALLET, 'pro')).resolves.toMatchObject({
+                status: 'superseded',
+            });
         });
 
         // The NaN entry that served access: true for good, and Redis's `PX NaN`.

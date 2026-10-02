@@ -33,10 +33,21 @@ const FIELDS: Record<
     access_until: 'string|null',
     next_charge_at: 'string|null',
     next_retry_at: 'string|null',
+    retry_deadline: 'string|null',
     revalidate_after: 'number',
 };
 
-const STATUSES = ['pending', 'active', 'cancelled', 'unpaid', 'stopped', 'ended', 'failed', 'none'];
+const STATUSES = [
+    'pending',
+    'active',
+    'cancelled',
+    'unpaid',
+    'stopped',
+    'ended',
+    'failed',
+    'superseded',
+    'none',
+];
 const PAYMENT_STATUSES = ['paid', 'late', 'none'];
 const OUTCOMES = ['PAID', 'SKIPPED', 'REJECTED'];
 

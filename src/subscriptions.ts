@@ -18,10 +18,20 @@ import {
 
 /**
  * A subscription's status. Unlike `/v1/access`, may be `expired`: a checkout
- * nobody signed (Mesub-io/backend#139). Never `none`: a row exists.
+ * nobody signed (Mesub-io/backend#139). `superseded` is a stopped one the
+ * wallet came back over (Mesub-io/backend#213): a newer row holds the
+ * subscription. Never `none`: a row exists.
  */
 export type ServerSubscriptionStatus =
-    'pending' | 'active' | 'cancelled' | 'unpaid' | 'stopped' | 'ended' | 'failed' | 'expired';
+    | 'pending'
+    | 'active'
+    | 'cancelled'
+    | 'unpaid'
+    | 'stopped'
+    | 'ended'
+    | 'failed'
+    | 'expired'
+    | 'superseded';
 
 /** One subscription to your project's plans, as `GET /v1/subscriptions/:id` answers it. */
 export interface ServerSubscription {
@@ -42,6 +52,12 @@ export interface ServerSubscription {
     /** The next charge on a running one, the next retry on a late one: never both. */
     next_charge_at: string | null;
     next_retry_at: string | null;
+    /**
+     * Free only, as `/v1/access` answers it (Mesub-io/backend#191): when hand
+     * retries close; past it the subscription stops. Read as null from a back
+     * that predates it.
+     */
+    retry_deadline: string | null;
     /** When access ends unless a pull renews it; null while `access` is false. */
     access_until: string | null;
     created_at: string;

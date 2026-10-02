@@ -4,8 +4,21 @@
  * Snake case, as the API serves it.
  */
 
+/**
+ * `superseded` is a stopped subscription the wallet came back over
+ * (Mesub-io/backend#213): the row that replaced it is the one in force, so
+ * `/v1/access` answers that one, but the back's type allows it.
+ */
 export type SubscriptionStatus =
-    'pending' | 'active' | 'cancelled' | 'unpaid' | 'stopped' | 'ended' | 'failed' | 'none';
+    | 'pending'
+    | 'active'
+    | 'cancelled'
+    | 'unpaid'
+    | 'stopped'
+    | 'ended'
+    | 'failed'
+    | 'superseded'
+    | 'none';
 
 /** `late` only while a pull failed and a retry is pending. */
 export type PaymentStatus = 'paid' | 'late' | 'none';
@@ -40,6 +53,14 @@ export interface AccessAnswer {
     access_until: string | null;
     next_charge_at: string | null;
     next_retry_at: string | null;
+    /**
+     * Free only (Mesub-io/backend#191): when hand retries of a missed pull
+     * close, two minutes before the end of its period; past it the
+     * subscription stops. Null on every other tier, whose retries are in
+     * `next_retry_at`. Read as null from a back that predates it; undefined
+     * only on an answer cached by an older SDK.
+     */
+    retry_deadline: string | null;
     /** Only when asked for with `{ attempts: true }`. */
     attempts?: ServedAttempt[];
     /** Seconds this answer stays true: how long it is cached. */

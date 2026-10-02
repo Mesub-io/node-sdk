@@ -11,6 +11,11 @@ import type {
 interface Field {
     check: (value: unknown) => boolean;
     expected: string;
+    /**
+     * A field newer than some backs still serving: absent, it is set to this
+     * value rather than refused, so the answer still holds its type.
+     */
+    absent?: null;
 }
 
 const STRING: Field = { check: (value) => typeof value === 'string', expected: 'a string' };
@@ -26,6 +31,8 @@ const DATE_OR_NULL: Field = {
     check: (value) => value === null || isDate(value),
     expected: 'a date or null',
 };
+/** `retry_deadline`, served since Mesub-io/backend#191: null when a back predates it. */
+const RETRY_DEADLINE: Field = { ...DATE_OR_NULL, absent: null };
 /**
  * What the cache turns into its dates: NaN or Infinity would never go stale.
  * A negative one is read as 0 there, so it is let through.
@@ -55,6 +62,7 @@ const ANSWER = {
     access_until: DATE_OR_NULL,
     next_charge_at: DATE_OR_NULL,
     next_retry_at: DATE_OR_NULL,
+    retry_deadline: RETRY_DEADLINE,
     revalidate_after: SECONDS,
 } satisfies Record<Exclude<keyof AccessAnswer, 'attempts'>, Field>;
 
@@ -136,6 +144,7 @@ const SUBSCRIPTION = {
     current_period_end: DATE_OR_NULL,
     next_charge_at: DATE_OR_NULL,
     next_retry_at: DATE_OR_NULL,
+    retry_deadline: RETRY_DEADLINE,
     access_until: DATE_OR_NULL,
     created_at: DATE,
     confirmed_at: DATE_OR_NULL,
@@ -244,7 +253,11 @@ function unreadable(
     );
 }
 
-/** The first field that is missing or of the wrong type, or null when all are right. */
+/**
+ * The first field that is missing or of the wrong type, or null when all are
+ * right. A missing field with an `absent` value is set to it on the body,
+ * which is the answer just parsed, never one the caller handed in.
+ */
 function problemWith(body: unknown, fields: Record<string, Field>, label?: string): string | null {
     if (!isObject(body)) {
         return `${label ?? 'the body'} is not an object`;
@@ -255,6 +268,10 @@ function problemWith(body: unknown, fields: Record<string, Field>, label?: strin
     for (const [name, field] of Object.entries(fields)) {
         const value = (body as Record<string, unknown>)[name];
 
+        if (value === undefined && 'absent' in field) {
+            (body as Record<string, unknown>)[name] = field.absent;
+            continue;
+        }
         if (value === undefined) return `${prefix}${name} is missing`;
         if (!field.check(value)) return `${prefix}${name} is not ${field.expected}`;
     }

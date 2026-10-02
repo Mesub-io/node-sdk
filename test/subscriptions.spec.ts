@@ -18,6 +18,7 @@ function subscription(overrides: Partial<ServerSubscription> = {}): ServerSubscr
         current_period_end: '2026-11-01T12:00:00.000Z',
         next_charge_at: '2026-11-01T12:00:00.000Z',
         next_retry_at: null,
+        retry_deadline: null,
         access_until: '2026-11-01T12:00:00.000Z',
         created_at: '2026-10-02T11:58:00.000Z',
         confirmed_at: '2026-10-02T12:00:03.000Z',
@@ -339,8 +340,41 @@ describe('subscriptions.retrieve', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    it('reads a missing retry_deadline as null, from a back that predates it', async () => {
+        const { retry_deadline: _, ...older } = subscription();
+        const { fetch } = mockFetch(
+            json(200, older),
+            json(200, { data: [older], has_more: false }),
+        );
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.retrieve('sub_1')).resolves.toEqual(subscription());
+        await expect(client.subscriptions.list({ wallet: WALLET })).resolves.toEqual({
+            data: [subscription()],
+            has_more: false,
+        });
+    });
+
+    it('takes a superseded subscription and its retry deadline', async () => {
+        const superseded = subscription({
+            status: 'superseded',
+            access: false,
+            payment_status: 'none',
+            access_until: null,
+            retry_deadline: '2026-10-30T11:58:00.000Z',
+        });
+        const { fetch } = mockFetch(json(200, superseded));
+
+        await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(superseded);
+    });
+
     it.each([
         ['no created_at', { ...subscription(), created_at: undefined }, 'created_at is missing'],
+        [
+            'a retry_deadline that is not a date',
+            subscription({ retry_deadline: 'soon' }),
+            'retry_deadline is not a date or null',
+        ],
         ['access as a string', subscription({ access: 'yes' as never }), 'access is not a boolean'],
         [
             'a date that is not one',
