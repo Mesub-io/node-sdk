@@ -51,6 +51,15 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
+/** A merchant's own session JWT, sent as a bearer on every request: not a Mesub token. */
+function theirs() {
+    return new SignJWT({ role: 'admin' })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setSubject('merchant_user_9')
+        .setExpirationTime('1h')
+        .sign(new TextEncoder().encode('the-merchant-own-secret-32-bytes!!'));
+}
+
 async function token(over: { aud?: string; exp?: string } = {}) {
     return new SignJWT({ wallet: WALLET })
         .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
@@ -250,6 +259,59 @@ describe('RequirePlan', () => {
             await request(await app(client)).get('/pro');
 
             expect(calls).not.toContain('/v1/access');
+        });
+    });
+
+    // A merchant's own `Authorization: Bearer` must not hide the cookie (#36).
+    describe('a bearer that is not a Mesub token', () => {
+        it('falls back on the mesub-token cookie', async () => {
+            const { client } = mesub();
+
+            const response = await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`)
+                .set('Cookie', `mesub-token=${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body.wallet).toBe(WALLET);
+        });
+
+        it('answers 401 when there is no cookie behind it', async () => {
+            const { client } = mesub();
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`)
+                .expect(401);
+        });
+
+        it('never tries the cookie once the keys could not be fetched', async () => {
+            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+            const verify = vi.spyOn(client, 'verifyToken');
+
+            await request(await app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .set('Cookie', `mesub-token=${await token({ exp: '2h' })}`)
+                .expect(503);
+            expect(verify).toHaveBeenCalledOnce();
+        });
+
+        it('reads the token where the token option says, and only there', async () => {
+            const { client } = mesub();
+            const server = await app(client, {
+                token: (request) => (request.headers as Record<string, string>)['x-mesub-token'],
+            });
+
+            await request(server)
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`)
+                .set('x-mesub-token', await token())
+                .expect(200);
+            await request(server)
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(401);
         });
     });
 

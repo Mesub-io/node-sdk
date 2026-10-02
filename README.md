@@ -78,6 +78,16 @@ export class ReportsController {
 }
 ```
 
+All three read the Mesub access token from `Authorization: Bearer`, then from
+the `mesub-token` cookie: when your app already sends a bearer of its own (your
+session JWT), a bearer that does not verify as a Mesub token falls back on the
+cookie. If the token travels elsewhere, say where with `token`; it is then the
+only place looked at:
+
+```ts
+requirePlan('pro', { token: (req) => req.get('x-mesub-token') });
+```
+
 All three answer a refusal themselves:
 
 | Status  | When                                                                                                                               | Body                                             |

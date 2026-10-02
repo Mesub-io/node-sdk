@@ -17,6 +17,8 @@ import {
     denialOf,
     guard,
     type MesubAccess as Access,
+    type TokenOption,
+    tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 import type { HeaderSource } from './tokens.js';
@@ -37,6 +39,12 @@ export interface MesubRequest {
 export interface RequirePlanOptions {
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
+    /**
+     * Where the Mesub access token is, when not in the bearer or the
+     * `mesub-token` cookie: a header of your own, a session. Then the only
+     * place looked at.
+     */
+    token?: TokenOption<MesubRequest>;
     /**
      * Answer a refusal yourself by throwing your own exception, with your own
      * status and body. If it returns, the default refusal is thrown.
@@ -60,7 +68,8 @@ function setHeader(response: HeaderSink, name: string, value: string) {
  * plan: `@UseGuards(RequirePlan('pro'))` on a controller or a route.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
- * header or the `mesub-token` cookie. Refusals throw an `HttpException` of 401
+ * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
+ * token), or where `token` says. Refusals throw an `HttpException` of 401
  * (no valid token), 402 (Mesub said no) or 503 with Retry-After (Mesub
  * unreachable, with no answer known for that subscriber). Integration errors
  * are thrown as they are, for Nest to log and answer 500.
@@ -70,7 +79,11 @@ export function RequirePlan(plan: string, options: RequirePlanOptions = {}): Typ
         async canActivate(context: ExecutionContext): Promise<boolean> {
             const http = context.switchToHttp();
             const request = http.getRequest<MesubRequest>();
-            const outcome = await guard(options.client ?? defaultClient(), request.headers, plan);
+            const outcome = await guard(
+                options.client ?? defaultClient(),
+                tokensOf(request, options.token),
+                plan,
+            );
 
             if (outcome.allowed) {
                 request.mesub = accessOf(outcome);

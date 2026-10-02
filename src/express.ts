@@ -10,6 +10,8 @@ import {
     denialOf,
     guard,
     type MesubAccess,
+    type TokenOption,
+    tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
@@ -22,6 +24,12 @@ export type MesubLocals = MesubAccess;
 export interface RequirePlanOptions {
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
+    /**
+     * Where the Mesub access token is, when not in the bearer or the
+     * `mesub-token` cookie: `(req) => req.get('x-mesub-token')`. Then the
+     * only place looked at.
+     */
+    token?: TokenOption<Request>;
     /** Answer a refusal yourself: a redirect, a page, your own JSON. */
     onDenied?: (denial: Denial, req: Request, res: Response, next: NextFunction) => void;
 }
@@ -30,14 +38,19 @@ export interface RequirePlanOptions {
  * Lets a request through only for a subscriber with access to that plan.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
- * header or the `mesub-token` cookie. Refusals answer 401 (no valid token),
+ * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
+ * token), or where `token` says. Refusals answer 401 (no valid token),
  * 402 (Mesub said no) or 503 with Retry-After (Mesub unreachable, with no
  * answer known for that subscriber). Integration errors go to `next(err)`.
  */
 export function requirePlan(plan: string, options: RequirePlanOptions = {}): RequestHandler {
     return async (req, res, next) => {
         try {
-            const outcome = await guard(options.client ?? defaultClient(), req.headers, plan);
+            const outcome = await guard(
+                options.client ?? defaultClient(),
+                tokensOf(req, options.token),
+                plan,
+            );
 
             if (outcome.allowed) {
                 const locals: MesubLocals = accessOf(outcome);
