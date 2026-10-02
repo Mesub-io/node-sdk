@@ -1,4 +1,4 @@
-import { MesubError, codeForStatus } from './errors.js';
+import { MesubError, codeFor } from './errors.js';
 import { VERSION } from './version.js';
 
 export type QueryValue = string | number | boolean | undefined;
@@ -37,8 +37,6 @@ const MAX_RETRY_DELAY = 8_000;
 const MAX_RETRY_AFTER = 60_000;
 
 type Method = 'GET' | 'POST';
-
-type ErrorBody = Record<string, unknown>;
 
 type Attempt =
     | { ok: true; body: unknown }
@@ -141,29 +139,29 @@ export class Transport {
                     const error = new MesubError('Mesub answered with a body that is not JSON.', {
                         status: response.status,
                         code: 'unexpected',
+                        body: text,
                         cause,
                     });
                     return { ok: false, error, retry: false, retryAfter: null };
                 }
             }
 
-            const errorBody = objectFrom(text);
+            const answered = parsed(text);
             const error =
-                response.status === 404 && !isMesubErrorBody(errorBody)
+                response.status === 404 && !isMesubErrorBody(answered)
                     ? new MesubError(
                           `${url.pathname} answered 404 with no Mesub error: is baseUrl ` +
                               `(${this.#config.baseUrl}) the Mesub API?`,
-                          { status: 404, code: 'unexpected' },
+                          { status: 404, code: 'unexpected', body: answered },
                       )
-                    : new MesubError(messageFrom(errorBody, response.status), {
-                          status: response.status,
-                          code: codeForStatus(response.status),
-                      });
+                    : errorFrom(response.status, answered);
+            const wait = retryAfter(response.headers.get('retry-after'));
+
             return {
                 ok: false,
                 error,
-                retry: shouldRetry(response, errorBody),
-                retryAfter: retryAfter(response.headers.get('retry-after')),
+                retry: shouldRetry(response, error, wait),
+                retryAfter: wait,
             };
         } catch (cause) {
             if (signal?.aborted) throw signal.reason;
@@ -189,16 +187,46 @@ export class Transport {
 }
 
 /**
- * Whether a GET is sent again: the rules of the Stainless-generated clients
- * (OpenAI, Anthropic), except that a 409 is final, and that the body's
- * `retryable` (Mesub-io/backend#180), when there is one, decides over the status.
+ * Whether a GET is sent again (a POST never is): `x-should-retry` first, as
+ * the Stainless-generated clients (OpenAI, Anthropic) read it, then the
+ * pending cap, then the error's own `retryable`, which is Mesub's flag when
+ * the body has one and the status's otherwise.
  */
-function shouldRetry(response: Response, body: ErrorBody | null): boolean {
+function shouldRetry(response: Response, error: MesubError, wait: number | null): boolean {
     const header = response.headers.get('x-should-retry');
     if (header === 'true') return true;
     if (header === 'false') return false;
-    if (typeof body?.['retryable'] === 'boolean') return body['retryable'];
-    const { status } = response;
+    // Not a rate limit that passes in a second: the project's subscriptions
+    // waiting for a signature stop counting an hour after they were last
+    // touched. Sent again only when Mesub says when.
+    if (error.apiCode === 'pending_cap_reached') return wait !== null;
+    return error.retryable;
+}
+
+/**
+ * The error a Mesub error body describes since the back's error codes
+ * (Mesub-io/backend#180): Nest's `statusCode`, `error` and `message`, plus a
+ * stable `code` and a `retryable` flag. Without them, as from a proxy in
+ * front, the status alone decides.
+ */
+function errorFrom(status: number, body: unknown): MesubError {
+    const { code, retryable } = isRecord(body) ? body : {};
+    const apiCode = typeof code === 'string' ? code : null;
+
+    return new MesubError(messageFrom(body, status), {
+        status,
+        code: codeFor(status, apiCode),
+        apiCode,
+        retryable: typeof retryable === 'boolean' ? retryable : retryableStatus(status),
+        body,
+    });
+}
+
+/**
+ * What the status says, when the body does not: the Stainless clients' rules,
+ * but for a 409, which is Mesub's final word on a state, never a race to retry.
+ */
+function retryableStatus(status: number): boolean {
     return status === 408 || status === 429 || status >= 500;
 }
 
@@ -217,25 +245,10 @@ function backoff(retry: number): number {
     return delay * (1 - Math.random() * 0.25);
 }
 
-/** An error body that is a JSON object, or null for anything else. */
-function objectFrom(text: string): ErrorBody | null {
-    let body: unknown;
-    try {
-        body = JSON.parse(text);
-    } catch {
-        return null;
-    }
-    if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
-    return body as ErrorBody;
-}
-
-/**
- * The NestJS error body is `{ message, error, statusCode }`, `message` a
- * string or a list, and Mesub adds `code` and `retryable`.
- */
-function messageFrom(body: ErrorBody | null, status: number): string {
+/** The NestJS error body is `{ message, error, statusCode }`, `message` a string or a list. */
+function messageFrom(body: unknown, status: number): string {
     const fallback = `Mesub answered with HTTP ${status}.`;
-    if (body === null) return fallback;
+    if (!isRecord(body)) return fallback;
 
     const { message, error } = body;
     if (typeof message === 'string' && message !== '') return message;
@@ -251,16 +264,29 @@ function messageFrom(body: ErrorBody | null, status: number): string {
  * Whether a 404 came from the Mesub API rather than from whatever else lives
  * at a wrong `baseUrl`: a JSON error body, as Nest writes it (`statusCode`
  * and `message`) or with a `code`. Nest's own answer for a route it does not
- * have (`Cannot GET /api/v1/access`) is not one: a path prefix too many.
+ * have (`Cannot GET /api/v1/access`) is not one, though the back now codes it
+ * `not_found`: a path prefix too many.
  */
-function isMesubErrorBody(body: ErrorBody | null): boolean {
-    if (body === null) return false;
+function isMesubErrorBody(body: unknown): boolean {
+    if (!isRecord(body)) return false;
 
     const { code, statusCode, message } = body;
-    if (typeof code === 'string') return true;
-    if (typeof statusCode !== 'number') return false;
+    if (typeof message === 'string' && /^Cannot [A-Z]+ \//.test(message)) return false;
 
-    return !(typeof message === 'string' && /^Cannot [A-Z]+ \//.test(message));
+    return typeof code === 'string' || typeof statusCode === 'number';
+}
+
+/** The body as JSON when it parses, the text as it came otherwise. */
+function parsed(text: string): unknown {
+    try {
+        return JSON.parse(text);
+    } catch {
+        return text;
+    }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Rejects with the signal's reason as soon as it aborts. */

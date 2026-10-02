@@ -161,9 +161,12 @@ called without one, they throw a `TypeError` instead of asking.
 - A bad key, an unknown plan or a malformed wallet always throws, it is never
   turned into `false`.
 
-Reads from Mesub time out after 5 s and are retried twice, on network errors,
-408, 429 and 5xx, honouring `Retry-After`, unless the error body says
-`retryable: false`; a 409 is final. Writes (POST) are sent once and never
+Reads from Mesub time out after 5 s and are retried twice, on network errors
+and on any error Mesub marks `retryable` (a 429 rate limit, a 5xx), honouring
+`Retry-After`; an error without Mesub's flag is retried on 408, 429 and 5xx,
+never on a 409. A full cap of subscriptions waiting for a signature
+(`pending_cap_reached`) is a 429 too, but frees up over an hour: it is retried
+only when Mesub sends a `Retry-After`. Writes (POST) are sent once and never
 retried, whatever happened: one that got no answer may still have been done.
 These are HTTP retries of the SDK's own calls, unrelated to a plan's pull
 retries. `access` and `hasAccess`, called from your own code, keep exactly
@@ -221,11 +224,24 @@ and a stable `code` to branch on:
 | ----------------- | ----------------------------------------------------------------------- |
 | `invalid_request` | 400, e.g. a wallet that is not an address                               |
 | `unauthorized`    | 401, an API key Mesub never issued                                      |
+| `forbidden`       | 403, e.g. signed terms that expired                                     |
 | `plan_not_found`  | 404, no plan of yours under that slug                                   |
+| `not_found`       | any other 404 Mesub answered, e.g. an unknown subscription id           |
+| `conflict`        | 409, e.g. a wallet already subscribed                                   |
 | `rate_limited`    | 429, after the retries                                                  |
 | `unavailable`     | 5xx, a timeout or a network error, after the retries                    |
 | `invalid_token`   | an access token that fails verification                                 |
 | `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
+
+It also carries what Mesub answered:
+
+- `apiCode`: Mesub's own code, finer than `code` (`subscription_not_found`,
+  `already_subscribed`, `pending_cap_reached`, ...), or `null` when no Mesub
+  error came back. A code is never renamed nor reused, but new ones are added:
+  keep a default branch.
+- `retryable`: whether the same call, sent again unchanged, may succeed later.
+  Mesub's own flag when it sent one, what the status says otherwise.
+- `body`: the error body, parsed when it is JSON.
 
 ## Requirements
 

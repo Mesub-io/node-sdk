@@ -71,7 +71,7 @@ const ATTEMPT = {
 export function accessAnswerFrom(body: unknown): AccessAnswer {
     const problem = answerProblem(body);
 
-    if (problem !== null) throw unreadable(problem);
+    if (problem !== null) throw unreadable(problem, body);
 
     return body as AccessAnswer;
 }
@@ -84,7 +84,7 @@ export function accessAnswerFrom(body: unknown): AccessAnswer {
 export function accessListFrom(body: unknown): AccessList {
     const problem = problemWith(body, LIST) ?? plansProblem(body);
 
-    if (problem !== null) throw unreadable(problem);
+    if (problem !== null) throw unreadable(problem, body);
 
     return body as AccessList;
 }
@@ -111,10 +111,10 @@ function plansProblem(body: unknown): string | null {
 }
 
 /** The transport hands back 2xx bodies only, and /v1/access answers 200. */
-function unreadable(problem: string): MesubError {
+function unreadable(problem: string, body: unknown): MesubError {
     return new MesubError(
         `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
-        { status: 200, code: 'unexpected' },
+        { status: 200, code: 'unexpected', body },
     );
 }
 
