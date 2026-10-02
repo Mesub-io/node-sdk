@@ -192,7 +192,7 @@ describe('requirePlan', () => {
 
             await request(app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token({ exp: '-1s' })}`)
+                .set('Authorization', `Bearer ${await token({ exp: '-10s' })}`)
                 .expect(401);
         });
 
@@ -202,6 +202,15 @@ describe('requirePlan', () => {
             await request(app(client))
                 .get('/pro')
                 .set('Authorization', 'Bearer not-a-token')
+                .expect(401);
+        });
+
+        it('answers 401, not 500, on a cookie that is not valid percent-encoding', async () => {
+            const { client } = mesub();
+
+            await request(app(client))
+                .get('/pro')
+                .set('Cookie', 'mesub-token=%E0%A4%A')
                 .expect(401);
         });
 

@@ -41,9 +41,18 @@ export function tokenFrom(request: { headers: HeaderSource }): string | null {
         .split(';')
         .map((part) => part.trim())
         .find((part) => part.startsWith(prefix));
-    const fromCookie = cookie ? decodeURIComponent(cookie.slice(prefix.length)) : '';
+    const fromCookie = cookie ? decoded(cookie.slice(prefix.length)) : '';
 
     return fromCookie || null;
+}
+
+/** A cookie value as sent, or '' when it is not valid percent-encoding: no token, a 401, never a 500. */
+function decoded(value: string): string {
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return '';
+    }
 }
 
 /**
@@ -114,6 +123,11 @@ export class TokenVerifier {
                 algorithms: ['ES256'],
                 audience,
                 issuer: this.issuer,
+                // jose checks a claim only when it is there: a token without
+                // `exp` would never expire (#37).
+                requiredClaims: ['exp', 'sub', 'aud', 'iss'],
+                // Our clock and the merchant's may differ by a few seconds.
+                clockTolerance: 5,
             });
 
             if (typeof payload.sub !== 'string' || typeof payload['wallet'] !== 'string') {

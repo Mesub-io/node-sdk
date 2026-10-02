@@ -62,6 +62,22 @@ describe('tokenFrom', () => {
         expect(tokenFrom({ headers })).toBeNull();
     });
 
+    // decodeURIComponent throws on these: a 401, never a 500 (#37).
+    it.each([['%E0%A4%A'], ['%'], ['%ZZ'], ['abc%']])(
+        'answers null on a cookie that is not valid percent-encoding: %s',
+        (value) => {
+            expect(tokenFrom({ headers: { cookie: `${TOKEN_COOKIE}=${value}` } })).toBeNull();
+        },
+    );
+
+    it('still reads the bearer when the cookie is malformed', () => {
+        expect(
+            tokenFrom({
+                headers: { authorization: 'Bearer abc', cookie: `${TOKEN_COOKIE}=%E0%A4%A` },
+            }),
+        ).toBe('abc');
+    });
+
     it('takes the first value when Node gives an array', () => {
         expect(tokenFrom({ headers: { authorization: ['Bearer first', 'Bearer second'] } })).toBe(
             'first',
@@ -236,7 +252,39 @@ describe('verifyToken', () => {
     it('refuses an expired token', async () => {
         const { mesub } = server();
 
-        expect(await codeOf(mesub.verifyToken(await token({ exp: '-1s' })))).toBe('invalid_token');
+        expect(await codeOf(mesub.verifyToken(await token({ exp: '-10s' })))).toBe('invalid_token');
+    });
+
+    // Five seconds of clock skew between our servers and the merchant's (#37).
+    it('accepts a token that expired within the clock tolerance', async () => {
+        const { mesub } = server();
+
+        await expect(mesub.verifyToken(await token({ exp: '-3s' }))).resolves.toMatchObject({
+            wallet: WALLET,
+        });
+    });
+
+    describe('a token missing a claim it must carry (#37)', () => {
+        /** Signed by our key, with only the claims a case keeps. */
+        async function without(claim: 'exp' | 'sub' | 'aud' | 'iss') {
+            const jwt = new SignJWT({ wallet: WALLET })
+                .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
+                .setIssuedAt();
+            if (claim !== 'exp') jwt.setExpirationTime('1h');
+            if (claim !== 'sub') jwt.setSubject('user_1');
+            if (claim !== 'aud') jwt.setAudience(PROJECT);
+            if (claim !== 'iss') jwt.setIssuer(BASE);
+            return jwt.sign(privateKey);
+        }
+
+        it.each(['exp', 'sub', 'aud', 'iss'] as const)(
+            'refuses a token without %s',
+            async (claim) => {
+                const { mesub } = server();
+
+                expect(await codeOf(mesub.verifyToken(await without(claim)))).toBe('invalid_token');
+            },
+        );
     });
 
     it('refuses a token from another issuer', async () => {

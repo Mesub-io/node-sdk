@@ -230,7 +230,7 @@ describe('RequirePlan', () => {
 
             await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token({ exp: '-1s' })}`)
+                .set('Authorization', `Bearer ${await token({ exp: '-10s' })}`)
                 .expect(401);
         });
 

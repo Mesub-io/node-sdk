@@ -216,7 +216,7 @@ describe('withMesub', () => {
         it('answers 401 on an expired token', async () => {
             const { client } = mesub();
 
-            const response = await route(client)(get(await bearer({ exp: '-1s' })), context);
+            const response = await route(client)(get(await bearer({ exp: '-10s' })), context);
 
             expect(response.status).toBe(401);
         });
