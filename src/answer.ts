@@ -23,7 +23,11 @@ export interface ServedAttempt {
 }
 
 export interface AccessAnswer {
-    wallet: string;
+    /**
+     * The wallet the answer is about. Asked by external id or email, the one
+     * that pays, and null when the customer has nothing on this plan.
+     */
+    wallet: string | null;
     plan: string;
     /** The only field a guard needs. */
     access: boolean;
@@ -41,6 +45,23 @@ export interface AccessAnswer {
     /** Seconds this answer stays true: how long it is cached. */
     revalidate_after: number;
 }
+
+/**
+ * Every plan of the project a customer has, when no plan is named: what
+ * `accessList` answers. Plans they never subscribed to are left out.
+ */
+export interface AccessList {
+    plans: AccessAnswer[];
+    /** The soonest of the plans', so one cached list goes stale with its first. */
+    revalidate_after: number;
+}
+
+/**
+ * Who an access question is about: exactly one of the wallet that pays, your
+ * own id for the customer (the `external_id` given at checkout), or the email
+ * given at checkout. A string alone is a wallet, as before.
+ */
+export type Customer = { wallet: string } | { external_id: string } | { email: string };
 
 export interface AccessOptions {
     /** Also answer the last pull attempts. Skips the cache both ways. */

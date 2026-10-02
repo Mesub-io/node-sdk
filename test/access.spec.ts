@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
-import type { AccessAnswer, CacheStore, MesubOptions } from '../src/index.js';
+import type { AccessAnswer, AccessList, CacheStore, MesubOptions } from '../src/index.js';
 import { Mesub, MemoryStore, MesubError } from '../src/index.js';
 import { json, mockFetch, nest } from './helpers.js';
 
@@ -34,6 +34,13 @@ function sha256(text: string): string {
     return createHash('sha256').update(text).digest('hex');
 }
 
+/** How the cache key names an email or an external id: an HMAC under the API key. */
+function hmac(kind: string, value: string, apiKey = 'SUB_test'): string {
+    return createHmac('sha256', apiKey).update(`${kind}:${value}`).digest('hex');
+}
+
+const SCOPE = `key-${sha256('SUB_test').slice(0, 16)}`;
+
 /** `/v1/project` answers `project`; every other call goes to `fetch`. */
 function withProject(
     fetch: typeof globalThis.fetch,
@@ -51,7 +58,7 @@ function withProject(
 /** No retries: an outage is one failed call, not three waits of backoff. */
 function client(
     fetch: typeof globalThis.fetch,
-    cache?: CacheStore<AccessAnswer>,
+    cache?: CacheStore<AccessAnswer | AccessList>,
     options: MesubOptions = {},
 ) {
     return new Mesub({
@@ -190,7 +197,7 @@ describe('access', () => {
             await client(fetch, { get: () => undefined, set }).access(WALLET, 'pro');
 
             expect(set).toHaveBeenCalledWith(
-                `mesub:access:key-${sha256('SUB_test').slice(0, 16)}:pro:${WALLET}`,
+                `mesub:access:key-${sha256('SUB_test').slice(0, 16)}:pro:wallet:${WALLET}`,
                 expect.objectContaining({ value: answer() }),
                 expect.any(Number),
             );
@@ -206,7 +213,9 @@ describe('access', () => {
             await client(fetch, { get: () => undefined, set }).access(WALLET, 'pro');
 
             const key = set.mock.calls[0]![0] as string;
-            expect(key).toBe(`mesub:access:key-${sha256('SUB_test').slice(0, 16)}:pro:${WALLET}`);
+            expect(key).toBe(
+                `mesub:access:key-${sha256('SUB_test').slice(0, 16)}:pro:wallet:${WALLET}`,
+            );
             expect(key).not.toContain('SUB_test');
         });
 
@@ -262,7 +271,7 @@ describe('access', () => {
             await mesub.access(WALLET, 'pro');
 
             const key = set.mock.calls[0]![0] as string;
-            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:${WALLET}$`));
+            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:wallet:${WALLET}$`));
             expect(key).not.toContain('SUB_test');
         });
 
@@ -280,7 +289,7 @@ describe('access', () => {
             await mesub.access(WALLET, 'pro');
 
             const key = set.mock.calls[0]![0] as string;
-            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:${WALLET}$`));
+            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:wallet:${WALLET}$`));
             expect(key).not.toContain('undefined');
         });
 
@@ -761,5 +770,389 @@ describe('a plan without pull retries', () => {
         vi.setSystemTime(START.getTime() + 301_000);
 
         await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+    });
+});
+
+// #28: a merchant with their own login asks by their id for the customer, and
+// may list every plan at once.
+describe('asked by customer', () => {
+    const EMAIL = 'ada@example.com';
+
+    function list(over: Partial<AccessList> = {}): AccessList {
+        return {
+            plans: [answer(), answer({ plan: 'team', access: false, status: 'none' })],
+            revalidate_after: 60,
+            ...over,
+        };
+    }
+
+    /** A store that records every key written, and the entries. */
+    function recording() {
+        const store = new MemoryStore<AccessAnswer | AccessList>();
+        const writes: Array<{ key: string; entry: unknown }> = [];
+
+        return {
+            writes,
+            store: {
+                get: (key: string) => store.get(key),
+                set: (key: string, entry: Parameters<typeof store.set>[1], ttl: number) => {
+                    writes.push({ key, entry });
+                    store.set(key, entry, ttl);
+                },
+            } satisfies CacheStore<AccessAnswer | AccessList>,
+        };
+    }
+
+    beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(START);
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it.each([
+        ['a wallet', { wallet: WALLET }, 'wallet', WALLET],
+        ['an external id', { external_id: 'user_42' }, 'external_id', 'user_42'],
+        ['an email', { email: EMAIL }, 'email', EMAIL],
+    ] as const)('asks about %s, and nothing else', async (_label, customer, param, value) => {
+        const { fetch, calls } = mockFetch(json(200, answer()));
+
+        await client(fetch).access(customer, 'pro');
+
+        const query = Object.fromEntries(calls[0]!.url.searchParams);
+        expect(query).toEqual({ [param]: value, plan: 'pro' });
+    });
+
+    it('still takes a wallet as a string, as the same customer as { wallet }', async () => {
+        const { fetch, calls } = mockFetch(json(200, answer()));
+        const mesub = client(fetch);
+
+        await mesub.access(WALLET, 'pro');
+        await expect(mesub.access({ wallet: WALLET }, 'pro')).resolves.toEqual(answer());
+        await expect(mesub.hasAccess({ wallet: WALLET }, 'pro')).resolves.toBe(true);
+
+        expect(calls).toHaveLength(1);
+    });
+
+    it('answers a null wallet for a customer with nothing on that plan', async () => {
+        const nothing = answer({
+            wallet: null,
+            access: false,
+            status: 'none',
+            payment_status: 'none',
+            subscribed_since: null,
+            first_subscribed_at: null,
+            current_period_end: null,
+            next_charge_at: null,
+            revalidate_after: 10,
+        });
+        const { fetch } = mockFetch(json(200, nothing));
+        const mesub = client(fetch);
+
+        await expect(mesub.access({ external_id: 'user_42' }, 'pro')).resolves.toEqual(nothing);
+        await expect(mesub.hasAccess({ external_id: 'user_42' }, 'pro')).resolves.toBe(false);
+    });
+
+    describe('normalised as Mesub reads it', () => {
+        it('trims and lowercases an email', async () => {
+            const { fetch, calls } = mockFetch(json(200, answer()));
+
+            await client(fetch).access({ email: '  Ada@Example.COM ' }, 'pro');
+
+            expect(calls[0]!.url.searchParams.get('email')).toBe(EMAIL);
+        });
+
+        it('trims an external id, and keeps its case', async () => {
+            const { fetch, calls } = mockFetch(json(200, answer()));
+
+            await client(fetch).access({ external_id: ' User_42\t' }, 'pro');
+
+            expect(calls[0]!.url.searchParams.get('external_id')).toBe('User_42');
+        });
+
+        it('shares one cached answer between two spellings of a customer', async () => {
+            const { fetch, calls } = mockFetch(json(200, answer()), json(200, answer()));
+            const mesub = client(fetch);
+
+            await mesub.access({ email: 'Ada@Example.com' }, 'pro');
+            await mesub.access({ email: ` ${EMAIL}` }, 'pro');
+            await mesub.access({ external_id: 'user_42 ' }, 'pro');
+            await mesub.access({ external_id: '\nuser_42' }, 'pro');
+
+            expect(calls).toHaveLength(2);
+        });
+    });
+
+    describe('the cache key', () => {
+        it('names the kind of identifier, and keeps a wallet readable', async () => {
+            const { store, writes } = recording();
+
+            await client(mockFetch(json(200, answer())).fetch, store).access(WALLET, 'pro');
+
+            expect(writes[0]!.key).toBe(`mesub:access:${SCOPE}:pro:wallet:${WALLET}`);
+        });
+
+        it.each([
+            ['an external id', { external_id: 'user_42' }, 'external_id', 'user_42'],
+            ['an email', { email: EMAIL }, 'email', EMAIL],
+        ] as const)('hashes %s under the API key', async (_label, customer, kind, value) => {
+            const { store, writes } = recording();
+
+            await client(mockFetch(json(200, answer())).fetch, store).access(customer, 'pro');
+
+            expect(writes[0]!.key).toBe(`mesub:access:${SCOPE}:pro:${kind}:${hmac(kind, value)}`);
+            expect(writes[0]!.key).toMatch(/:[0-9a-f]{64}$/);
+        });
+
+        // A leaked Redis must not hand out the merchant's customers.
+        it('never writes an email in clear, in the key or the entry', async () => {
+            const { store, writes } = recording();
+            const mesub = client(mockFetch(json(200, answer()), json(200, list())).fetch, store);
+
+            await mesub.access({ email: 'Ada@Example.com' }, 'pro');
+            await mesub.accessList({ email: 'Ada@Example.com' });
+
+            expect(writes).toHaveLength(2);
+            expect(JSON.stringify(writes)).not.toMatch(/ada|example/i);
+        });
+
+        it('keeps the kinds apart, the same value as an email and an external id', async () => {
+            const { fetch, calls } = mockFetch(
+                json(200, answer()),
+                json(200, answer({ access: false, status: 'none' })),
+            );
+            const mesub = client(fetch);
+
+            await mesub.access({ external_id: EMAIL }, 'pro');
+
+            await expect(mesub.hasAccess({ email: EMAIL }, 'pro')).resolves.toBe(false);
+            expect(calls).toHaveLength(2);
+        });
+
+        it('hashes under each API key apart', async () => {
+            const keys: string[] = [];
+            const keyed = (apiKey: string) =>
+                client(
+                    mockFetch(json(200, answer())).fetch,
+                    { get: () => undefined, set: (key) => void keys.push(key) },
+                    { apiKey },
+                );
+
+            await keyed('SUB_one').access({ external_id: 'user_42' }, 'pro');
+            await keyed('SUB_two').access({ external_id: 'user_42' }, 'pro');
+
+            expect(keys[0]!.split(':').at(-1)).toBe(hmac('external_id', 'user_42', 'SUB_one'));
+            expect(keys[1]!.split(':').at(-1)).toBe(hmac('external_id', 'user_42', 'SUB_two'));
+        });
+    });
+
+    describe('a malformed question', () => {
+        it.each([
+            ['no identifier', {}],
+            ['two identifiers', { wallet: WALLET, email: EMAIL }],
+            ['a misspelt one', { externalId: 'user_42' }],
+            ['one that is not a string', { external_id: 42 }],
+            ['null', null],
+        ])('throws a TypeError on %s, and asks nothing', async (_label, customer) => {
+            const { fetch, calls } = mockFetch();
+            const mesub = client(fetch);
+            const asked = customer as never;
+
+            await expect(mesub.access(asked, 'pro')).rejects.toBeInstanceOf(TypeError);
+            await expect(mesub.hasAccess(asked, 'pro')).rejects.toBeInstanceOf(TypeError);
+            await expect(mesub.decide(asked, 'pro')).rejects.toBeInstanceOf(TypeError);
+            await expect(mesub.accessList(asked)).rejects.toBeInstanceOf(TypeError);
+            expect(calls).toHaveLength(0);
+        });
+
+        it('lets an identifier undefined beside the one named pass, as Mesub does', async () => {
+            const { fetch, calls } = mockFetch(json(200, answer()));
+
+            await client(fetch).access(
+                { wallet: undefined, external_id: 'user_42' } as never,
+                'pro',
+            );
+
+            expect(calls[0]!.url.searchParams.get('external_id')).toBe('user_42');
+            expect(calls[0]!.url.searchParams.has('wallet')).toBe(false);
+        });
+
+        // Mesub would answer the list, read as one answer and cached under
+        // `undefined`, its missing `access` taken for a no.
+        it.each([
+            ['access', (mesub: Mesub) => mesub.access(WALLET, undefined as never)],
+            [
+                'hasAccess',
+                (mesub: Mesub) => mesub.hasAccess({ external_id: 'u' }, undefined as never),
+            ],
+            ['decide', (mesub: Mesub) => mesub.decide(WALLET, '')],
+        ])('throws a TypeError from %s without a plan, and caches nothing', async (_l, call) => {
+            const { fetch, calls } = mockFetch();
+            const { store, writes } = recording();
+
+            await expect(call(client(fetch, store))).rejects.toThrow(/accessList/);
+            expect(calls).toHaveLength(0);
+            expect(writes).toHaveLength(0);
+        });
+    });
+
+    describe('accessList', () => {
+        it('asks /v1/access without a plan, and answers the list', async () => {
+            const { fetch, calls } = mockFetch(json(200, list()));
+
+            await expect(client(fetch).accessList({ external_id: 'user_42' })).resolves.toEqual(
+                list(),
+            );
+
+            expect(Object.fromEntries(calls[0]!.url.searchParams)).toEqual({
+                external_id: 'user_42',
+            });
+        });
+
+        it('takes a wallet as a string, and normalises like access', async () => {
+            const { fetch, calls } = mockFetch(json(200, list()), json(200, list()));
+            const mesub = client(fetch);
+
+            await mesub.accessList(WALLET);
+            await mesub.accessList({ email: ' Ada@Example.com' });
+
+            expect(calls[0]!.url.searchParams.get('wallet')).toBe(WALLET);
+            expect(calls[1]!.url.searchParams.get('email')).toBe(EMAIL);
+        });
+
+        it('is cached under its own key, never under a plan', async () => {
+            const { store, writes } = recording();
+
+            await client(mockFetch(json(200, list())).fetch, store).accessList({
+                external_id: 'user_42',
+            });
+
+            expect(writes.map((write) => write.key)).toEqual([
+                `mesub:access-list:${SCOPE}:external_id:${hmac('external_id', 'user_42')}`,
+            ]);
+        });
+
+        it('answers again from the cache while its revalidate_after lasts', async () => {
+            const { fetch, calls } = mockFetch(
+                json(200, list({ revalidate_after: 30 })),
+                json(200, list({ plans: [] })),
+            );
+            const mesub = client(fetch);
+
+            await mesub.accessList({ external_id: 'user_42' });
+            vi.setSystemTime(START.getTime() + 29_999);
+            await expect(mesub.accessList({ external_id: 'user_42' })).resolves.toEqual(
+                list({ revalidate_after: 30 }),
+            );
+            expect(calls).toHaveLength(1);
+
+            vi.setSystemTime(START.getTime() + 30_000);
+            await expect(mesub.accessList({ external_id: 'user_42' })).resolves.toEqual(
+                list({ plans: [] }),
+            );
+            expect(calls).toHaveLength(2);
+        });
+
+        it('never answers a plan from the list, nor the list from a plan', async () => {
+            const { fetch, calls } = mockFetch(json(200, list()), json(200, answer()));
+            const { store } = recording();
+            const mesub = client(fetch, store);
+
+            await mesub.accessList(WALLET);
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(answer());
+            await expect(mesub.accessList(WALLET)).resolves.toEqual(list());
+
+            expect(calls).toHaveLength(2);
+        });
+
+        it('skips the cache both ways when attempts are asked for', async () => {
+            const { fetch, calls } = mockFetch(json(200, list()), json(200, list()));
+            const { store, writes } = recording();
+            const mesub = client(fetch, store);
+
+            await mesub.accessList(WALLET, { attempts: true });
+            await mesub.accessList(WALLET);
+
+            expect(calls[0]!.url.searchParams.get('attempts')).toBe('true');
+            expect(calls).toHaveLength(2);
+            expect(writes).toHaveLength(1);
+        });
+
+        it('throws when Mesub cannot answer, even with a stale list cached', async () => {
+            const { fetch } = mockFetch(json(200, list()), nest(503, 'Service Unavailable'));
+            const mesub = client(fetch);
+            await mesub.accessList(WALLET);
+            vi.setSystemTime(START.getTime() + 61_000);
+
+            await expect(mesub.accessList(WALLET)).rejects.toMatchObject({ code: 'unavailable' });
+        });
+    });
+
+    describe('during an outage, by external id', () => {
+        const CUSTOMER = { external_id: 'user_42' };
+
+        async function staleThen(first: AccessAnswer) {
+            const { fetch } = mockFetch(json(200, first), nest(503, 'Service Unavailable'));
+            const mesub = client(fetch);
+            await mesub.hasAccess(CUSTOMER, 'pro');
+            vi.setSystemTime(START.getTime() + 61_000);
+
+            return mesub;
+        }
+
+        it('keeps a paying customer in, from the stale answer', async () => {
+            const mesub = await staleThen(answer());
+
+            await expect(mesub.decide({ external_id: ' user_42 ' }, 'pro')).resolves.toEqual({
+                access: true,
+                answer: answer(),
+                stale: true,
+            });
+        });
+
+        it('keeps out a cancelled customer once access_until is past (#35)', async () => {
+            const ended = new Date(START.getTime() + 30_000).toISOString();
+            const mesub = await staleThen(
+                answer({ status: 'cancelled', access_until: ended, next_charge_at: null }),
+            );
+
+            await expect(mesub.hasAccess(CUSTOMER, 'pro')).resolves.toBe(false);
+        });
+
+        it('says Mesub is unavailable for a customer it never saw', async () => {
+            const { fetch } = mockFetch(nest(503, 'Service Unavailable'));
+
+            await expect(client(fetch).decide(CUSTOMER, 'pro')).resolves.toEqual({
+                access: false,
+                answer: null,
+                stale: true,
+                unavailable: true,
+            });
+        });
+
+        it('does not lend a wallet answer to the external id', async () => {
+            const { fetch } = mockFetch(json(200, answer()), nest(503, 'Service Unavailable'));
+            const mesub = client(fetch);
+            await mesub.hasAccess(WALLET, 'pro');
+
+            await expect(mesub.hasAccess(CUSTOMER, 'pro')).resolves.toBe(false);
+        });
+
+        // The hash needs only the API key: a restarted server reads it back.
+        it('reads back, after a restart, what the previous process wrote', async () => {
+            const store = new MemoryStore<AccessAnswer | AccessList>();
+            const before = answer({ revalidate_after: 0 });
+            await client(mockFetch(json(200, before)).fetch, store).hasAccess(CUSTOMER, 'pro');
+
+            const restarted = client(mockFetch(nest(503, 'Service Unavailable')).fetch, store);
+
+            await expect(restarted.decide(CUSTOMER, 'pro')).resolves.toEqual({
+                access: true,
+                answer: before,
+                stale: true,
+            });
+        });
     });
 });

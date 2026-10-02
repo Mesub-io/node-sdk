@@ -21,7 +21,7 @@ const FIELDS: Record<
     keyof Omit<AccessAnswer, 'attempts'>,
     'string' | 'boolean' | 'number' | 'string|null'
 > = {
-    wallet: 'string',
+    wallet: 'string|null',
     plan: 'string',
     access: 'boolean',
     status: 'string',
@@ -104,6 +104,23 @@ describe.skipIf(!env.url)('contract with the back', () => {
                     'signature',
                 ]);
                 expect(OUTCOMES).toContain(attempt.outcome);
+            }
+        });
+
+        // Asked by external id or email, nothing on the plan answers no wallet (#28).
+        it('answers a null wallet for an external id it never saw', async () => {
+            await expect(
+                mesub().access({ external_id: 'never-subscribed-42' }, env.plan),
+            ).resolves.toMatchObject({ access: false, status: 'none', wallet: null });
+        });
+
+        it('lists every plan of a customer when no plan is named', async () => {
+            const list = await mesub().accessList(env.wallet);
+
+            expect(Object.keys(list).sort()).toEqual(['plans', 'revalidate_after']);
+            expect(list.revalidate_after).toBeGreaterThan(0);
+            for (const answer of list.plans) {
+                expect(Object.keys(answer).sort()).toEqual(Object.keys(FIELDS).sort());
             }
         });
 

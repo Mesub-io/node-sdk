@@ -46,6 +46,25 @@ describe('AccessCache', () => {
             await expect(cache.read(WALLET, 'pro')).resolves.toBeUndefined();
         });
 
+        it('puts a list, with no plan, under its own prefix', () => {
+            expect(AccessCache.key(`wallet:${WALLET}`, null, 'proj_1')).toBe(
+                `mesub:access-list:proj_1:wallet:${WALLET}`,
+            );
+            expect(AccessCache.key(`wallet:${WALLET}`, null)).toBe(
+                `mesub:access-list:wallet:${WALLET}`,
+            );
+        });
+
+        it('keeps a list apart from the answers by plan', async () => {
+            const { cache } = setup();
+            await cache.write(WALLET, null, { access: true, revalidate_after: 60 }, 'proj_1');
+
+            await expect(cache.read(WALLET, null, 'proj_1')).resolves.toMatchObject({
+                fresh: true,
+            });
+            await expect(cache.read(WALLET, 'pro', 'proj_1')).resolves.toBeUndefined();
+        });
+
         it('differs by plan and by wallet', () => {
             const keys = new Set([
                 AccessCache.key(WALLET, 'pro'),
