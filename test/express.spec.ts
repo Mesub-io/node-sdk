@@ -7,7 +7,12 @@ import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'j
 import request from 'supertest';
 
 import type { AccessAnswer } from '../src/answer.js';
-import { MesubError, requirePlan, type MesubLocals } from '../src/express.js';
+import {
+    MesubError,
+    requirePlan,
+    type MesubLocals,
+    type RequirePlanOptions,
+} from '../src/express.js';
 import { Mesub, type MesubOptions } from '../src/index.js';
 
 const BASE = 'https://api.mesub.test';
@@ -104,7 +109,7 @@ function hang(init?: RequestInit) {
 }
 
 /** An app with one guarded route that echoes res.locals.mesub. */
-function app(client: Mesub, options: Omit<Parameters<typeof requirePlan>[1], 'client'> = {}) {
+function app(client: Mesub, options: Omit<RequirePlanOptions, 'client'> = {}) {
     const server = express();
     server.get('/pro', requirePlan('pro', { ...options, client }), (_req, res) => {
         res.json(res.locals['mesub'] as MesubLocals);
@@ -491,6 +496,65 @@ describe('requirePlan', () => {
                 status: 401,
                 answer: null,
             });
+        });
+
+        // #45: an async onDenied is awaited, and its failure reaches next(err).
+        it('waits for an async one before the request ends', async () => {
+            const { client } = mesub();
+            const onDenied = vi.fn(async (_denial, _req, res: ExpressResponse) => {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                res.status(418).json({ waited: true });
+            });
+
+            const response = await request(app(client, { onDenied })).get('/pro');
+
+            expect(response.status).toBe(418);
+            expect(response.body).toEqual({ waited: true });
+        });
+
+        it.each([
+            [
+                'a throw',
+                () => {
+                    throw new MesubError('boom', { status: null, code: 'unexpected' });
+                },
+            ],
+            [
+                'a rejection',
+                async () => {
+                    await Promise.resolve();
+                    throw new MesubError('boom', { status: null, code: 'unexpected' });
+                },
+            ],
+        ])('forwards %s to next(err)', async (_label, onDenied) => {
+            const { client } = mesub();
+
+            const response = await request(app(client, { onDenied })).get('/pro');
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'unexpected' });
+        });
+
+        // Express 4 ignores the promise a middleware returns: it must never reject.
+        it('never leaves a rejected promise behind, as Express 4 would drop it', async () => {
+            const { client } = mesub();
+            const failure = new Error('onDenied failed');
+            const middleware = requirePlan('pro', {
+                client,
+                onDenied: async () => {
+                    throw failure;
+                },
+            });
+            const next = vi.fn();
+
+            await expect(
+                (middleware as unknown as (...args: unknown[]) => Promise<void>)(
+                    { headers: {} },
+                    {},
+                    next,
+                ),
+            ).resolves.toBeUndefined();
+            expect(next).toHaveBeenCalledExactlyOnceWith(failure);
         });
 
         it('is never called for a subscriber with access', async () => {

@@ -47,9 +47,11 @@ export interface RequirePlanOptions {
     token?: TokenOption<MesubRequest>;
     /**
      * Answer a refusal yourself by throwing your own exception, with your own
-     * status and body. If it returns, the default refusal is thrown.
+     * status and body. It may be async: what it returns is awaited, and a
+     * rejection is thrown like a throw. If it returns, the default refusal
+     * is thrown.
      */
-    onDenied?: (denial: Denial, request: MesubRequest) => void;
+    onDenied?: (denial: Denial, request: MesubRequest) => unknown;
 }
 
 /** Express has `setHeader`, a Fastify reply has `header`. */
@@ -93,7 +95,7 @@ export function RequirePlan(plan: string, options: RequirePlanOptions = {}): Typ
 
             const denial = denialOf(outcome);
 
-            options.onDenied?.(denial, request);
+            await options.onDenied?.(denial, request);
 
             if (outcome.reason === 'unavailable') {
                 setHeader(

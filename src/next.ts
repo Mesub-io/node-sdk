@@ -26,7 +26,10 @@ export interface WithMesubOptions {
      * Then the only place looked at.
      */
     token?: TokenOption<Request>;
-    /** Answer a refusal yourself: a redirect, a page, your own JSON. */
+    /**
+     * Answer a refusal yourself: a redirect, a page, your own JSON. It may be
+     * async; a throw or a rejection is thrown, for Next to answer 500.
+     */
     onDenied?: (denial: Denial, request: Request) => Response | Promise<Response>;
 }
 
@@ -63,7 +66,7 @@ export function withMesub<Context = unknown>(
 
         const denial = denialOf(outcome);
 
-        if (options.onDenied) return options.onDenied(denial, request);
+        if (options.onDenied) return await options.onDenied(denial, request);
 
         const headers: Record<string, string> =
             outcome.reason === 'unavailable'

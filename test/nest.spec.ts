@@ -488,6 +488,45 @@ describe('RequirePlan', () => {
             expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
         });
 
+        // #45: an async onDenied is awaited, its exception answered, not dropped.
+        it('answers the exception an async one throws', async () => {
+            const { client } = mesub();
+            const onDenied = vi.fn(async () => {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                throw new HttpException({ upgrade: '/subscribe' }, 403);
+            });
+
+            const response = await request(await app(client, { onDenied })).get('/pro');
+
+            expect(response.status).toBe(403);
+            expect(response.body).toEqual({ upgrade: '/subscribe' });
+        });
+
+        it('throws the default refusal only once an async one has returned', async () => {
+            const { client } = mesub();
+            let finished = false;
+            const guard = new (RequirePlan('pro', {
+                client,
+                onDenied: async () => {
+                    await new Promise((resolve) => setTimeout(resolve, 10));
+                    finished = true;
+                },
+            }))();
+            const context = {
+                switchToHttp: () => ({
+                    getRequest: () => ({ headers: {} }),
+                    getResponse: () => ({}),
+                }),
+            } as unknown as ExecutionContext;
+
+            const thrown = await (guard.canActivate(context) as Promise<boolean>).catch(
+                (error: unknown) => error,
+            );
+
+            expect(finished).toBe(true);
+            expect((thrown as HttpException).getStatus()).toBe(401);
+        });
+
         it('is never called for a subscriber with access', async () => {
             const { client } = mesub();
             const onDenied = vi.fn();

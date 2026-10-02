@@ -30,8 +30,12 @@ export interface RequirePlanOptions {
      * only place looked at.
      */
     token?: TokenOption<Request>;
-    /** Answer a refusal yourself: a redirect, a page, your own JSON. */
-    onDenied?: (denial: Denial, req: Request, res: Response, next: NextFunction) => void;
+    /**
+     * Answer a refusal yourself: a redirect, a page, your own JSON. It may be
+     * async: what it returns is awaited, and a throw or a rejection goes to
+     * `next(err)`, under Express 4 as under 5.
+     */
+    onDenied?: (denial: Denial, req: Request, res: Response, next: NextFunction) => unknown;
 }
 
 /**
@@ -61,7 +65,12 @@ export function requirePlan(plan: string, options: RequirePlanOptions = {}): Req
 
             const denial = denialOf(outcome);
 
-            if (options.onDenied) return options.onDenied(denial, req, res, next);
+            if (options.onDenied) {
+                // Awaited here, inside the try: Express 4 drops a rejected promise.
+                await options.onDenied(denial, req, res, next);
+
+                return;
+            }
 
             if (outcome.reason === 'unavailable') {
                 res.setHeader('Retry-After', String(UNAVAILABLE_RETRY_AFTER_S));

@@ -425,6 +425,18 @@ describe('withMesub', () => {
             });
         });
 
+        // #45: a rejection is thrown, for Next to answer 500, never swallowed.
+        it('throws what an async one rejects with', async () => {
+            const { client } = mesub();
+            const failure = new Error('onDenied failed');
+            const onDenied = vi.fn(async (): Promise<Response> => {
+                await Promise.resolve();
+                throw failure;
+            });
+
+            await expect(route(client, { onDenied })(get(), context)).rejects.toBe(failure);
+        });
+
         it('is never called for a subscriber with access', async () => {
             const { client } = mesub();
             const onDenied = vi.fn(() => new Response(null, { status: 418 }));
