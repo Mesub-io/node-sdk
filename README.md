@@ -107,13 +107,47 @@ await mesub.access(wallet, 'pro'); // the full answer: status, dates, next charg
 await mesub.access(wallet, 'pro', { attempts: true }); // plus the last pull attempts
 ```
 
+## Who to ask about
+
+`access`, `hasAccess` and `accessList` take a customer, named by exactly one of:
+
+```ts
+await mesub.hasAccess({ external_id: user.id }, 'pro'); // your own id for them
+await mesub.hasAccess({ wallet }, 'pro'); // the wallet that pays (a string alone works too)
+await mesub.hasAccess({ email: 'ada@example.com' }, 'pro'); // the email given at checkout
+```
+
+- **`external_id`** when your app has its own login: the id you passed at
+  checkout. It follows the customer whichever wallet pays, and across
+  several: access if any of them grants it, and the answer names that wallet.
+- **`wallet`** for a wallet-only dApp, where the connected wallet is the
+  customer. This is what the guards use, from the access token.
+- **`email`** as a fallback, or for a support lookup: it is the address given
+  at checkout, never verified by Mesub, so anyone could have typed it.
+
+Asked by `external_id` or `email`, a customer with nothing on that plan is
+answered `wallet: null`. Emails are trimmed and lowercased, external ids
+trimmed, as Mesub reads them: `' Ada@Example.com'` is `ada@example.com`.
+
+Without a plan, `accessList` answers every plan the customer has anything on,
+for a page listing their entitlements in one call:
+
+```ts
+const { plans } = await mesub.accessList({ external_id: user.id });
+// [{ plan: 'pro', access: true, status: 'active', ... }, ...]
+```
+
+It is cached on its own, for its own `revalidate_after`, and throws like
+`access` when Mesub cannot answer. `access` and `hasAccess` always need a plan:
+called without one, they throw a `TypeError` instead of asking.
+
 ## When Mesub does not answer
 
 - **Verifying a token** needs Mesub only on the first token after a start, and
   after a key rotation: the keys and the project id are then kept in memory.
 - **`hasAccess`** never locks out a paying subscriber for an outage, nor lets a
   stranger in: after its retries it serves the last answer it knew for that
-  wallet and plan, even stale (for up to 24 hours, see `maxStaleMs`), and
+  customer and plan, even stale (for up to 24 hours, see `maxStaleMs`), and
   `false` for one it never saw. `access` throws instead, since it is for
   screens.
 - **The guards** (`requirePlan`, `withMesub`, `RequirePlan`) never hold a
@@ -153,9 +187,9 @@ methods, so Redis is a few lines, and keeps the outage fallback across
 restarts and servers:
 
 ```ts
-import type { AccessAnswer, CacheStore } from '@mesub/node';
+import type { AccessAnswer, AccessList, CacheStore } from '@mesub/node';
 
-const redisStore: CacheStore<AccessAnswer> = {
+const redisStore: CacheStore<AccessAnswer | AccessList> = {
     get: async (key) => JSON.parse((await redis.get(key)) ?? 'null') ?? undefined,
     set: async (key, entry, ttlMs) => {
         await redis.set(key, JSON.stringify(entry), 'PX', ttlMs);
@@ -165,12 +199,16 @@ const redisStore: CacheStore<AccessAnswer> = {
 const mesub = new Mesub({ cache: redisStore });
 ```
 
-Keys read `mesub:access:key-<hash>:<plan>:<wallet>`, so several projects can
-share one Redis. `<hash>` is the start of your API key's SHA-256, never the key
-itself: it needs no call to Mesub, so a server restarted during an outage still
-reads what was cached before. Rotating the API key starts a fresh cache: each
-wallet costs one call to Mesub, and the old keys expire on their own TTL. So
-do keys written by 0.1, without the hash, which are no longer read.
+Keys read `mesub:access:key-<hash>:<plan>:<kind>:<id>`, and
+`mesub:access-list:key-<hash>:<kind>:<id>` for `accessList`, so several
+projects can share one Redis. `<hash>` is the start of your API key's SHA-256,
+never the key itself: it needs no call to Mesub, so a server restarted during
+an outage still reads what was cached before. `<kind>` is `wallet`,
+`external_id` or `email`; `<id>` is the wallet itself, or for an external id or
+an email an HMAC-SHA256 under your API key, so neither is ever stored in
+clear. Rotating the API key starts a fresh cache: each customer costs one call
+to Mesub, and the old keys expire on their own TTL. So do keys written before
+the `<kind>` segment, which are no longer read.
 
 ## Errors
 

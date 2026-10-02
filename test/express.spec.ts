@@ -146,7 +146,7 @@ describe('requirePlan', () => {
 
         // The wallet asked about is the token's, never one the request names.
         it('asks Mesub about the wallet in the token', async () => {
-            let asked: string | null = null;
+            let asked: unknown = null;
             const { client } = mesub({
                 access: () => Response.json(answer()),
             });

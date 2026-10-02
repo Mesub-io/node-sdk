@@ -20,7 +20,7 @@ export interface CachedAnswer<T> {
 }
 
 /**
- * The `/v1/access` answers, by wallet and plan, over any store.
+ * The `/v1/access` answers, by customer and plan, over any store.
  *
  * A store that fails never breaks a request: a read that throws is a miss,
  * a write that throws is dropped. A merchant whose Redis is down still gets
@@ -39,21 +39,30 @@ export class AccessCache<T extends Revalidating> {
     }
 
     /**
-     * `mesub:access:<scope>:<plan>:<wallet>`, prefixed so it can share a Redis
+     * `mesub:access:<scope>:<plan>:<who>`, prefixed so it can share a Redis
      * with anything. The scope (the client passes a hash of its API key) keeps
-     * two projects sharing one store apart; without one, `mesub:access:<plan>:<wallet>`.
+     * two projects sharing one store apart; without one, `mesub:access:<plan>:<who>`.
+     *
+     * `who` is whatever names the customer, the client's being
+     * `<kind>:<wallet or hash>`. A null plan is the list of every plan they
+     * have, under its own prefix, `mesub:access-list:`: no plan slug can reach it.
      */
-    static key(wallet: string, plan: string, scope?: string): string {
-        return scope === undefined
-            ? `mesub:access:${plan}:${wallet}`
-            : `mesub:access:${scope}:${plan}:${wallet}`;
+    static key(who: string, plan: string | null, scope?: string): string {
+        const prefix = plan === null ? 'mesub:access-list' : 'mesub:access';
+        const path = plan === null ? who : `${plan}:${who}`;
+
+        return scope === undefined ? `${prefix}:${path}` : `${prefix}:${scope}:${path}`;
     }
 
-    async read(wallet: string, plan: string, scope?: string): Promise<CachedAnswer<T> | undefined> {
+    async read(
+        who: string,
+        plan: string | null,
+        scope?: string,
+    ): Promise<CachedAnswer<T> | undefined> {
         let entry: CacheEntry<T> | undefined;
 
         try {
-            entry = await this.store.get(AccessCache.key(wallet, plan, scope));
+            entry = await this.store.get(AccessCache.key(who, plan, scope));
         } catch {
             return undefined;
         }
@@ -66,14 +75,14 @@ export class AccessCache<T extends Revalidating> {
         return { value: entry.value, fresh: now < entry.freshUntil };
     }
 
-    async write(wallet: string, plan: string, value: T, scope?: string): Promise<void> {
+    async write(who: string, plan: string | null, value: T, scope?: string): Promise<void> {
         const now = this.now();
         const freshUntil = now + Math.max(0, value.revalidate_after) * 1000;
         const keepUntil = freshUntil + this.maxStaleMs;
 
         try {
             await this.store.set(
-                AccessCache.key(wallet, plan, scope),
+                AccessCache.key(who, plan, scope),
                 { value, freshUntil, keepUntil },
                 keepUntil - now,
             );

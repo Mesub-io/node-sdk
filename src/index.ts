@@ -5,7 +5,9 @@ export { MesubError } from './errors.js';
 export type { MesubErrorCode, MesubErrorOptions } from './errors.js';
 export type {
     AccessAnswer,
+    AccessList,
     AccessOptions,
+    Customer,
     PaymentStatus,
     PullOutcome,
     ServedAttempt,
