@@ -38,6 +38,15 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
+/** A merchant's own session JWT, sent as a bearer on every request: not a Mesub token. */
+function theirs() {
+    return new SignJWT({ role: 'admin' })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setSubject('merchant_user_9')
+        .setExpirationTime('1h')
+        .sign(new TextEncoder().encode('the-merchant-own-secret-32-bytes!!'));
+}
+
 async function token(over: { aud?: string; exp?: string } = {}) {
     return new SignJWT({ wallet: WALLET })
         .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
@@ -230,6 +239,63 @@ describe('withMesub', () => {
 
             expect(calls).not.toContain('/v1/access');
             expect(handler).not.toHaveBeenCalled();
+        });
+    });
+
+    // A merchant's own `Authorization: Bearer` must not hide the cookie (#36).
+    describe('a bearer that is not a Mesub token', () => {
+        it('falls back on the mesub-token cookie', async () => {
+            const { client } = mesub();
+
+            const response = await route(client)(
+                get({
+                    Authorization: `Bearer ${await theirs()}`,
+                    Cookie: `mesub-token=${await token()}`,
+                }),
+                context,
+            );
+
+            expect(response.status).toBe(200);
+        });
+
+        it('answers 401 when there is no cookie behind it', async () => {
+            const { client } = mesub();
+
+            const response = await route(client)(
+                get({ Authorization: `Bearer ${await theirs()}` }),
+                context,
+            );
+
+            expect(response.status).toBe(401);
+        });
+
+        it('never tries the cookie once the keys could not be fetched', async () => {
+            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+            const verify = vi.spyOn(client, 'verifyToken');
+
+            const response = await route(client)(
+                get({ ...(await bearer()), Cookie: `mesub-token=${await token({ exp: '2h' })}` }),
+                context,
+            );
+
+            expect(response.status).toBe(503);
+            expect(verify).toHaveBeenCalledOnce();
+        });
+
+        it('reads the token where the token option says, and only there', async () => {
+            const { client } = mesub();
+            const custom = route(client, {
+                token: (request) => request.headers.get('x-mesub-token'),
+            });
+
+            const found = await custom(
+                get({ Authorization: `Bearer ${await theirs()}`, 'x-mesub-token': await token() }),
+                context,
+            );
+            const ignored = await custom(get(await bearer()), context);
+
+            expect(found.status).toBe(200);
+            expect(ignored.status).toBe(401);
         });
     });
 

@@ -1,6 +1,7 @@
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 
 import { Mesub, MesubError, TOKEN_COOKIE, tokenFrom } from '../src/index.js';
+import { tokensFrom } from '../src/tokens.js';
 
 const BASE = 'https://api.mesub.test';
 const PROJECT = 'proj_1';
@@ -82,6 +83,46 @@ describe('tokenFrom', () => {
         expect(tokenFrom({ headers: { authorization: ['Bearer first', 'Bearer second'] } })).toBe(
             'first',
         );
+    });
+});
+
+// What the guards try in turn: a merchant's own bearer must not hide our cookie (#36).
+describe('tokensFrom', () => {
+    it('gives the bearer, then the cookie', () => {
+        expect(
+            tokensFrom({
+                headers: { authorization: 'Bearer theirs', cookie: `${TOKEN_COOKIE}=ours` },
+            }),
+        ).toEqual(['theirs', 'ours']);
+    });
+
+    it('gives the same token once when both carry it', () => {
+        expect(
+            tokensFrom({
+                headers: new Headers({
+                    authorization: 'Bearer abc',
+                    cookie: `${TOKEN_COOKIE}=abc`,
+                }),
+            }),
+        ).toEqual(['abc']);
+    });
+
+    it.each([
+        ['a bearer only', { authorization: 'Bearer abc' }, ['abc']],
+        ['a cookie only', { cookie: `${TOKEN_COOKIE}=abc` }, ['abc']],
+        [
+            'another scheme and a cookie',
+            { authorization: 'Basic x', cookie: `${TOKEN_COOKIE}=abc` },
+            ['abc'],
+        ],
+        [
+            'a malformed cookie and a bearer',
+            { authorization: 'Bearer abc', cookie: `${TOKEN_COOKIE}=%` },
+            ['abc'],
+        ],
+        ['neither', {}, []],
+    ])('reads %s', (_label, headers, expected) => {
+        expect(tokensFrom({ headers })).toEqual(expected);
     });
 });
 

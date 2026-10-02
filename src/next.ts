@@ -8,6 +8,8 @@ import {
     denialOf,
     guard,
     type MesubAccess,
+    type TokenOption,
+    tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
@@ -18,6 +20,12 @@ export interface WithMesubOptions {
     plan: string;
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
+    /**
+     * Where the Mesub access token is, when not in the bearer or the
+     * `mesub-token` cookie: `(request) => request.headers.get('x-mesub-token')`.
+     * Then the only place looked at.
+     */
+    token?: TokenOption<Request>;
     /** Answer a refusal yourself: a redirect, a page, your own JSON. */
     onDenied?: (denial: Denial, request: Request) => Response | Promise<Response>;
 }
@@ -34,7 +42,8 @@ export type MesubRouteHandler<Context = unknown> = (
  * access to `plan`. Next's `context` (with `params`) is passed through as is.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
- * header or the `mesub-token` cookie. Refusals answer 401 (no valid token),
+ * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
+ * token), or where `token` says. Refusals answer 401 (no valid token),
  * 402 (Mesub said no) or 503 with Retry-After (Mesub unreachable, with no
  * answer known for that subscriber). Integration errors are thrown, for Next to log
  * and answer 500. Not for `middleware.ts`, server components or pages.
@@ -46,7 +55,7 @@ export function withMesub<Context = unknown>(
     return async (request, context) => {
         const outcome = await guard(
             options.client ?? defaultClient(),
-            request.headers,
+            tokensOf(request, options.token),
             options.plan,
         );
 

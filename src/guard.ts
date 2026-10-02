@@ -1,7 +1,7 @@
 import type { AccessAnswer } from './answer.js';
 import { type Decision, Mesub } from './client.js';
 import { MesubError } from './errors.js';
-import { type HeaderSource, tokenFrom, type VerifiedToken } from './tokens.js';
+import { type HeaderSource, tokensFrom, type VerifiedToken } from './tokens.js';
 
 /** Why a request was turned away, and what it answers by default. */
 export type DenialReason = 'unauthenticated' | 'no_access' | 'unavailable';
@@ -47,12 +47,37 @@ export function defaultClient(): Mesub {
 }
 
 /**
- * The one decision both middlewares make: who is asking, from our token, then
+ * Where a guard finds the Mesub access token, when it is not in the bearer or
+ * the `mesub-token` cookie: a header of your own, a session. Null or
+ * undefined when there is none, a 401.
+ */
+export type TokenOption<Req> = (request: Req) => string | null | undefined;
+
+/**
+ * The tokens a guard tries, in turn: the one `token` returns when given, else
+ * the bearer, then the `mesub-token` cookie.
+ */
+export function tokensOf<Req extends { headers: HeaderSource }>(
+    request: Req,
+    token?: TokenOption<Req>,
+): string[] {
+    if (!token) return tokensFrom(request);
+
+    const found = token(request);
+
+    return typeof found === 'string' && found !== '' ? [found] : [];
+}
+
+/**
+ * The one decision the middlewares make: who is asking, from our token, then
  * whether they have access. Never from anything the merchant's code passes.
  *
- * - no token, or one that fails verification: `unauthenticated`
+ * - no token, or none that verifies: `unauthenticated`. A bearer that is not
+ *   a Mesub token (the merchant's own JWT) does not hide the cookie: each
+ *   token is tried in turn, the first that verifies is who is asking
  * - the keys or the project id could not be fetched: `unavailable`, since
- *   nobody can be identified, so not even the outage fallback can apply
+ *   nobody can be identified, so not even the outage fallback can apply;
+ *   no other token is tried then
  * - the fallback of `hasAccess` otherwise, through `decide`, within the
  *   client's `guardTimeout`; `unavailable` when Mesub failed (outage, rate
  *   limit) or the budget ran out on a wallet with nothing cached: 402 only
@@ -62,27 +87,27 @@ export function defaultClient(): Mesub {
  */
 export async function guard(
     client: Mesub,
-    headers: HeaderSource,
+    tokens: readonly string[],
     plan: string,
 ): Promise<GuardOutcome> {
-    const token = tokenFrom({ headers });
+    let subscriber: VerifiedToken | undefined;
 
-    if (!token) return { allowed: false, reason: 'unauthenticated' };
+    for (const token of tokens) {
+        try {
+            subscriber = await client.verifyToken(token);
+            break;
+        } catch (error) {
+            // Not a Mesub token, or not a valid one: maybe the next one is.
+            if (error instanceof MesubError && error.code === 'invalid_token') continue;
+            if (error instanceof MesubError && error.code === 'unavailable') {
+                return { allowed: false, reason: 'unavailable' };
+            }
 
-    let subscriber: VerifiedToken;
-
-    try {
-        subscriber = await client.verifyToken(token);
-    } catch (error) {
-        if (error instanceof MesubError && error.code === 'invalid_token') {
-            return { allowed: false, reason: 'unauthenticated' };
+            throw error;
         }
-        if (error instanceof MesubError && error.code === 'unavailable') {
-            return { allowed: false, reason: 'unavailable' };
-        }
-
-        throw error;
     }
+
+    if (!subscriber) return { allowed: false, reason: 'unauthenticated' };
 
     const decision = await client.decide(subscriber.wallet, plan);
 

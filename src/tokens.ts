@@ -33,9 +33,19 @@ export function headerOf(headers: HeaderSource, name: string): string | undefine
  * the `mesub-token` cookie otherwise, null when neither is there.
  */
 export function tokenFrom(request: { headers: HeaderSource }): string | null {
-    const [scheme, token] = (headerOf(request.headers, 'authorization') ?? '').split(' ');
+    return tokensFrom(request)[0] ?? null;
+}
 
-    if (scheme?.toLowerCase() === 'bearer' && token) return token;
+/**
+ * Every access token a request may carry, the bearer first, then the
+ * `mesub-token` cookie: what the guards try in turn, so a merchant's own
+ * `Authorization: Bearer` does not hide the cookie (#36). Empty when neither.
+ */
+export function tokensFrom(request: { headers: HeaderSource }): string[] {
+    const [scheme, bearer] = (headerOf(request.headers, 'authorization') ?? '').split(' ');
+    const found: string[] = [];
+
+    if (scheme?.toLowerCase() === 'bearer' && bearer) found.push(bearer);
 
     // 'theme=dark; mesub-token=eyJ...; lang=fr': the token is the part after `mesub-token=`.
     const prefix = `${TOKEN_COOKIE}=`;
@@ -45,7 +55,9 @@ export function tokenFrom(request: { headers: HeaderSource }): string | null {
         .find((part) => part.startsWith(prefix));
     const fromCookie = cookie ? decoded(cookie.slice(prefix.length)) : '';
 
-    return fromCookie || null;
+    if (fromCookie && fromCookie !== bearer) found.push(fromCookie);
+
+    return found;
 }
 
 /** A cookie value as sent, or '' when it is not valid percent-encoding: no token, a 401, never a 500. */

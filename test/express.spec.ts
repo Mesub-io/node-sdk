@@ -43,6 +43,15 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
+/** A merchant's own session JWT, sent as a bearer on every request: not a Mesub token. */
+function theirs() {
+    return new SignJWT({ role: 'admin' })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setSubject('merchant_user_9')
+        .setExpirationTime('1h')
+        .sign(new TextEncoder().encode('the-merchant-own-secret-32-bytes!!'));
+}
+
 async function token(over: { aud?: string; exp?: string } = {}) {
     return new SignJWT({ wallet: WALLET })
         .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
@@ -221,6 +230,104 @@ describe('requirePlan', () => {
             await request(app(client)).get('/pro');
 
             expect(calls).not.toContain('/v1/access');
+        });
+    });
+
+    // A merchant's own `Authorization: Bearer` must not hide the cookie (#36).
+    describe('a bearer that is not a Mesub token', () => {
+        it('falls back on the mesub-token cookie', async () => {
+            const { client } = mesub();
+
+            const response = await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`)
+                .set('Cookie', `mesub-token=${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body.wallet).toBe(WALLET);
+        });
+
+        it('falls back on the cookie when the bearer is an expired Mesub token', async () => {
+            const { client } = mesub();
+
+            await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token({ exp: '-10s' })}`)
+                .set('Cookie', `mesub-token=${await token()}`)
+                .expect(200);
+        });
+
+        it('answers 401 when there is no cookie behind it', async () => {
+            const { client, calls } = mesub();
+
+            const response = await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`);
+
+            expect(response.status).toBe(401);
+            expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(calls).not.toContain('/v1/access');
+        });
+
+        it('answers 401 when the cookie does not verify either', async () => {
+            const { client } = mesub();
+
+            await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`)
+                .set('Cookie', `mesub-token=${await token({ aud: 'proj_2' })}`)
+                .expect(401);
+        });
+
+        // An outage is not a bad token: the next one would meet the same outage.
+        it('never tries the cookie once the keys could not be fetched', async () => {
+            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+            const verify = vi.spyOn(client, 'verifyToken');
+
+            const response = await request(app(client))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .set('Cookie', `mesub-token=${await token({ exp: '2h' })}`);
+
+            expect(response.status).toBe(503);
+            expect(verify).toHaveBeenCalledOnce();
+        });
+    });
+
+    describe('token option', () => {
+        it('reads the token where it says', async () => {
+            const { client } = mesub();
+
+            await request(app(client, { token: (req: ExpressRequest) => req.get('x-mesub-token') }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await theirs()}`)
+                .set('x-mesub-token', await token())
+                .expect(200);
+        });
+
+        it('is then the only place looked at', async () => {
+            const { client } = mesub();
+
+            await request(app(client, { token: () => null }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .set('Cookie', `mesub-token=${await token()}`)
+                .expect(401);
+        });
+
+        it('forwards a throw to next(err)', async () => {
+            const { client } = mesub();
+
+            const response = await request(
+                app(client, {
+                    token: () => {
+                        throw new MesubError('boom', { status: null, code: 'unexpected' });
+                    },
+                }),
+            ).get('/pro');
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'unexpected' });
         });
     });
 
