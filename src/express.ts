@@ -44,8 +44,8 @@ export interface RequirePlanOptions {
 /**
  * Lets a request through only for a subscriber with access to that plan: a
  * slug, a list of which any one will do (`['pro', 'team']`), or either worked
- * out per request (`(req) => req.params.tier`). `res.locals.mesub.plan` says
- * which one let it through.
+ * out per request from a list you wrote, never read from the request itself.
+ * `res.locals.mesub.plan` says which one let it through.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
@@ -64,7 +64,7 @@ export function requirePlan(
             const outcome = await guard(
                 options.client ?? defaultClient(),
                 tokensOf(req, options.token),
-                plansOf(plan, req),
+                () => plansOf(plan, req),
             );
 
             if (outcome.allowed) {

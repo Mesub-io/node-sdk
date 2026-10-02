@@ -45,6 +45,10 @@ The first version published to npm. Requires Node 22 or later.
   #20).
 - A guard answers within a time budget when Mesub is slow, and answers 503,
   not 402, for a wallet it never saw while Mesub fails (#26).
+- A guard takes a plan, a list of which any one will do, or a function of the
+  request giving either; `mesub.plan` says which one let the request through.
+  3 plans at most per guard, each one a call to Mesub; a function runs only
+  once the token verifies (#38).
 
 ### Access tokens
 

@@ -75,6 +75,14 @@ export function checkPlan<Req>(plan: PlanOption<Req>): void {
     if (typeof plan !== 'function') checkedPlans(plan);
 }
 
+/**
+ * Each plan a guard asks about is one call to `/v1/access`, made for every
+ * request, against the key's 1000 calls a minute. Three is what a Dev
+ * project can hold; a list longer than that is more likely built from the
+ * request than written by hand.
+ */
+const MAX_PLANS = 3;
+
 function checkedPlans(value: unknown): string[] {
     const plans: unknown[] =
         typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
@@ -83,7 +91,15 @@ function checkedPlans(value: unknown): string[] {
         throw new TypeError('A guard needs a plan, or a list of plans, as non-empty strings.');
     }
 
-    return [...new Set(plans as string[])];
+    const unique = [...new Set(plans as string[])];
+
+    if (unique.length > MAX_PLANS) {
+        throw new TypeError(
+            `A guard asks about ${MAX_PLANS} plans at most: each one is a call to Mesub on every request.`,
+        );
+    }
+
+    return unique;
 }
 
 /**
@@ -129,11 +145,14 @@ export function tokensOf<Req extends { headers: HeaderSource }>(
  *
  * An integration error (a bad API key, an unknown plan) is thrown, unless a
  * plan before it in the list already granted.
+ *
+ * `plansFor` runs only once a token verifies: a plan worked out from the
+ * request never runs, nor throws, for an anonymous one.
  */
 export async function guard(
     client: Mesub,
     tokens: readonly string[],
-    plans: readonly string[],
+    plansFor: () => readonly string[],
 ): Promise<GuardOutcome> {
     let subscriber: VerifiedToken | undefined;
 
@@ -154,6 +173,7 @@ export async function guard(
 
     if (!subscriber) return { allowed: false, reason: 'unauthenticated' };
 
+    const plans = plansFor();
     const wallet = subscriber.wallet;
     const pending = plans.map((plan) => client.decide(wallet, plan));
 

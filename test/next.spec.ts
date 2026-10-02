@@ -450,6 +450,24 @@ describe('withMesub', () => {
                 withMesub(echo, { plan: () => [], client })(get(await bearer()), context),
             ).rejects.toThrow(TypeError);
         });
+
+        it('refuses more than three plans, and never runs the function without a token', async () => {
+            const { client } = mesub();
+            const plan = vi.fn(() => ['pro', 'team', 'max', 'org']);
+
+            expect(() => withMesub(echo, { plan: ['pro', 'team', 'max', 'org'], client })).toThrow(
+                TypeError,
+            );
+            await expect(
+                withMesub(echo, { plan, client })(get(await bearer()), context),
+            ).rejects.toThrow(TypeError);
+
+            plan.mockClear();
+            const response = await withMesub(echo, { plan, client })(get(), context);
+
+            expect(response.status).toBe(401);
+            expect(plan).not.toHaveBeenCalled();
+        });
     });
 
     describe('onDenied', () => {

@@ -110,8 +110,13 @@ The plan is a slug, a list, or a function of the request giving either:
 ```ts
 requirePlan('pro'); // that plan
 requirePlan(['pro', 'team']); // any one of them
-requirePlan((req) => req.params.tier); // worked out per request
-requirePlan((req) => (req.params.org ? ['team'] : ['pro', 'team']));
+
+// worked out per request, from a list you wrote
+const PLANS = new Map([
+    ['reports', ['pro', 'team']],
+    ['exports', ['team']],
+]);
+requirePlan((req) => PLANS.get(String(req.params.feature)) ?? 'team');
 ```
 
 `withMesub` takes the same as `{ plan }`, `RequirePlan` as its first argument.
@@ -126,10 +131,19 @@ answered for it. Each plan keeps its own outage fallback, within the one
 | Mesub said no for every one                           | **402**, with the `status` of the first plan of the list       |
 | Mesub failed on one it never answered for this wallet | **503** with `Retry-After`: nobody knows yet whether it grants |
 
+The plan comes from what the route serves, never from what the request asks
+for: `(req) => req.query.tier` lets anyone pick the plan they are checked
+against. Map the request to a list you wrote, as above, or guard with every
+plan the route accepts and serve according to `mesub.plan`. A function runs
+only once the Mesub token verifies, so an anonymous request never reaches it.
+
+A guard asks about **3 plans at most**, what a Dev project holds: each one is
+a call to Mesub on every request, against your key's 1000 calls a minute.
+
 An unknown plan is a broken integration, like a bad API key, unless a plan
-earlier in the list already let the request through. An empty list, or an
-empty slug, is thrown when the guard is built, or on the request for a
-function.
+earlier in the list already let the request through. An empty list, an empty
+slug, or more than 3 plans is thrown when the guard is built, or on the
+request for a function.
 
 ## Without a middleware
 

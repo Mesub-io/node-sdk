@@ -506,6 +506,23 @@ describe('RequirePlan', () => {
                 .set('Authorization', `Bearer ${await token()}`)
                 .expect(500);
         });
+
+        it('refuses more than three plans, and never runs the function without a token', async () => {
+            const { client } = mesub();
+            const plan = vi.fn(() => ['pro', 'team', 'max', 'org']);
+
+            expect(() => RequirePlan(['pro', 'team', 'max', 'org'], { client })).toThrow(TypeError);
+            await request(await app(client, {}, plan))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(500);
+
+            plan.mockClear();
+            await request(await app(client, {}, plan))
+                .get('/pro')
+                .expect(401);
+            expect(plan).not.toHaveBeenCalled();
+        });
     });
 
     describe('onDenied', () => {

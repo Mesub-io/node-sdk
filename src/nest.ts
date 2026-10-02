@@ -94,7 +94,7 @@ export function RequirePlan(
             const outcome = await guard(
                 options.client ?? defaultClient(),
                 tokensOf(request, options.token),
-                plansOf(plan, request),
+                () => plansOf(plan, request),
             );
 
             if (outcome.allowed) {

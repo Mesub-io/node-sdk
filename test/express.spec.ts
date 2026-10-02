@@ -656,10 +656,45 @@ describe('requirePlan', () => {
             ['an empty list', []],
             ['an empty slug', ''],
             ['an empty slug in the list', ['pro', '']],
+            ['more than three plans', ['pro', 'team', 'max', 'org']],
         ])('refuses %s when the guard is built', (_label, plan) => {
             const { client } = mesub();
 
             expect(() => requirePlan(plan, { client })).toThrow(TypeError);
+        });
+
+        // Each plan is one call to Mesub on every request: three, what a Dev project holds.
+        it('counts a plan listed twice once against the three', () => {
+            const { client } = mesub();
+
+            expect(() =>
+                requirePlan(['pro', 'pro', 'team', 'team', 'max'], { client }),
+            ).not.toThrow();
+        });
+
+        it('forwards a function giving more than three plans to next(err), asking none', async () => {
+            const { client } = mesub();
+            const decide = vi.spyOn(client, 'decide');
+
+            const response = await request(app(client, {}, (req) => req.query['tier'] as string[]))
+                .get('/pro?tier=a&tier=b&tier=c&tier=d')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'other' });
+            expect(decide).not.toHaveBeenCalled();
+        });
+
+        it('never runs the function for a request without a Mesub token', async () => {
+            const { client } = mesub();
+            const plan = vi.fn(() => {
+                throw new Error('should not run');
+            });
+
+            await request(app(client, {}, plan))
+                .get('/pro?tier=a&tier=b&tier=c&tier=d')
+                .expect(401);
+            expect(plan).not.toHaveBeenCalled();
         });
 
         it('forwards a function giving no plan to next(err)', async () => {

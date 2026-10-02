@@ -68,7 +68,7 @@ export function withMesub<Context = unknown>(
         const outcome = await guard(
             options.client ?? defaultClient(),
             tokensOf(request, options.token),
-            plansOf(options.plan, request),
+            () => plansOf(options.plan, request),
         );
 
         if (outcome.allowed) return handler(request, accessOf(outcome), context);
