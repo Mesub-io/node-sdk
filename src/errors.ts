@@ -27,6 +27,8 @@ export interface MesubErrorOptions {
     retryable?: boolean;
     /** What Mesub answered, when it answered. */
     body?: unknown;
+    /** Milliseconds, from the response's `Retry-After`. Defaults to null. */
+    retryAfter?: number | null;
     cause?: unknown;
 }
 
@@ -54,6 +56,14 @@ export class MesubError extends Error {
      * undefined when no response came back.
      */
     readonly body: unknown;
+    /**
+     * How long Mesub asked to wait before the same call is sent again, in
+     * milliseconds, from the response's `Retry-After`, as sent: a 429
+     * (`rate_limited`, or `pending_cap_reached` on create, which may be most
+     * of an hour) or a 503 (`network_unavailable`, about 10 s). Null when
+     * the response had none, or none came back.
+     */
+    readonly retryAfter: number | null;
 
     constructor(message: string, options: MesubErrorOptions) {
         super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -64,6 +74,7 @@ export class MesubError extends Error {
             options.retryable ??
             (options.code === 'unavailable' || options.code === 'rate_limited');
         this.body = options.body;
+        this.retryAfter = options.retryAfter ?? null;
     }
 }
 

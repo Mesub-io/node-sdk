@@ -101,15 +101,19 @@ describe('subscriptions.create', () => {
         expect(calls[0]!.init.body).toBe(`{"plan":"pro","wallet":"${WALLET}"}`);
     });
 
-    it('throws a refusal at once, with its code, never retried', async () => {
+    it('throws a refusal at once, with its code and when to come back, never retried', async () => {
         const { fetch } = mockFetch(
-            json(429, {
-                statusCode: 429,
-                error: 'Too Many Requests',
-                message: 'Too many subscriptions are waiting for a signature in this project.',
-                code: 'pending_cap_reached',
-                retryable: true,
-            }),
+            json(
+                429,
+                {
+                    statusCode: 429,
+                    error: 'Too Many Requests',
+                    message: 'Too many subscriptions are waiting for a signature in this project.',
+                    code: 'pending_cap_reached',
+                    retryable: true,
+                },
+                { 'retry-after': '1800' },
+            ),
         );
 
         const { error } = await settle(
@@ -121,6 +125,7 @@ describe('subscriptions.create', () => {
             status: 429,
             code: 'rate_limited',
             apiCode: 'pending_cap_reached',
+            retryAfter: 1_800_000,
         });
         expect(fetch).toHaveBeenCalledTimes(1);
     });

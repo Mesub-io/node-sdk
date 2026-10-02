@@ -284,62 +284,31 @@ describe("the back's error codes", () => {
         });
     });
 
-    // The 1000 subscriptions waiting for a signature: an hour, not a second.
-    describe('the pending cap', () => {
-        const capped = (headers: Record<string, string> = {}) =>
+    // Only ever a create's, a POST, which is never retried: the error says
+    // when the oldest waiting subscription stops counting, as Mesub sent it.
+    it("carries the pending cap's Retry-After uncapped, on a POST sent once", async () => {
+        const { fetch } = mockFetch(
             coded(
                 429,
                 'pending_cap_reached',
                 'Too many subscriptions are waiting for a signature in this project. Try again later.',
                 true,
-                headers,
-            );
+                { 'retry-after': '3000' },
+            ),
+        );
 
-        it('is not retried like a rate limit', async () => {
-            const { fetch } = mockFetch(capped());
+        const error = await transport(fetch)
+            .post('/v1/subscriptions', {})
+            .catch((e: unknown) => e);
 
-            const error = await transport(fetch)
-                .get('/v1/access')
-                .catch((e: unknown) => e);
-
-            expect(error).toMatchObject({
-                status: 429,
-                code: 'rate_limited',
-                apiCode: 'pending_cap_reached',
-                retryable: true,
-            });
-            expect(fetch).toHaveBeenCalledTimes(1);
+        expect(error).toMatchObject({
+            status: 429,
+            code: 'rate_limited',
+            apiCode: 'pending_cap_reached',
+            retryable: true,
+            retryAfter: 3_000_000,
         });
-
-        it('is retried when Mesub says when, after that wait', async () => {
-            const { fetch } = mockFetch(capped({ 'retry-after': '2' }), json(200, { ok: 1 }));
-            const result = settle(transport(fetch).get('/v1/access'));
-
-            await vi.advanceTimersByTimeAsync(1_999);
-            expect(fetch).toHaveBeenCalledTimes(1);
-            await vi.advanceTimersByTimeAsync(1);
-
-            expect((await result).value).toEqual({ ok: 1 });
-        });
-
-        it('is retried when x-should-retry says so, even without a Retry-After', async () => {
-            const { fetch } = mockFetch(capped({ 'x-should-retry': 'true' }), json(200, { ok: 1 }));
-
-            const result = settle(transport(fetch).get('/v1/access'));
-            await vi.runAllTimersAsync();
-
-            expect((await result).value).toEqual({ ok: 1 });
-            expect(fetch).toHaveBeenCalledTimes(2);
-        });
-
-        it('is not retried on a Retry-After it cannot read', async () => {
-            const { fetch } = mockFetch(capped({ 'retry-after': 'later' }));
-
-            await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
-                apiCode: 'pending_cap_reached',
-            });
-            expect(fetch).toHaveBeenCalledTimes(1);
-        });
+        expect(fetch).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -542,6 +511,42 @@ describe('Retry-After', () => {
 
         await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 400 });
         expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('is on the error, in ms, as sent rather than capped', async () => {
+        const { fetch } = mockFetch(
+            coded(503, 'network_unavailable', 'The network did not answer.', true, {
+                'retry-after': '10',
+            }),
+            json(429, {}, { 'retry-after': '3600' }),
+        );
+
+        const unavailable = await transport(fetch)
+            .post('/v1/subscriptions/s/submit', {})
+            .catch((e: unknown) => e);
+        const limited = await transport(fetch)
+            .post('/v1/subscriptions', {})
+            .catch((e: unknown) => e);
+
+        expect(unavailable).toMatchObject({ apiCode: 'network_unavailable', retryAfter: 10_000 });
+        expect(limited).toMatchObject({ status: 429, retryAfter: 3_600_000 });
+    });
+
+    it.each(['soon', '-5', '', 'Infinity'])('is null on the error for %j', async (value) => {
+        const { fetch } = mockFetch(json(429, {}, { 'retry-after': value }));
+
+        await expect(transport(fetch).post('/v1/subscriptions', {})).rejects.toMatchObject({
+            retryAfter: null,
+        });
+    });
+
+    it('is null on the error when no response came back', async () => {
+        const { fetch } = mockFetch(new TypeError('fetch failed'));
+
+        await expect(transport(fetch).post('/v1/subscriptions', {})).rejects.toMatchObject({
+            status: null,
+            retryAfter: null,
+        });
     });
 });
 

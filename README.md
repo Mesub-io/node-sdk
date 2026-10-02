@@ -249,10 +249,11 @@ them.
 Reads from Mesub time out after 5 s and are retried twice, on network errors
 and on any error Mesub marks `retryable` (a 429 rate limit, a 5xx), honouring
 `Retry-After`; an error without Mesub's flag is retried on 408, 429 and 5xx,
-never on a 409. A full cap of subscriptions waiting for a signature
-(`pending_cap_reached`) is a 429 too, but frees up over an hour: it is retried
-only when Mesub sends a `Retry-After`. Writes (POST) are sent once and never
-retried, whatever happened: one that got no answer may still have been done.
+never on a 409. `create` is sent once and never retried, whatever happened:
+one that got no answer may still have reserved. A full cap of subscriptions
+waiting for a signature (`pending_cap_reached`, a 429) frees up over an hour:
+the error's `retryAfter` says when. What `submit` does when no answer comes
+back is in [Subscribe from your server](#subscribe-from-your-server).
 These are HTTP retries of the SDK's own calls, unrelated to a plan's pull
 retries. `access` and `hasAccess`, called from your own code, keep exactly
 that: `guardTimeout` binds the guards only.
@@ -326,6 +327,9 @@ It also carries what Mesub answered:
   keep a default branch.
 - `retryable`: whether the same call, sent again unchanged, may succeed later.
   Mesub's own flag when it sent one, what the status says otherwise.
+- `retryAfter`: how long Mesub asked to wait before that, in milliseconds,
+  from the response's `Retry-After` (on a 429, or a 503 such as
+  `network_unavailable`), or `null` when it sent none.
 - `body`: the error body, parsed when it is JSON.
 
 ## Requirements
