@@ -98,9 +98,10 @@ All three answer a refusal themselves:
 
 `onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
 own JSON. In Nest it throws your own exception, and the default refusal is
-thrown if it returns. A broken integration (a bad API key, an unknown plan)
-is never a refusal: Express gets it through `next(err)`, Next and Nest through
-a thrown error, answered 500.
+thrown if it returns. It may be async: it is awaited, and what it throws or
+rejects with goes where an integration error goes. A broken integration (a
+bad API key, an unknown plan) is never a refusal: Express gets it through
+`next(err)`, Next and Nest through a thrown error, answered 500.
 
 ## Without a middleware
 
