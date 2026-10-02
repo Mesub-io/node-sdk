@@ -1,38 +1,117 @@
 name: Publish
 
-# A version tag publishes that version. npm trusted publishing: GitHub proves
-# who is publishing through OIDC, so no npm token is stored in this repository.
-# Set up once on npmjs.com: package settings, Trusted Publisher, GitHub Actions,
-# Mesub-io / node-sdk / publish.yml.
+# A version tag on main publishes that version. npm trusted publishing: GitHub
+# proves who is publishing through OIDC, so no npm token is stored in this
+# repository, and the package carries a provenance statement naming this
+# workflow and commit. RELEASING.md has the one-time setup and the checklist.
+#
+# What has to hold before anything reaches npm:
+# - the tag is a version, `v` and semver, naming the version in package.json;
+# - the tagged commit is on main: a tag pushed on a branch publishes nothing;
+# - every check of CI passes on that commit;
+# - somebody listed as a reviewer of the `npm` environment approves the run.
+#   The environment is configured in the repository settings, not here: a
+#   workflow edited on a branch cannot lift the approval.
 on:
   push:
     tags: ['v*']
 
+# Nothing more than reading the code, but where a job says otherwise.
 permissions:
   contents: read
-  # What trusted publishing and provenance sign with.
-  id-token: write
+
+# One release at a time, never cancelled halfway through.
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  # Everything that runs the repository's code and its dependencies, without
+  # the OIDC token that publishes.
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      # Pinned by commit, as every action here: a tag can be moved to point at
+      # other code, a commit cannot, and the job after this one can publish.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The history, to tell whether the tag is on main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag is a version on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::$TAG is not a version tag such as v0.2.0"
+            exit 1
+          fi
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$TAG" ]; then
+            echo "::error::The tag is $TAG, package.json says $version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG points at a commit that is not on main"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - run: pnpm install --frozen-lockfile
-
-      # The tag must name the version being published: v0.2.0 publishes 0.2.0.
-      - name: Check the tag matches package.json
-        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-
       - run: pnpm lint
+      - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
       - run: pnpm check:exports
-      - run: npm publish --provenance --access public
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Holds the run until a reviewer of this environment approves it. The
+    # trusted publisher on npmjs.com names this environment too, so a run
+    # outside it cannot publish.
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@mesub/node
+    permissions:
+      contents: read
+      # What trusted publishing and provenance sign with. This job only.
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - run: pnpm install --frozen-lockfile
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: Check npm can publish through OIDC
+        run: |
+          npm --version
+          node -e "
+            const [major, minor, patch] = process.argv[1].split('.').map(Number);
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!ok) { console.error('npm ' + process.argv[1] + ' predates trusted publishing'); process.exit(1); }
+          " "$(npm --version)"
+
+      # prepublishOnly builds and checks the exports again, from this checkout.
+      # A prerelease (v0.2.0-rc.1) goes under `next`, never `latest`.
+      - name: Publish
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$TAG" in
+            *-*) npm publish --provenance --access public --tag next ;;
+            *) npm publish --provenance --access public ;;
+          esac
