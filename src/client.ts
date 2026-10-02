@@ -5,6 +5,7 @@ import type { CacheStore } from './cache/store.js';
 import { MesubError } from './errors.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
+import { accessAnswerFrom, accessListFrom } from './validate.js';
 
 /** What a guard decided, and on which answer. */
 export interface Decision {
@@ -199,10 +200,13 @@ export class Mesub {
             if (cached?.fresh) return cached.value;
         }
 
-        const list = (await this.transport.get('/v1/access', {
-            [asked.kind]: asked.value,
-            attempts: attempts || undefined,
-        })) as AccessList;
+        // Checked like `access`'s answer, before it reaches the cache.
+        const list = accessListFrom(
+            await this.transport.get('/v1/access', {
+                [asked.kind]: asked.value,
+                attempts: attempts || undefined,
+            }),
+        );
 
         if (slot) await this.lists.write(slot.who, null, list, slot.scope);
 
@@ -227,17 +231,20 @@ export class Mesub {
             if (cached?.fresh) return cached.value;
         }
 
-        // Throws a MesubError on any failure, which goes straight to the caller.
-        const answer = (await this.transport.get(
-            '/v1/access',
-            {
-                [asked.kind]: asked.value,
-                plan,
-                // Left out when not asked: the transport drops undefined values.
-                attempts: attempts || undefined,
-            },
-            call,
-        )) as AccessAnswer;
+        // Throws a MesubError on any failure, which goes straight to the caller;
+        // an answer of the wrong shape too, before it reaches the cache.
+        const answer = accessAnswerFrom(
+            await this.transport.get(
+                '/v1/access',
+                {
+                    [asked.kind]: asked.value,
+                    plan,
+                    // Left out when not asked: the transport drops undefined values.
+                    attempts: attempts || undefined,
+                },
+                call,
+            ),
+        );
 
         // A heavy answer must not replace the light one a guard reads.
         if (slot) await this.cache.write(slot.who, plan, answer, slot.scope);

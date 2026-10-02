@@ -141,6 +141,24 @@ describe('AccessCache', () => {
         await expect(cache.read(WALLET, 'pro')).resolves.toBeDefined();
     });
 
+    it.each([NaN, Infinity, undefined])(
+        'never writes an answer whose revalidate_after is %s',
+        async (revalidate_after) => {
+            const set = vi.fn();
+            const cache = new AccessCache<Answer>(
+                { get: () => undefined, set },
+                { now: () => NOW },
+            );
+
+            await cache.write(WALLET, 'pro', {
+                access: true,
+                revalidate_after: revalidate_after as number,
+            });
+
+            expect(set).not.toHaveBeenCalled();
+        },
+    );
+
     it('replaces the answer on a new write', async () => {
         const { cache } = setup();
         await cache.write(WALLET, 'pro', { access: true, revalidate_after: 60 });

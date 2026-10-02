@@ -204,6 +204,166 @@ describe('access', () => {
         });
     });
 
+    // An answer the SDK cannot read must never be cached, nor read as a yes (#31).
+    describe('an answer of the wrong shape', () => {
+        /** The answer, with that field set, or removed when `value` is undefined. */
+        function without(field: string, value?: unknown): Record<string, unknown> {
+            const body: Record<string, unknown> = { ...answer() };
+
+            if (value === undefined) delete body[field];
+            else body[field] = value;
+
+            return body;
+        }
+
+        it.each([
+            ['no revalidate_after', without('revalidate_after'), 'revalidate_after is missing'],
+            [
+                'a null revalidate_after',
+                without('revalidate_after', null),
+                'revalidate_after is not a finite number of seconds',
+            ],
+            [
+                'revalidate_after as a string',
+                without('revalidate_after', '60'),
+                'revalidate_after is not a finite number of seconds',
+            ],
+            ['no access', without('access'), 'access is missing'],
+            ['access as a string', without('access', 'true'), 'access is not a boolean'],
+            ['access as 1', without('access', 1), 'access is not a boolean'],
+            ['a numeric wallet', without('wallet', 42), 'wallet is not a string or null'],
+            ['no wallet', without('wallet'), 'wallet is missing'],
+            ['no plan', without('plan'), 'plan is missing'],
+            ['no status', without('status'), 'status is missing'],
+            [
+                'a date that is not one',
+                without('access_until', 'tomorrow'),
+                'access_until is not a date or null',
+            ],
+            [
+                'a date as a number',
+                without('next_charge_at', 0),
+                'next_charge_at is not a date or null',
+            ],
+            ['attempts that are not a list', without('attempts', {}), 'attempts is not a list'],
+            [
+                'an attempt without an amount',
+                without('attempts', [
+                    {
+                        outcome: 'PAID',
+                        reason: null,
+                        attempted_at: START.toISOString(),
+                        signature: null,
+                    },
+                ]),
+                'attempts[0].amount is missing',
+            ],
+            [
+                'an attempt that is not an object',
+                without('attempts', ['PAID']),
+                'attempts[0] is not an object',
+            ],
+            ['a list', [answer()], 'the body is not an object'],
+            ['null', null, 'the body is not an object'],
+            ['a string', 'ok', 'the body is not an object'],
+            [
+                "the list of a customer's plans",
+                { plans: [answer()], revalidate_after: 60 },
+                'wallet is missing',
+            ],
+        ])('throws unexpected on %s', async (_label, body, problem) => {
+            const { fetch } = mockFetch(json(200, body));
+
+            const error = await client(fetch)
+                .access(WALLET, 'pro')
+                .catch((caught: unknown) => caught);
+
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({ status: 200, code: 'unexpected' });
+            expect((error as MesubError).message).toBe(
+                `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
+            );
+        });
+
+        // The NaN entry that served access: true for good, and Redis's `PX NaN`.
+        it.each([
+            ['no revalidate_after', without('revalidate_after')],
+            ['a NaN revalidate_after', without('revalidate_after', Number.NaN)],
+        ])('never caches an answer with %s', async (_label, body) => {
+            const set = vi.fn();
+            const { fetch, calls } = mockFetch(json(200, body), json(200, answer()));
+            const mesub = client(fetch, { get: () => undefined, set });
+
+            await expect(mesub.access(WALLET, 'pro')).rejects.toMatchObject({
+                code: 'unexpected',
+            });
+            expect(set).not.toHaveBeenCalled();
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(answer());
+            expect(calls).toHaveLength(2);
+        });
+
+        it('throws unexpected on a 200 with HTML, and caches nothing', async () => {
+            const { fetch, calls } = mockFetch(
+                new Response('<!doctype html><title>Welcome</title>', {
+                    status: 200,
+                    headers: { 'content-type': 'text/html' },
+                }),
+                json(200, answer()),
+            );
+            const mesub = client(fetch);
+
+            await expect(mesub.access(WALLET, 'pro')).rejects.toMatchObject({
+                status: 200,
+                code: 'unexpected',
+            });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(answer());
+            expect(calls).toHaveLength(2);
+        });
+
+        it('checks an answer with its attempts too', async () => {
+            const { fetch } = mockFetch(json(200, without('revalidate_after')));
+
+            await expect(
+                client(fetch).access(WALLET, 'pro', { attempts: true }),
+            ).rejects.toMatchObject({ code: 'unexpected' });
+        });
+
+        it('reads an answer with every nullable field null, and a status it does not know', async () => {
+            const body = answer({
+                wallet: null,
+                status: 'paused' as AccessAnswer['status'],
+                subscribed_since: null,
+                first_subscribed_at: null,
+                current_period_end: null,
+                next_charge_at: null,
+                revalidate_after: 0,
+                attempts: [
+                    {
+                        outcome: 'REJECTED',
+                        reason: 'insufficient_funds',
+                        amount: '1000000',
+                        attempted_at: START.toISOString(),
+                        signature: null,
+                    },
+                ],
+            });
+            const { fetch } = mockFetch(json(200, body));
+
+            await expect(client(fetch).access(WALLET, 'pro', { attempts: true })).resolves.toEqual(
+                body,
+            );
+        });
+
+        it('throws it from hasAccess, never reading it as a yes or a no', async () => {
+            const { fetch } = mockFetch(json(200, without('revalidate_after')));
+
+            await expect(client(fetch).hasAccess(WALLET, 'pro')).rejects.toMatchObject({
+                code: 'unexpected',
+            });
+        });
+    });
+
     // Two projects sharing one Redis must never read each other's answers.
     describe('the cache scope', () => {
         it('is a hash of the API key, never the key itself', async () => {
@@ -1078,6 +1238,58 @@ describe('asked by customer', () => {
             expect(calls[0]!.url.searchParams.get('attempts')).toBe('true');
             expect(calls).toHaveLength(2);
             expect(writes).toHaveLength(1);
+        });
+
+        it.each([
+            ['no revalidate_after', { plans: [] }, 'revalidate_after is missing'],
+            [
+                'a NaN revalidate_after',
+                { plans: [], revalidate_after: Number.NaN },
+                'revalidate_after is not a finite number of seconds',
+            ],
+            ['no plans', { revalidate_after: 60 }, 'plans is missing'],
+            [
+                'plans that are not a list',
+                { plans: {}, revalidate_after: 60 },
+                'plans is not a list',
+            ],
+            [
+                'a plan without access',
+                { plans: [answer(), { ...answer(), access: undefined }], revalidate_after: 60 },
+                'plans[1].access is missing',
+            ],
+            [
+                'a plan whose attempts are not a list',
+                { plans: [{ ...answer(), attempts: 'none' }], revalidate_after: 60 },
+                'plans[0].attempts is not a list',
+            ],
+            ['the answer for one plan', answer(), 'plans is missing'],
+        ])(
+            'throws unexpected on a list with %s, and caches nothing',
+            async (_label, body, problem) => {
+                const { fetch, calls } = mockFetch(json(200, body), json(200, list()));
+                const { store, writes } = recording();
+                const mesub = client(fetch, store);
+
+                const error = await mesub.accessList(WALLET).catch((caught: unknown) => caught);
+
+                expect(error).toBeInstanceOf(MesubError);
+                expect(error).toMatchObject({ status: 200, code: 'unexpected' });
+                expect((error as MesubError).message).toBe(
+                    `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
+                );
+                expect(writes).toHaveLength(0);
+
+                await expect(mesub.accessList(WALLET)).resolves.toEqual(list());
+                expect(calls).toHaveLength(2);
+            },
+        );
+
+        it('reads a list whose plan answers a null wallet', async () => {
+            const body = list({ plans: [answer({ wallet: null, access: false, status: 'none' })] });
+            const { fetch } = mockFetch(json(200, body));
+
+            await expect(client(fetch).accessList({ email: EMAIL })).resolves.toEqual(body);
         });
 
         it('throws when Mesub cannot answer, even with a stale list cached', async () => {
