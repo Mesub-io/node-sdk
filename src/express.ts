@@ -4,19 +4,22 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { Mesub } from './client.js';
 import {
     accessOf,
+    checkPlan,
     type Denial,
     defaultClient,
     denialBody,
     denialOf,
     guard,
     type MesubAccess,
+    type PlanOption,
+    plansOf,
     type TokenOption,
     tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
 export { MesubError } from './errors.js';
-export type { Denial, DenialReason, MesubAccess } from './guard.js';
+export type { Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 
 /** What `requirePlan` leaves on `res.locals.mesub` for the route. */
 export type MesubLocals = MesubAccess;
@@ -39,7 +42,10 @@ export interface RequirePlanOptions {
 }
 
 /**
- * Lets a request through only for a subscriber with access to that plan.
+ * Lets a request through only for a subscriber with access to that plan: a
+ * slug, a list of which any one will do (`['pro', 'team']`), or either worked
+ * out per request (`(req) => req.params.tier`). `res.locals.mesub.plan` says
+ * which one let it through.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
@@ -47,13 +53,18 @@ export interface RequirePlanOptions {
  * 402 (Mesub said no) or 503 with Retry-After (Mesub unreachable, with no
  * answer known for that subscriber). Integration errors go to `next(err)`.
  */
-export function requirePlan(plan: string, options: RequirePlanOptions = {}): RequestHandler {
+export function requirePlan(
+    plan: PlanOption<Request>,
+    options: RequirePlanOptions = {},
+): RequestHandler {
+    checkPlan(plan);
+
     return async (req, res, next) => {
         try {
             const outcome = await guard(
                 options.client ?? defaultClient(),
                 tokensOf(req, options.token),
-                plan,
+                plansOf(plan, req),
             );
 
             if (outcome.allowed) {

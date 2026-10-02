@@ -60,7 +60,7 @@ async function token(over: { aud?: string; exp?: string } = {}) {
 
 interface Mesh {
     /** What /v1/access answers, per call. */
-    access?: (init?: RequestInit) => Response | Promise<Response>;
+    access?: (init?: RequestInit, url?: URL) => Response | Promise<Response>;
     /** What the JWKS and /v1/project answer; healthy by default. */
     keys?: () => Response;
     project?: () => Response;
@@ -77,7 +77,7 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
         if (url.pathname === '/v1/project')
             return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
-            return (mesh.access ?? (() => Response.json(answer())))(init);
+            return (mesh.access ?? (() => Response.json(answer())))(init, url);
         throw new Error(`unexpected ${url.pathname}`);
     });
     const client = new Mesub({
@@ -89,6 +89,13 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     });
 
     return { client, calls };
+}
+
+/** What /v1/access answers, per plan asked. */
+function perPlan(
+    answers: Record<string, (init?: RequestInit) => Response | Promise<Response>>,
+): NonNullable<Mesh['access']> {
+    return (init, url) => answers[url!.searchParams.get('plan')!]!(init);
 }
 
 /** Mesub not answering at all, until the call gives up. */
@@ -130,7 +137,13 @@ describe('withMesub', () => {
 
             expect(response.status).toBe(200);
             expect(await response.json()).toEqual({
-                mesub: { userId: 'user_1', wallet: WALLET, answer: answer(), stale: false },
+                mesub: {
+                    userId: 'user_1',
+                    wallet: WALLET,
+                    plan: 'pro',
+                    answer: answer(),
+                    stale: false,
+                },
                 params: { id: '42' },
             });
         });
@@ -384,6 +397,58 @@ describe('withMesub', () => {
 
             expect(response.status).toBe(503);
             expect(response.headers.get('retry-after')).toBe('30');
+        });
+    });
+
+    // #38: any one of several plans, or the plan worked out per request.
+    describe('which plan', () => {
+        const no = () => Response.json(answer({ access: false, status: 'none' }));
+        const yes = () => Response.json(answer({ plan: 'team' }));
+        const echo = async (_request: Request, mesub: MesubAccess) => Response.json(mesub);
+
+        it('lets through on the first plan of the list that grants, and says which', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no, team: yes }) });
+
+            const response = await withMesub(echo, { plan: ['pro', 'team'], client })(
+                get(await bearer()),
+                context,
+            );
+
+            expect(response.status).toBe(200);
+            expect(await response.json()).toMatchObject({ plan: 'team', answer: { plan: 'team' } });
+        });
+
+        it('answers 402 when none grants', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no, team: no }) });
+
+            const response = await withMesub(echo, { plan: ['pro', 'team'], client })(
+                get(await bearer()),
+                context,
+            );
+
+            expect(response.status).toBe(402);
+        });
+
+        it('asks about the plan a function picks for the request', async () => {
+            const { client } = mesub({ access: perPlan({ team: yes }) });
+            const guarded = withMesub(echo, {
+                plan: (request) => new URL(request.url).searchParams.get('tier') ?? 'pro',
+                client,
+            });
+
+            const response = await guarded(get(await bearer(), '/api/x?tier=team'), context);
+
+            expect(response.status).toBe(200);
+            expect(((await response.json()) as MesubAccess).plan).toBe('team');
+        });
+
+        it('refuses an empty list when wrapping, and throws one a function gives', async () => {
+            const { client } = mesub();
+
+            expect(() => withMesub(echo, { plan: [], client })).toThrow(TypeError);
+            await expect(
+                withMesub(echo, { plan: () => [], client })(get(await bearer()), context),
+            ).rejects.toThrow(TypeError);
         });
     });
 

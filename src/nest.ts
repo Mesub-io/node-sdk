@@ -11,12 +11,15 @@ import {
 import type { Mesub } from './client.js';
 import {
     accessOf,
+    checkPlan,
     type Denial,
     defaultClient,
     denialBody,
     denialOf,
     guard,
     type MesubAccess as Access,
+    type PlanOption,
+    plansOf,
     type TokenOption,
     tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
@@ -24,7 +27,7 @@ import {
 import type { HeaderSource } from './tokens.js';
 
 export { MesubError } from './errors.js';
-export type { Denial, DenialReason } from './guard.js';
+export type { Denial, DenialReason, PlanOption } from './guard.js';
 
 /** Who is asking and what Mesub answered, as `@MesubAccess()` gives it. */
 export type MesubAccess = Access;
@@ -67,7 +70,9 @@ function setHeader(response: HeaderSink, name: string, value: string) {
 
 /**
  * A guard letting a request through only for a subscriber with access to that
- * plan: `@UseGuards(RequirePlan('pro'))` on a controller or a route.
+ * plan: `@UseGuards(RequirePlan('pro'))` on a controller or a route. The plan
+ * is a slug, a list of which any one will do (`['pro', 'team']`), or either
+ * worked out per request. `@MesubAccess()` says which one let it through.
  *
  * The subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
@@ -76,7 +81,12 @@ function setHeader(response: HeaderSink, name: string, value: string) {
  * unreachable, with no answer known for that subscriber). Integration errors
  * are thrown as they are, for Nest to log and answer 500.
  */
-export function RequirePlan(plan: string, options: RequirePlanOptions = {}): Type<CanActivate> {
+export function RequirePlan(
+    plan: PlanOption<MesubRequest>,
+    options: RequirePlanOptions = {},
+): Type<CanActivate> {
+    checkPlan(plan);
+
     class MesubPlanGuard implements CanActivate {
         async canActivate(context: ExecutionContext): Promise<boolean> {
             const http = context.switchToHttp();
@@ -84,7 +94,7 @@ export function RequirePlan(plan: string, options: RequirePlanOptions = {}): Typ
             const outcome = await guard(
                 options.client ?? defaultClient(),
                 tokensOf(request, options.token),
-                plan,
+                plansOf(plan, request),
             );
 
             if (outcome.allowed) {

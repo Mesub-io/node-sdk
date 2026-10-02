@@ -6,11 +6,12 @@ import express, {
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 import request from 'supertest';
 
-import type { AccessAnswer } from '../src/answer.js';
+import type { AccessAnswer, SubscriptionStatus } from '../src/answer.js';
 import {
     MesubError,
     requirePlan,
     type MesubLocals,
+    type PlanOption,
     type RequirePlanOptions,
 } from '../src/express.js';
 import { Mesub, type MesubOptions } from '../src/index.js';
@@ -70,7 +71,7 @@ async function token(over: { aud?: string; exp?: string } = {}) {
 
 interface Mesh {
     /** What /v1/access answers, per call. */
-    access?: (init?: RequestInit) => Response | Promise<Response>;
+    access?: (init?: RequestInit, url?: URL) => Response | Promise<Response>;
     /** What the JWKS and /v1/project answer; healthy by default. */
     keys?: () => Response;
     project?: () => Response;
@@ -87,7 +88,7 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
         if (url.pathname === '/v1/project')
             return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
-            return (mesh.access ?? (() => Response.json(answer())))(init);
+            return (mesh.access ?? (() => Response.json(answer())))(init, url);
         throw new Error(`unexpected ${url.pathname}`);
     });
     const client = new Mesub({
@@ -101,6 +102,13 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     return { client, calls };
 }
 
+/** What /v1/access answers, per plan asked. */
+function perPlan(
+    answers: Record<string, (init?: RequestInit) => Response | Promise<Response>>,
+): NonNullable<Mesh['access']> {
+    return (init, url) => answers[url!.searchParams.get('plan')!]!(init);
+}
+
 /** Mesub not answering at all, until the call gives up. */
 function hang(init?: RequestInit) {
     return new Promise<Response>((_, reject) => {
@@ -109,9 +117,13 @@ function hang(init?: RequestInit) {
 }
 
 /** An app with one guarded route that echoes res.locals.mesub. */
-function app(client: Mesub, options: Omit<RequirePlanOptions, 'client'> = {}) {
+function app(
+    client: Mesub,
+    options: Omit<RequirePlanOptions, 'client'> = {},
+    plan: PlanOption<ExpressRequest> = 'pro',
+) {
     const server = express();
-    server.get('/pro', requirePlan('pro', { ...options, client }), (_req, res) => {
+    server.get('/pro', requirePlan(plan, { ...options, client }), (_req, res) => {
         res.json(res.locals['mesub'] as MesubLocals);
     });
     // Integration errors land here, through next(err).
@@ -145,6 +157,7 @@ describe('requirePlan', () => {
             expect(response.body).toEqual({
                 userId: 'user_1',
                 wallet: WALLET,
+                plan: 'pro',
                 answer: answer(),
                 stale: false,
             });
@@ -461,6 +474,203 @@ describe('requirePlan', () => {
                 .get('/pro')
                 .set('Authorization', `Bearer ${await token({ aud: 'proj_other' })}`)
                 .expect(503);
+        });
+    });
+
+    // #38: any one of several plans, or the plan worked out per request.
+    describe('which plan', () => {
+        const yes = (plan: string) => () => Response.json(answer({ plan }));
+        const no =
+            (plan: string, status: SubscriptionStatus = 'none') =>
+            () =>
+                Response.json(answer({ plan, access: false, status }));
+        const down = () => Response.json({ message: 'down' }, { status: 503 });
+
+        it('lets through on the first plan of the list that grants, and says which', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no('pro'), team: yes('team') }) });
+
+            const response = await request(app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body).toMatchObject({ plan: 'team', answer: { plan: 'team' } });
+        });
+
+        it('prefers the earlier plan when several grant', async () => {
+            const { client } = mesub({ access: perPlan({ pro: yes('pro'), team: yes('team') }) });
+
+            const response = await request(app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.body.plan).toBe('pro');
+        });
+
+        it('does not wait for the plans after the one that grants', async () => {
+            const { client } = mesub(
+                { access: perPlan({ pro: yes('pro'), team: hang }) },
+                { guardTimeout: 5_000 },
+            );
+            const started = Date.now();
+
+            await request(app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+
+            expect(Date.now() - started).toBeLessThan(1_000);
+        });
+
+        // A guard holds a request for guardTimeout at most, whatever the number of plans.
+        it('asks every plan within one guardTimeout', async () => {
+            const { client } = mesub(
+                { access: perPlan({ a: hang, b: hang, c: hang }) },
+                { guardTimeout: 100 },
+            );
+            const started = Date.now();
+
+            await request(app(client, {}, ['a', 'b', 'c']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(503);
+
+            expect(Date.now() - started).toBeLessThan(250);
+        });
+
+        it("answers 402 with the first plan's status when none grants", async () => {
+            const { client } = mesub({
+                access: perPlan({ pro: no('pro', 'stopped'), team: no('team') }),
+            });
+
+            const response = await request(app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(402);
+            expect(response.body).toEqual({
+                access: false,
+                reason: 'no_access',
+                status: 'stopped',
+            });
+        });
+
+        // 402 only means Mesub said no, for every plan: one it said nothing about is a 503.
+        it('answers 503 when one says no and Mesub fails the other on an unseen wallet', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no('pro'), team: down }) });
+
+            const response = await request(app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+        });
+
+        it('lets through on a later plan when Mesub fails an earlier one', async () => {
+            const { client } = mesub({ access: perPlan({ pro: down, team: yes('team') }) });
+
+            const response = await request(app(client, {}, ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body.plan).toBe('team');
+        });
+
+        // The outage fallback is per plan: the one known to grant keeps them in.
+        it('keeps a subscriber in on the plan cached as granting during an outage', async () => {
+            let outage = false;
+            const { client } = mesub({
+                access: perPlan({
+                    pro: () => (outage ? down() : no('pro')()),
+                    team: () =>
+                        outage
+                            ? down()
+                            : Response.json(answer({ plan: 'team', revalidate_after: 0 })),
+                }),
+            });
+            const server = app(client, {}, ['pro', 'team']);
+            const bearer = `Bearer ${await token()}`;
+            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+
+            outage = true;
+            const response = await request(server).get('/pro').set('Authorization', bearer);
+
+            expect(response.status).toBe(200);
+            expect(response.body).toMatchObject({ plan: 'team', stale: true });
+        });
+
+        it('asks about the plan a function picks for the request', async () => {
+            const { client } = mesub({ access: perPlan({ team: yes('team') }) });
+            const decide = vi.spyOn(client, 'decide');
+
+            const response = await request(app(client, {}, (req) => String(req.query['tier'])))
+                .get('/pro?tier=team')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(200);
+            expect(response.body.plan).toBe('team');
+            expect(decide).toHaveBeenCalledExactlyOnceWith(WALLET, 'team');
+        });
+
+        it('takes a list from a function too', async () => {
+            const { client } = mesub({ access: perPlan({ pro: no('pro'), team: yes('team') }) });
+
+            await request(app(client, {}, () => ['pro', 'team']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+        });
+
+        it('asks each plan once', async () => {
+            const { client } = mesub();
+            const decide = vi.spyOn(client, 'decide');
+
+            await request(app(client, {}, ['pro', 'pro']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .expect(200);
+
+            expect(decide).toHaveBeenCalledOnce();
+        });
+
+        // An unknown plan is a broken integration, unless an earlier plan already let them in.
+        it('forwards an unknown plan after one that said no to next(err)', async () => {
+            const unknown = () =>
+                Response.json(
+                    { message: 'nope', statusCode: 404, code: 'plan_not_found' },
+                    { status: 404 },
+                );
+            const { client } = mesub({ access: perPlan({ pro: no('pro'), typo: unknown }) });
+
+            const response = await request(app(client, {}, ['pro', 'typo']))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'plan_not_found' });
+        });
+
+        it.each([
+            ['an empty list', []],
+            ['an empty slug', ''],
+            ['an empty slug in the list', ['pro', '']],
+        ])('refuses %s when the guard is built', (_label, plan) => {
+            const { client } = mesub();
+
+            expect(() => requirePlan(plan, { client })).toThrow(TypeError);
+        });
+
+        it('forwards a function giving no plan to next(err)', async () => {
+            const { client } = mesub();
+
+            const response = await request(app(client, {}, () => []))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`);
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ forwarded: 'other' });
         });
     });
 
