@@ -496,7 +496,21 @@ pnpm -s contract:fixture > /tmp/mesub-contract.env
 env $(cat /tmp/mesub-contract.env) pnpm test:contract
 ```
 
-Without `MESUB_CONTRACT_URL` it is skipped, which is why CI never needs a back.
+Without `MESUB_CONTRACT_URL` it is skipped, which is why `pnpm test` never
+needs a back.
+
+The Contract workflow runs it on every push, every morning and by hand (with a
+back branch to try): it checks out Mesub-io/backend, starts Postgres and Redis,
+migrates, seeds the fixture, starts the API and runs `pnpm test:contract`.
+The back is private, so it needs one secret, set once by an admin:
+
+1. `ssh-keygen -t ed25519 -N '' -C node-sdk-contract -f contract_key`
+2. Mesub-io/backend, Settings, Deploy keys: add `contract_key.pub`, read-only.
+3. Mesub-io/node-sdk, Settings, Secrets and variables, Actions: a repository
+   secret `BACKEND_DEPLOY_KEY` holding `contract_key`. Then delete both files.
+
+Without it the job is skipped with a warning. Whoever can push a branch here
+can read the back's code through that key.
 
 ## License
 
