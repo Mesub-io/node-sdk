@@ -268,20 +268,25 @@ describe('withMesub', () => {
             expect(response.status).toBe(200);
             expect(((await response.json()) as { mesub: MesubAccess }).mesub.stale).toBe(true);
         });
+    });
 
-        it('answers 402 for an unseen wallet during an outage', async () => {
+    describe('503, nobody knows yet', () => {
+        // 402 only means Mesub said no: failing, it said nothing about this wallet.
+        it.each([
+            ['an outage', 503],
+            ['a rate limit', 429],
+        ])('answers 503 with Retry-After for an unseen wallet on %s', async (_label, status) => {
             const { client } = mesub({
-                access: () => Response.json({ message: 'down' }, { status: 503 }),
+                access: () => Response.json({ message: 'down' }, { status }),
             });
 
             const response = await route(client)(get(await bearer()), context);
 
-            expect(response.status).toBe(402);
-            expect(await response.json()).toEqual({ access: false, reason: 'no_access' });
+            expect(response.status).toBe(503);
+            expect(response.headers.get('retry-after')).toBe('30');
+            expect(await response.json()).toEqual({ access: false, reason: 'unavailable' });
         });
-    });
 
-    describe('503, nobody can be identified', () => {
         it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
             const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
 

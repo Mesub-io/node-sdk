@@ -521,7 +521,7 @@ describe('decide, for the guards', () => {
         });
     });
 
-    it('says it timed out for a wallet it never saw', async () => {
+    it('says Mesub is unavailable when it times out on a wallet it never saw', async () => {
         const { fetch } = mockFetch('hang');
 
         const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
@@ -531,7 +531,7 @@ describe('decide, for the guards', () => {
             access: false,
             answer: null,
             stale: true,
-            timedOut: true,
+            unavailable: true,
         });
     });
 
@@ -552,7 +552,7 @@ describe('decide, for the guards', () => {
 
         expect(decision).toEqual({
             at: 0,
-            value: { access: false, answer: null, stale: true, timedOut: true },
+            value: { access: false, answer: null, stale: true, unavailable: true },
         });
     });
 
@@ -565,14 +565,22 @@ describe('decide, for the guards', () => {
         expect(decision.value).toEqual({ access: true, answer: answer(), stale: false });
     });
 
-    // Mesub said it is down, in time: today's fallback, not a timeout.
-    it('keeps a fast outage a plain fallback once the retries are spent', async () => {
-        const { fetch } = mockFetch(nest(503, 'a'), nest(503, 'b'), nest(503, 'c'));
+    // Mesub failing fast says nothing about the wallet either: 503, not 402.
+    it.each([
+        ['an outage', 503],
+        ['a rate limit', 429],
+    ])('says Mesub is unavailable on %s once the retries are spent', async (_label, status) => {
+        const { fetch } = mockFetch(nest(status, 'a'), nest(status, 'b'), nest(status, 'c'));
 
         const decision = timed(guarded(fetch).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(1_500);
 
-        expect(decision.value).toEqual({ access: false, answer: null, stale: true });
+        expect(decision.value).toEqual({
+            access: false,
+            answer: null,
+            stale: true,
+            unavailable: true,
+        });
     });
 
     it('still throws an integration error', async () => {
@@ -596,7 +604,7 @@ describe('decide, for the guards', () => {
         await vi.advanceTimersByTimeAsync(2_000);
 
         // The key hash is real crypto, settled off the fake clock: awaited, not timed.
-        await expect(decision).resolves.toMatchObject({ access: false, timedOut: true });
+        await expect(decision).resolves.toMatchObject({ access: false, unavailable: true });
         expect(Date.now() - START.getTime()).toBe(2_000);
         expect(fetch).toHaveBeenCalledOnce();
     });

@@ -4,7 +4,7 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { MesubError } from './errors.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
-import { type CallOptions, ranOutOfTime, Transport } from './transport.js';
+import { type CallOptions, Transport } from './transport.js';
 
 /** What a guard decided, and on which answer. */
 export interface Decision {
@@ -13,10 +13,11 @@ export interface Decision {
     /** The answer came from the outage fallback, not from Mesub just now. */
     stale: boolean;
     /**
-     * The guard's time budget ran out before Mesub answered, with no answer
-     * cached for that wallet: the guards answer 503, not 402.
+     * Mesub did not answer (an outage, a rate limit, or the guard's time
+     * budget running out) and no answer was cached for that wallet: nobody
+     * knows yet, so the guards answer 503, not 402.
      */
-    timedOut?: boolean;
+    unavailable?: boolean;
 }
 
 export interface MesubOptions {
@@ -49,8 +50,8 @@ export interface MesubOptions {
     /**
      * How long the guards (`requirePlan`, `withMesub`, `RequirePlan`) give
      * Mesub to answer, retries and waits included, in milliseconds. Defaults
-     * to 2000. Once it runs out the guard answers from the cache, even stale,
-     * or 503 with Retry-After for a wallet it never saw. `access` and
+     * to 2000. Once it runs out, or Mesub fails, the guard answers from the
+     * cache, even stale, or 503 with Retry-After for a wallet it never saw. `access` and
      * `hasAccess`, called directly, are not bound by it.
      */
     guardTimeout?: number;
@@ -224,8 +225,8 @@ export class Mesub {
     /**
      * `hasAccess`, with the answer it decided on, within `guardTimeout`: what
      * the middlewares hand the route. `answer` is null only for a wallet never
-     * seen during an outage, `stale` is true when the answer came from the
-     * fallback, `timedOut` when the budget ran out on a wallet never seen.
+     * seen during an outage, which is then `unavailable`; `stale` is true
+     * when the answer came from the fallback.
      *
      * @internal
      */
@@ -262,10 +263,8 @@ export class Mesub {
 
             if (cached) return { access: cached.value.access, answer: cached.value, stale: true };
 
-            // Out of time is not Mesub saying no: nobody knows, so a retry later.
-            return ranOutOfTime(error)
-                ? { access: false, answer: null, stale: true, timedOut: true }
-                : { access: false, answer: null, stale: true };
+            // Not Mesub saying no: nobody knows, so a guard asks for a retry later.
+            return { access: false, answer: null, stale: true, unavailable: true };
         }
     }
 }

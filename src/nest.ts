@@ -61,9 +61,9 @@ function setHeader(response: HeaderSink, name: string, value: string) {
  *
  * The subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie. Refusals throw an `HttpException` of 401
- * (no valid token), 402 (no access) or 503 with Retry-After (Mesub unreachable
- * while nobody could be identified yet). Integration errors are thrown as
- * they are, for Nest to log and answer 500.
+ * (no valid token), 402 (Mesub said no) or 503 with Retry-After (Mesub
+ * unreachable, with no answer known for that subscriber). Integration errors
+ * are thrown as they are, for Nest to log and answer 500.
  */
 export function RequirePlan(plan: string, options: RequirePlanOptions = {}): Type<CanActivate> {
     class MesubPlanGuard implements CanActivate {

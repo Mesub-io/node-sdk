@@ -21,19 +21,6 @@ export interface CallOptions {
     deadline?: number;
 }
 
-/** The errors of calls that gave up because their deadline came, not because Mesub said no. */
-const outOfTime = new WeakSet<MesubError>();
-
-/** Whether a call gave up on its deadline, rather than on Mesub's answer. */
-export function ranOutOfTime(error: unknown): boolean {
-    return error instanceof MesubError && outOfTime.has(error);
-}
-
-function givenUp(error: MesubError): MesubError {
-    outOfTime.add(error);
-    return error;
-}
-
 const INITIAL_RETRY_DELAY = 500;
 const MAX_RETRY_DELAY = 8_000;
 const MAX_RETRY_AFTER = 60_000;
@@ -71,7 +58,7 @@ export class Transport {
             // Not even a Retry-After is waited past the deadline: the caller
             // falls back now rather than at the end of a wait it cannot afford.
             if (deadline !== undefined && Date.now() + wait >= deadline) {
-                throw givenUp(attempt.error);
+                throw attempt.error;
             }
             await sleep(wait);
         }
@@ -85,7 +72,7 @@ export class Transport {
                 status: null,
                 code: 'unavailable',
             });
-            return { ok: false, error: givenUp(error), retry: false, retryAfter: null };
+            return { ok: false, error, retry: false, retryAfter: null };
         }
 
         // Cut at the deadline when it comes before the attempt's own timeout.
@@ -142,7 +129,7 @@ export class Transport {
                     `Mesub did not answer within the ${Math.round(timeout)} ms left before the deadline.`,
                     { status: null, code: 'unavailable', cause },
                 );
-                return { ok: false, error: givenUp(error), retry: false, retryAfter: null };
+                return { ok: false, error, retry: false, retryAfter: null };
             }
 
             const message = controller.signal.aborted
