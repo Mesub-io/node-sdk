@@ -7,7 +7,7 @@
  * Run after `pnpm build`.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -58,6 +58,34 @@ for (const subpath of Object.keys(pkg.exports)) {
         if (theirs !== undefined && theirs !== core[condition]) {
             failures.push(`${specifier} (${condition}): its MesubError is not the core's`);
         }
+    }
+}
+
+// The fake Mesub builds clients of the core's own class, not a copy of it.
+const testing = {
+    import: await import(`${pkg.name}/testing`),
+    require: require(`${pkg.name}/testing`),
+};
+const Mesub = { import: (await import(pkg.name)).Mesub, require: require(pkg.name).Mesub };
+
+for (const condition of ['import', 'require']) {
+    const client = new testing[condition].FakeMesub().client();
+    if (!(client instanceof Mesub[condition])) {
+        failures.push(`${pkg.name}/testing (${condition}): its client is not the core's Mesub`);
+    }
+}
+
+// The fake is for tests only: no other entry, nor a chunk they share, may
+// carry it, and nothing built may load a test framework.
+for (const file of readdirSync(new URL('../dist/', import.meta.url))) {
+    if (!/\.(c?js)$/.test(file)) continue;
+
+    const code = readFileSync(new URL(`../dist/${file}`, import.meta.url), 'utf8');
+    if (!file.startsWith('testing.') && code.includes('FakeMesub')) {
+        failures.push(`dist/${file} carries the fake Mesub: it must stay in @mesub/node/testing`);
+    }
+    if (/from ["']vitest["']|require\(["']vitest["']\)/.test(code)) {
+        failures.push(`dist/${file} loads vitest`);
     }
 }
 

@@ -11,17 +11,18 @@ describe('package.json', () => {
         expect(pkg.name).toBe('@mesub/node');
     });
 
-    it('exposes the core, Express, Next and Nest, and nothing else', () => {
+    it('exposes the core, Express, Next, Nest and the fake Mesub, and nothing else', () => {
         expect(Object.keys(pkg.exports)).toEqual([
             '.',
             './express',
             './next',
             './nest',
+            './testing',
             './package.json',
         ]);
     });
 
-    it.each(['.', './express', './next', './nest'])(
+    it.each(['.', './express', './next', './nest', './testing'])(
         'serves %s to import and require, with types',
         (subpath) => {
             const entry = pkg.exports[subpath];
