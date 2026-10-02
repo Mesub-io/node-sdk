@@ -242,7 +242,9 @@ export class Mesub {
             // The last answer known, even stale; a wallet never seen stays out.
             const cached = await this.cache.read(wallet, plan, scope);
 
-            if (cached) return { access: cached.value.access, answer: cached.value, stale: true };
+            if (cached) {
+                return { access: stillGrants(cached.value), answer: cached.value, stale: true };
+            }
 
             // Not Mesub saying no: nobody knows, so a guard asks for a retry later.
             return { access: false, answer: null, stale: true, unavailable: true };
@@ -269,4 +271,15 @@ function missingProjectId(): MesubError {
         status: null,
         code: 'unavailable',
     });
+}
+
+/**
+ * A stale answer's access, past what it paid for (#35): an answer with no
+ * charge or retry ahead (cancelled, parked) ends at `access_until`. One with a
+ * renewal ahead keeps the fallback: it was likely paid while Mesub was down.
+ */
+function stillGrants(answer: AccessAnswer, now: number = Date.now()): boolean {
+    if (!answer.access || !answer.access_until) return answer.access;
+    if (answer.next_charge_at || answer.next_retry_at) return true;
+    return Date.parse(answer.access_until) > now;
 }
