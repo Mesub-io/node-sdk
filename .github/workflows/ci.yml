@@ -50,4 +50,25 @@ jobs:
           package-manager-cache: false
       - run: node --version
       - run: node node_modules/vitest/vitest.mjs run
+        if: matrix.node != 24
+      # The same run measured once, on the newest Node: v8 coverage of src/,
+      # failing under the floor in vitest.config.ts. The report is kept as an
+      # artifact (open coverage/index.html) and summed up on the run's page.
+      - run: node node_modules/vitest/vitest.mjs run --coverage
+        if: matrix.node == 24
+      - name: Coverage summary
+        if: matrix.node == 24 && !cancelled()
+        run: |
+          node -e "
+            const { total } = require('./coverage/coverage-summary.json');
+            const rows = ['statements', 'branches', 'functions', 'lines']
+              .map((kind) => '| ' + kind + ' | ' + total[kind].pct + '% | ' + total[kind].covered + ' / ' + total[kind].total + ' |');
+            console.log(['### Coverage', '', '| | % | covered |', '| - | - | - |', ...rows].join('\\n'));
+          " >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.node == 24 && !cancelled()
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
       - run: node scripts/check-exports.mjs

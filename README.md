@@ -465,6 +465,7 @@ dependencies: install the one you use. `jose` is the only runtime dependency.
 ```sh
 pnpm install
 pnpm test          # unit tests, against a fake Mesub
+pnpm test:coverage # the same, with v8 coverage of src/ in coverage/index.html
 pnpm typecheck
 pnpm lint
 pnpm build         # dist/, ESM and CJS, with declaration files
@@ -472,7 +473,9 @@ pnpm check:exports # every entry resolves through import and require, shares one
                    # and the fake Mesub stays in @mesub/node/testing
 ```
 
-The pre-push hook runs all of it, as CI does on Node 20, 22 and 24.
+The pre-push hook runs all of it, as CI does on Node 20, 22 and 24. CI
+measures coverage on Node 24, fails under 90%, and keeps the report as the
+`coverage` artifact of the run.
 
 ### Releasing
 
