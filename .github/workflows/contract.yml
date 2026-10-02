@@ -1,0 +1,168 @@
+name: Contract
+
+# The SDK against the real back, built from Mesub-io/backend in this job: what
+# catches the back renaming a field, a status or an error code under the SDK.
+#
+# On every push, like CI, so a change to the SDK is checked against the back
+# before it merges. Every morning as well, because the back moves without this
+# repository moving: a back merged overnight that breaks the SDK shows up here
+# the next day, not at the next SDK change. By hand to try a back branch.
+#
+# The back is private and this repository is public, so reading it takes a
+# read-only deploy key, BACKEND_DEPLOY_KEY (see "Contract test" in the README).
+# Without it the job is skipped with a warning, never failed.
+on:
+  push:
+    branches: ['**']
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: Branch, tag or commit of Mesub-io/backend to test against
+        default: main
+
+concurrency:
+  group: contract-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # A job of its own: `secrets` cannot be read in a job's `if`.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.key.outputs.ready }}
+    steps:
+      - id: key
+        env:
+          KEY: ${{ secrets.BACKEND_DEPLOY_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo ready=true >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No BACKEND_DEPLOY_KEY secret: the contract test was skipped. See Contract test in the README."
+            echo ready=false >> "$GITHUB_OUTPUT"
+          fi
+
+  contract:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # The back reads .env.test, committed with fake but valid values, and
+      # turns its throttling and its pulls off: nothing is pulled on chain.
+      NODE_ENV: test
+      DATABASE_URL: postgresql://mesub:mesub@127.0.0.1:5432/mesub_test?schema=public
+      # Fails the run when the fixture printed nothing, rather than skipping
+      # every test into a green one.
+      MESUB_CONTRACT_REQUIRED: '1'
+
+    # The same images as the back's own CI.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: mesub
+          POSTGRES_PASSWORD: mesub
+          POSTGRES_DB: mesub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mesub"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      # Pinned by commit, as every action here: a tag can be moved to other
+      # code, a commit cannot, and this job holds a key to the back's code.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: node-sdk
+          persist-credentials: false
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: Mesub-io/backend
+          ref: ${{ inputs.backend_ref || 'main' }}
+          path: backend
+          ssh-key: ${{ secrets.BACKEND_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      # The back names no pnpm version, the SDK does: one pnpm for both.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: node-sdk/package.json
+
+      - name: Build the back
+        working-directory: backend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm prisma generate
+          pnpm prisma migrate deploy
+          pnpm build
+
+      # The fixture reads .env, the API .env.test under NODE_ENV=test: the same
+      # file for both. Its lines go to the env of the steps after this one.
+      - name: Seed the contract fixture
+        working-directory: backend
+        run: |
+          cp .env.test .env
+          node scripts/contract-fixture.mjs > "$RUNNER_TEMP/contract.env"
+          while IFS='=' read -r name value; do
+            case "$name" in
+              MESUB_CONTRACT_KEY|MESUB_CONTRACT_TOKEN) echo "::add-mask::$value" ;;
+            esac
+          done < "$RUNNER_TEMP/contract.env"
+          cat "$RUNNER_TEMP/contract.env" >> "$GITHUB_ENV"
+
+      # .env.test's fee payer key does not match its address, which the API
+      # refuses at boot: a fresh devnet key for this run, never funded, held
+      # by nobody. The boot also asks the public devnet RPC for its genesis
+      # hash, the one thing here that leaves the runner.
+      - name: Start the API
+        working-directory: backend
+        run: |
+          eval "$(node --input-type=module -e "
+            import { randomBytes } from 'node:crypto';
+            import { createKeyPairSignerFromPrivateKeyBytes } from '@solana/kit';
+            const secret = randomBytes(32);
+            const { address } = await createKeyPairSignerFromPrivateKeyBytes(new Uint8Array(secret));
+            console.log('export FEE_PAYER_ADDRESS=' + address);
+            console.log('export FEE_PAYER_SECRET_KEY=' + secret.toString('base64'));
+          ")"
+          nohup node dist/main > "$RUNNER_TEMP/api.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -sf "$MESUB_CONTRACT_URL/health" && exit 0
+            sleep 1
+          done
+          tail -n 80 "$RUNNER_TEMP/api.log"
+          exit 1
+
+      - name: Contract test
+        working-directory: node-sdk
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test:contract
+
+      - name: Show the API logs
+        if: failure()
+        run: tail -n 80 "$RUNNER_TEMP/api.log" || true
