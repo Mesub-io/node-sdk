@@ -40,8 +40,8 @@ export class AccessCache<T extends Revalidating> {
 
     /**
      * `mesub:access:<scope>:<plan>:<wallet>`, prefixed so it can share a Redis
-     * with anything. The scope (the client passes its project) keeps two
-     * projects sharing one store apart; without one, `mesub:access:<plan>:<wallet>`.
+     * with anything. The scope (the client passes a hash of its API key) keeps
+     * two projects sharing one store apart; without one, `mesub:access:<plan>:<wallet>`.
      */
     static key(wallet: string, plan: string, scope?: string): string {
         return scope === undefined

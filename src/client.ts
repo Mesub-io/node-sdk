@@ -69,10 +69,8 @@ export class Mesub {
     protected readonly tokens: TokenVerifier;
     /** Asked once per process; forgotten if it failed, so the next call asks again. */
     private projectIdOnce: Promise<string> | undefined;
-    /** The project id once `/v1/project` answered it: the cache scope from then on. */
-    private knownProjectId: string | undefined;
-    /** The cache scope while the project id cannot be asked. */
-    private readonly apiKeyScope: () => Promise<string>;
+    /** What the cache keys are scoped by: a hash of the API key, computed once. */
+    private readonly cacheScope: () => Promise<string>;
     private readonly guardTimeout: number;
 
     constructor(options: MesubOptions = {}) {
@@ -100,8 +98,8 @@ export class Mesub {
         if (!(this.guardTimeout > 0)) {
             throw new Error('guardTimeout must be a positive number of milliseconds.');
         }
-        let apiKeyScope: Promise<string> | undefined;
-        this.apiKeyScope = () => (apiKeyScope ??= hashScope(apiKey));
+        let cacheScope: Promise<string> | undefined;
+        this.cacheScope = () => (cacheScope ??= hashScope(apiKey));
         const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
         this.tokens = new TokenVerifier({
             baseUrl,
@@ -133,8 +131,6 @@ export class Mesub {
                     this.projectIdOnce = undefined;
                     throw missingProjectId();
                 }
-
-                this.knownProjectId = id;
                 return id;
             },
             (error: unknown) => {
@@ -144,27 +140,6 @@ export class Mesub {
         );
 
         return this.projectIdOnce;
-    }
-
-    /**
-     * What the cache keys are scoped by, so two projects sharing one store
-     * never read each other's answers: the project id, asked lazily (the
-     * token verifier usually asked already), in one attempt. While it cannot
-     * be asked, a hash of the API key, never the key itself.
-     */
-    private async cacheScope(deadline?: number): Promise<string> {
-        if (this.knownProjectId !== undefined) return this.knownProjectId;
-
-        try {
-            await this.projectId({
-                maxRetries: 0,
-                ...(deadline === undefined ? {} : { deadline }),
-            });
-        } catch {
-            // Mesub unreachable, or a bad key that /v1/access reports itself.
-        }
-
-        return this.knownProjectId ?? this.apiKeyScope();
     }
 
     /**
@@ -250,9 +225,7 @@ export class Mesub {
      */
     private async decideBy(wallet: string, plan: string, deadline?: number): Promise<Decision> {
         const call: CallOptions = deadline === undefined ? {} : { deadline };
-        // Once: while the project cannot be asked, asking again for the
-        // fallback would only wait for the same outage twice.
-        const scope = await this.cacheScope(deadline);
+        const scope = await this.cacheScope();
 
         try {
             const answer = await this.ask(wallet, plan, scope, call);
@@ -277,7 +250,12 @@ export class Mesub {
     }
 }
 
-/** `key-` and 16 hex characters of the API key's SHA-256: a scope, not a way back to the key. */
+/**
+ * `key-` and 16 hex characters of the API key's SHA-256: a scope, not a way
+ * back to the key. Two projects sharing one store never share a key, and it
+ * needs no call to Mesub, so it is the same after a restart in an outage. A
+ * rotated key starts a new scope; the old entries expire on their TTL.
+ */
 async function hashScope(apiKey: string): Promise<string> {
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(apiKey));
     const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0'));
