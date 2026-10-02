@@ -78,7 +78,7 @@
     "./package.json": "./package.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "packageManager": "pnpm@11.27.0",
   "scripts": {

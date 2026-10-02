@@ -110,6 +110,11 @@ jobs:
       - name: Publish
         env:
           TAG: ${{ github.ref_name }}
+          # Empty but for the very first publish: npm sets a trusted publisher
+          # only on a package that exists. A short-lived token, a secret of the
+          # `npm` environment, deleted after (RELEASING.md). npm tries OIDC
+          # first either way.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           case "$TAG" in
             *-*) npm publish --provenance --access public --tag next ;;

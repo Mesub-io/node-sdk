@@ -17,9 +17,17 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     strategy:
+      # One failing leg does not hide what the others say.
+      fail-fast: false
       matrix:
-        # Every Node the package says it supports.
-        node: [20, 22, 24]
+        # Every Node the package says it supports: 20 left with its end of life.
+        node: [22, 24]
+        express: [5]
+        # Express 4 too, the peer range being >=4, once: on the oldest Node.
+        include:
+          - node: 22
+            express: 4
+    name: quality (Node ${{ matrix.node }}, Express ${{ matrix.express }})
     steps:
       # Pinned by commit, as every action here: a tag can be moved to point
       # at other code, a commit cannot.
@@ -41,6 +49,13 @@ jobs:
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm build
+
+      # Swapped in after the build, for the tests only: the types stay
+      # Express 5's, and Nest keeps its own Express 5. Next needs no leg of
+      # its own: @mesub/node/next imports nothing from next, only the Web
+      # Request and Response every Node here has.
+      - if: matrix.express == 4
+        run: pnpm add -D express@^4.21.2
 
       # Then the Node under test, with no pnpm in the way: the tests and the
       # built package are what a merchant on that version runs.
