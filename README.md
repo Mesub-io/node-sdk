@@ -470,7 +470,47 @@ and `email`, trimmed and lowercased the same way, a `TypeError` otherwise. It
 also answers `expired` checkouts, which nobody signed: `access` is false on
 them. `status`, `paused` and `end_reason` read as on `access` (see
 [What the answer says](#what-the-answer-says)): a `cancelled` subscription is
-`ended`, with `end_reason: 'cancelled'`, once its end date passed.
+`ended`, with `end_reason: 'cancelled'`, once its end date passed. On a late
+one Mesub retries on its own, `next_retry_number` and `retries_allowed` say
+which retry comes at `next_retry_at` and out of how many: 2 and 3 before the
+second retry of three. Both are null otherwise (paid up, paused, stopped, on
+Free), and from a Mesub that does not serve them yet.
+
+### A subscription's payments
+
+```ts
+const { data, has_more, paid } = await mesub.subscriptions.attempts(id, { limit: 20 });
+// paid: { count: 14, amount: '139860000' }, since the subscription began
+for await (const attempt of mesub.subscriptions.allAttempts(id)) {
+    // every page, one call per page
+}
+```
+
+`attempts` answers that subscription's own pull attempts, newest first, 20 a
+page unless `limit` (1 to 100) says otherwise; `starting_after` takes the `id`
+of the last one of the previous page. Each one:
+
+| Field                             | What it says                                                                                             |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `id`, `attempted_at`              | Which one, and when.                                                                                     |
+| `outcome`                         | `PAID`, `SKIPPED`, `REJECTED` or `BLOCKED`; one newer than this release is handed back as is.            |
+| `reason`                          | Mesub's short reason, null on a paid one.                                                                |
+| `amount`                          | In the mint's smallest unit, as a string: what was asked for, and on a paid one what was paid.           |
+| `signature`                       | The transaction, null when nothing was sent.                                                             |
+| `retry`                           | True when the subscription had already failed on that period.                                            |
+| `retry_number`, `retries_allowed` | Which retry it was and out of how many, as recorded when it ran: 1 is the first after the missed charge. |
+| `period_start`                    | The start of the period it was for, null when Mesub recorded none.                                       |
+
+`retry_number` and `retries_allowed` are null on a first try, on a retry fired
+by hand on Dev or Business, and on an attempt that kept none. `paid` is
+counted by Mesub over every paid attempt of the subscription, not over the
+page: `count`, and `amount`, their sum in the mint's smallest unit.
+
+The attempts are those of the id asked. A subscription the wallet came back
+over (`superseded`) keeps its own, and the one that replaced it starts from
+its first pull: neither total includes the other's. From a Mesub that does not
+serve the route yet, `attempts` throws a `not_found` whose `apiCode` is null;
+an id Mesub does not hold is a `not_found` / `subscription_not_found`.
 
 ## Cancel, resume and close from your server
 
@@ -616,44 +656,68 @@ What they serve, under your mount point:
 | ------------------------------------------------------------ | ------------------------------------------- |
 | `GET /plans/:slug`                                           | The plan to show. Public.                   |
 | `GET /subscriptions`                                         | The customer's subscriptions.               |
-| `GET /subscriptions/:id`                                     | One of them, with its last payments.        |
+| `GET /subscriptions/:id`                                     | One of them, with its payments.             |
 | `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
 | `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
 
-`GET /subscriptions/:id` answers the subscription and what Mesub serves of its
-pull attempts, newest first:
+`GET /subscriptions/:id` answers the subscription, what Mesub pulls next, its
+own pull attempts, newest first, and what it paid since it began:
 
 ```json
 {
-    "subscription": { "id": "cmg1...", "status": "active", "plan": "pro", "...": "..." },
-    "payments": [
+    "subscription": { "id": "cmg1...", "status": "unpaid", "plan": "pro", "...": "..." },
+    "upcoming": [
         {
-            "attempted_at": "2026-10-01T09:00:04.512Z",
-            "outcome": "PAID",
+            "kind": "retry",
+            "due_at": "2026-10-03T09:00:00.000Z",
             "amount": "9990000",
-            "reason": null,
-            "signature": "5wHu1qwD4kLD..."
+            "amount_display": "9.99",
+            "retry_number": 2,
+            "retries_allowed": 3
         }
     ],
-    "listed_paid": { "count": 1, "amount": "9990000" },
+    "payments": [
+        {
+            "attempted_at": "2026-10-02T09:00:04.512Z",
+            "outcome": "SKIPPED",
+            "amount": "9990000",
+            "reason": "insufficient-balance",
+            "signature": null,
+            "retry": true,
+            "retry_number": 1,
+            "retries_allowed": 3,
+            "period_start": "2026-10-01T09:00:00.000Z"
+        }
+    ],
+    "paid": { "count": 14, "amount": "139860000" },
     "payments_error": null
 }
 ```
 
-- `payments` is the last attempts only, five at most today: not a history.
-  `listed_paid` counts and sums the paid ones among those listed, in the
-  mint's smallest unit: it is not what was paid since the beginning.
-- `outcome` is `PAID`, `SKIPPED`, `REJECTED` or `BLOCKED`; one newer than this
-  release is handed on as is. `signature` is null when nothing was sent.
-- `payments` is null, with a `payments_error` of `{ code, message }`, when they
-  could not be read: the subscription is still answered, with a 200. Mesub
-  serves attempts for the current subscription of a wallet on a plan, so an
-  older one the wallet came back over answers `not_the_current_subscription`;
-  a refusal of Mesub's is named by its own code (`rate_limited`, ...).
-- A checkout that never started (`pending`, `expired`, `failed`) answers
-  `payments: []` without asking Mesub: nothing is pulled before it starts.
+- `upcoming` holds one entry at most: the next `charge` of a running
+  subscription or the next `retry` of a late one, at the plan's price (null
+  when the plan could not be read). On a retry, `retry_number` and
+  `retries_allowed` say "next try 2 / 3"; they are null on a charge, and when
+  Mesub does not say.
+- `payments` is this subscription's own attempts, the first page: twenty at
+  most. Each is what `subscriptions.attempts` answers (see
+  [A subscription's payments](#a-subscriptions-payments)), without its `id`.
+  `outcome` may be one newer than this release, handed on as is.
+- `paid` is Mesub's own count over all of the subscription's attempts, not a
+  sum of those listed: how many were paid, and how much, in the mint's
+  smallest unit.
+- `payments` and `paid` are null, with a `payments_error` of
+  `{ code, message }`, when they could not be read: the subscription is still
+  answered, with a 200, and a refusal of Mesub's is named by its own code
+  (`rate_limited`, ...).
+- A Mesub that does not serve the attempts route yet is read the older way:
+  the last five attempts at most, with `retry`, `retry_number`,
+  `retries_allowed` and `period_start` null, and `paid: null`, since five
+  attempts are no total. There, a subscription the wallet came back over
+  answers `payments: null` with `not_the_current_subscription`, and a plan
+  without a slug `plan_without_slug`.
 
 ## Webhooks
 
@@ -916,7 +980,10 @@ the next call while the outage fallback still has them; pass
 wallet granted is not found by its external id. `subscriptions.create` then
 `submit` land at once and grant the plan; `addSubscription` adds one for
 `retrieve` and `list`, and `setAttempts(id, [...])` gives it pull attempts,
-answered by `access` with `{ attempts: true }` and by the widget routes. `cancel`, `resume` and `close` answer a made-up
+answered by `subscriptions.attempts` with their `paid` total, by `access`
+with `{ attempts: true }` (the five newest) and by the widget routes;
+`new FakeMesub({ attemptsRoute: false })` acts as a Mesub that does not serve
+`subscriptions.attempts` yet. `cancel`, `resume` and `close` answer a made-up
 transaction, and their confirms land at once with any `signature`: the
 subscription and its access answers move as Mesub's would, and a step its
 status does not allow is refused with Mesub's code (`close_too_early`,

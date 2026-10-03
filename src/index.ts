@@ -18,6 +18,7 @@ export type {
 export type { Plan, Plans, PlanStatus } from './plans.js';
 export type { Subscriptions } from './subscriptions.js';
 export type {
+    AttemptsParams,
     ConfirmOptions,
     ConfirmParams,
     ConfirmResult,
@@ -31,6 +32,8 @@ export type {
     SubscribeCosts,
     SubscribeParams,
     SubscribeTransaction,
+    SubscriptionAttempt,
+    SubscriptionAttemptList,
     WalletTransaction,
 } from './subscriptions.js';
 export type { RequestOptions } from './transport.js';

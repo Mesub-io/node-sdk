@@ -122,16 +122,115 @@ describe('FakeMesub', () => {
             { outcome: 'REJECTED', reason: 'insufficient-balance' },
         ]);
 
-        expect(set[0]).toMatchObject({ outcome: 'PAID', reason: null, amount: '9990000' });
+        expect(set[0]).toMatchObject({
+            id: expect.stringMatching(/^att_fake_/),
+            outcome: 'PAID',
+            reason: null,
+            amount: '9990000',
+            retry: false,
+            retry_number: null,
+            retries_allowed: null,
+            period_start: null,
+        });
+        // /v1/access serves the five fields it always did.
+        const served = set.map(({ outcome, reason, amount, attempted_at, signature }) => ({
+            outcome,
+            reason,
+            amount,
+            attempted_at,
+            signature,
+        }));
         for (const customer of [WALLET, { external_id: 'user_42' }]) {
-            await expect(mesub.access(customer, 'pro', { attempts: true })).resolves.toMatchObject({
-                wallet: WALLET,
-                subscribed_since: confirmed_at,
-                attempts: set,
-            });
+            const answer = await mesub.access(customer, 'pro', { attempts: true });
+
+            expect(answer).toMatchObject({ wallet: WALLET, subscribed_since: confirmed_at });
+            expect(answer.attempts).toEqual(served);
         }
         expect(await mesub.access(WALLET, 'pro')).not.toHaveProperty('attempts');
         expect(() => fake.setAttempts('sub_nope', [])).toThrow(/sub_nope/);
+    });
+
+    it('answers a subscription its own attempts, paged, with the total over all of them', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        const other = fake.addSubscription({ wallet: WALLET, plan: 'team' });
+        const day = (n: number) => new Date(Date.UTC(2026, 8, n)).toISOString();
+        const set = fake.setAttempts(id, [
+            { attempted_at: day(1) },
+            { attempted_at: day(3), retry: true, retry_number: 2, retries_allowed: 3 },
+            { attempted_at: day(2), outcome: 'SKIPPED', reason: 'insufficient-balance' },
+            ...[4, 5, 6, 7].map((n) => ({ attempted_at: day(n) })),
+        ]);
+
+        // Newest first, whatever the order handed.
+        expect(set.map((each) => each.attempted_at)).toEqual(
+            [7, 6, 5, 4, 3, 2, 1].map((n) => day(n)),
+        );
+        const first = await mesub.subscriptions.attempts(id, { limit: 3 });
+        const second = await mesub.subscriptions.attempts(id, {
+            limit: 3,
+            starting_after: first.data.at(-1)!.id,
+        });
+        const all = [];
+        for await (const each of mesub.subscriptions.allAttempts(id, { limit: 3 })) all.push(each);
+
+        expect(first).toEqual({
+            data: set.slice(0, 3),
+            has_more: true,
+            paid: { count: 6, amount: String(6 * 9_990_000) },
+        });
+        expect(second.data).toEqual(set.slice(3, 6));
+        expect(second.paid).toEqual(first.paid);
+        expect(all).toEqual(set);
+        expect(set[4]).toMatchObject({ retry: true, retry_number: 2, retries_allowed: 3 });
+        // /v1/access serves five at most, as Mesub does.
+        expect((await mesub.access(WALLET, 'pro', { attempts: true })).attempts).toHaveLength(5);
+        // A subscription nothing was set for has none.
+        await expect(mesub.subscriptions.attempts(other.id)).resolves.toEqual({
+            data: [],
+            has_more: false,
+            paid: { count: 0, amount: '0' },
+        });
+    });
+
+    it('refuses the attempts of an id it does not hold, a cursor that is none, a limit past 100', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        fake.setAttempts(id, [{}]);
+
+        await expect(mesub.subscriptions.attempts('sub_nope')).rejects.toMatchObject({
+            status: 404,
+            apiCode: 'subscription_not_found',
+        });
+        await expect(
+            mesub.subscriptions.attempts(id, { starting_after: 'att_nope' }),
+        ).rejects.toMatchObject({ status: 400, apiCode: 'invalid_request' });
+        await expect(mesub.subscriptions.attempts(id, { limit: 101 })).rejects.toMatchObject({
+            status: 400,
+        });
+
+        fake.reset();
+        const again = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        expect((await mesub.subscriptions.attempts(again.id)).data).toEqual([]);
+    });
+
+    it('acts as a Mesub that predates the attempts route when told to', async () => {
+        const fake = new FakeMesub({ attemptsRoute: false });
+        const mesub = fake.client();
+        const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        fake.setAttempts(id, [{}]);
+
+        for (const asked of [id, 'sub_nope']) {
+            await expect(mesub.subscriptions.attempts(asked)).rejects.toMatchObject({
+                status: 404,
+                code: 'not_found',
+                apiCode: null,
+            });
+        }
+        // The older way still answers.
+        expect((await mesub.access(WALLET, 'pro', { attempts: true })).attempts).toHaveLength(1);
     });
 
     it('answers attempts when asked', async () => {

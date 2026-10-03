@@ -1,4 +1,4 @@
-import type { Customer, EndReason, PaymentStatus } from './answer.js';
+import type { Customer, EndReason, PaymentStatus, PullOutcome } from './answer.js';
 import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
 import { type QueryValue, type RequestOptions, type Transport, sleep } from './transport.js';
@@ -6,6 +6,7 @@ import {
     confirmResultFrom,
     serverSubscriptionFrom,
     serverSubscriptionListFrom,
+    subscriptionAttemptListFrom,
     submitResultFrom,
     subscribeTransactionFrom,
     walletTransactionFrom,
@@ -66,6 +67,14 @@ export interface ServerSubscription {
      * that predates it.
      */
     retry_deadline: string | null;
+    /**
+     * The retry due at `next_retry_at` and how many the missed period gets
+     * (Mesub-io/backend#289): 2 and 3 before the second retry of three. Both
+     * null unless Mesub retries on its own: not late, paused, stopped, on
+     * Free. Read as null from a back that predates them.
+     */
+    next_retry_number: number | null;
+    retries_allowed: number | null;
     /** When access ends unless a pull renews it; null while `access` is false. */
     access_until: string | null;
     created_at: string;
@@ -142,6 +151,59 @@ export interface ServerSubscriptionList {
     data: ServerSubscription[];
     /** Ask for the next page with `starting_after` set to the last id of this one. */
     has_more: boolean;
+}
+
+/**
+ * One pull attempt of a subscription, as `GET /v1/subscriptions/:id/attempts`
+ * answers it (Mesub-io/backend#289): an attempt of `/v1/access`, with its id,
+ * whether it was a retry and the period it was for.
+ */
+export interface SubscriptionAttempt {
+    id: string;
+    attempted_at: string;
+    /** One of `PullOutcome` today; a newer one is handed on as is. */
+    outcome: PullOutcome;
+    /** Mesub's short reason, null on a paid one. */
+    reason: string | null;
+    /**
+     * In the mint's smallest unit, as a string. What was asked for; on a
+     * `PAID` one that is what the transfer moved.
+     */
+    amount: string;
+    /** Null when nothing was sent. */
+    signature: string | null;
+    /** The subscription had already failed on this period. */
+    retry: boolean;
+    /**
+     * On a retry of the plan's, which one and out of how many, as recorded
+     * when it ran: 1 is the first after the missed charge. Both null on a
+     * first try, on a hand retry on Dev or Business, on an attempt that kept
+     * none, and from a back that does not serve them.
+     */
+    retry_number: number | null;
+    retries_allowed: number | null;
+    /** The start of the period it was for; null when Mesub recorded none. */
+    period_start: string | null;
+}
+
+/** One page of a subscription's attempts, newest first, and what it paid in all. */
+export interface SubscriptionAttemptList {
+    data: SubscriptionAttempt[];
+    /** Ask for the next page with `starting_after` set to the last id of this one. */
+    has_more: boolean;
+    /**
+     * Its `PAID` attempts since it began and the sum of what they moved, in
+     * the mint's smallest unit: counted by Mesub over all of them, not this page.
+     */
+    paid: { count: number; amount: string };
+}
+
+/** Which page of a subscription's attempts. */
+export interface AttemptsParams {
+    /** 1 to 100, 20 by default. */
+    limit?: number;
+    /** The id of the last attempt of the previous page. */
+    starting_after?: string;
 }
 
 export interface SubscribeParams {
@@ -628,6 +690,64 @@ export class Subscriptions {
             yield* page.data;
         }
     }
+
+    /**
+     * That subscription's own pull attempts, newest first, one page at a
+     * time, and `paid`: what it paid since it began, whatever the page.
+     * `allAttempts` walks every page.
+     *
+     * The id asked and no other: a subscription the wallet came back over
+     * (`superseded`) keeps its own payments, and the one that replaced it
+     * starts from its first pull. Needs a Mesub that serves the route
+     * (Mesub-io/backend#289): from an older one it throws a `not_found`
+     * whose `apiCode` is null, where an id it does not hold is a `not_found`
+     * whose `apiCode` is `subscription_not_found`.
+     */
+    async attempts(
+        id: string,
+        params: AttemptsParams = {},
+        options: RequestOptions = {},
+    ): Promise<SubscriptionAttemptList> {
+        const { limit, starting_after } = params;
+
+        const path = `${pathOf(id)}/attempts`;
+
+        try {
+            return subscriptionAttemptListFrom(
+                await this.#transport.get(path, { limit, starting_after }, options),
+            );
+        } catch (error) {
+            if (!(error instanceof MesubError) || !routeMissing(error)) throw error;
+
+            // Said for what it is, not as a wrong baseUrl.
+            throw new MesubError(
+                'This Mesub does not serve GET /v1/subscriptions/:id/attempts yet.',
+                { status: 404, code: 'not_found', body: error.body, cause: error },
+            );
+        }
+    }
+
+    /**
+     * Every attempt `attempts` would answer, page after page, for `for await`.
+     * Each page is one call, made when the previous one is used up.
+     */
+    async *allAttempts(
+        id: string,
+        params: AttemptsParams = {},
+        options: RequestOptions = {},
+    ): AsyncGenerator<SubscriptionAttempt, void, undefined> {
+        let page = await this.attempts(id, params, options);
+        yield* page.data;
+
+        while (page.has_more && page.data.length > 0) {
+            page = await this.attempts(
+                id,
+                { ...params, starting_after: page.data.at(-1)!.id },
+                options,
+            );
+            yield* page.data;
+        }
+    }
 }
 
 function pathOf(id: string): string {
@@ -639,6 +759,18 @@ function pathOf(id: string): string {
         });
     }
     return `/v1/subscriptions/${encodeURIComponent(id)}`;
+}
+
+/** Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never a subscription's. */
+function routeMissing(error: MesubError): boolean {
+    const { message } = (error.body ?? {}) as { message?: unknown };
+
+    return (
+        error.status === 404 &&
+        error.apiCode === null &&
+        typeof message === 'string' &&
+        message.startsWith('Cannot GET /')
+    );
 }
 
 /**

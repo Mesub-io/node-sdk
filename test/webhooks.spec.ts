@@ -50,6 +50,8 @@ const SUBSCRIPTION = {
     next_charge_at: '2026-01-31T00:00:00.000Z',
     next_retry_at: null,
     retry_deadline: null,
+    next_retry_number: null,
+    retries_allowed: null,
     access_until: '2026-01-31T00:00:00.000Z',
     created_at: '2026-01-01T00:00:00.000Z',
     confirmed_at: '2026-01-01T00:00:00.000Z',
@@ -128,6 +130,17 @@ describe('verifyWebhook', () => {
     // `data` is a subscription: `paused` and `end_reason` are read like retrieve's.
     it('reads a body from a back that predates paused and end_reason', async () => {
         const { paused: _, end_reason: __, ...older } = SUBSCRIPTION;
+        const raw = body('subscription.cancelled', {}, older as typeof SUBSCRIPTION);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
+    });
+
+    it('reads a body from a back that predates the retry numbers', async () => {
+        const { next_retry_number: _, retries_allowed: __, ...older } = SUBSCRIPTION;
         const raw = body('subscription.cancelled', {}, older as typeof SUBSCRIPTION);
 
         const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {

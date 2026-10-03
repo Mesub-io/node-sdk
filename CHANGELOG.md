@@ -91,6 +91,14 @@ The first version published to npm. Requires Node 22 or later.
 
 - `subscriptions.create`, `submit`, `retrieve`, `list` and `listAll`, over
   `/v1/subscriptions` (#61).
+- `subscriptions.attempts(id, { limit, starting_after })` answers a
+  subscription's own pull attempts, newest first, each with its `id`, `retry`,
+  `retry_number`, `retries_allowed` and `period_start`, and `paid`, how many
+  were paid and how much since it began, counted by Mesub over all of them.
+  `allAttempts` walks every page. A subscription carries `next_retry_number`
+  and `retries_allowed`: the retry due at `next_retry_at` and out of how many,
+  null when Mesub retries nothing on its own. Both are read as null from a
+  Mesub that predates them. Needs Mesub-io/backend#290 (#91).
 - `submit` sends the same request again when a send got no answer, three
   sends at most within its `budget`, then reads the subscription back rather
   than guessing its outcome; a `MesubSubmitError` carries what it found (#61).
@@ -119,14 +127,18 @@ The first version published to npm. Requires Node 22 or later.
   customer's subscriptions, and each step of subscribing, cancelling, resuming
   and closing. Who is asking comes from your own auth through `customer`; a
   subscription that is not theirs answers 404 (#86).
-- `GET /subscriptions/:id` answers one subscription of the customer with its
-  last pull attempts, newest first, as `payments`: date, outcome, amount,
-  reason and transaction signature, five at most. `listed_paid` counts and
-  sums the paid ones among them: not a total since the subscription began.
-  When they cannot be read, or are those of a newer subscription on the same
-  wallet and plan, `payments` is null and `payments_error` says why; the
-  subscription is still answered. In `@mesub/node/testing`,
-  `fake.setAttempts(id, [...])` gives a subscription its attempts (#89).
+- `GET /subscriptions/:id` answers one subscription of the customer with what
+  Mesub pulls next as `upcoming` (a retry carries `retry_number` and
+  `retries_allowed`), its own pull attempts, newest first, as `payments`
+  (date, outcome, amount, reason, transaction signature, `retry`,
+  `retry_number`, `retries_allowed` and `period_start`, twenty at most), and
+  `paid`, the count and the sum Mesub holds for every paid attempt since the
+  subscription began. When they cannot be read, both are null and
+  `payments_error` says why; the subscription is still answered. From a Mesub
+  that does not serve the attempts route yet, the last five are read through
+  `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
+  `fake.setAttempts(id, [...])` gives a subscription its attempts, and
+  `attemptsRoute: false` acts as that older Mesub (#89, #91).
 
 ### Webhooks
 
