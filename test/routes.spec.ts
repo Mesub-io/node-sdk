@@ -2,7 +2,7 @@ import express from 'express';
 import request from 'supertest';
 
 import { mesubRoutes } from '../src/express.js';
-import type { Mesub } from '../src/index.js';
+import { Mesub } from '../src/index.js';
 import { mesubRouteHandlers } from '../src/next.js';
 import {
     checkWidgetOptions,
@@ -434,7 +434,170 @@ describe('the widget routes: one subscription in full', () => {
         payments: Array<Record<string, unknown>> | null;
         listed_paid: { count: number; amount: string | null } | null;
         payments_error: { code: string; message: string } | null;
+        upcoming: Array<Record<string, unknown>>;
     }
+
+    const SOON = '2026-11-01T09:00:00.000Z';
+    const LATER = '2026-11-03T09:00:00.000Z';
+
+    /** A subscription of Ada's in that state, and what its detail answers. */
+    async function detailOf(fields: Record<string, unknown>) {
+        const { call, fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            ...fields,
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.status).toBe(200);
+        return { body: answer.body as Detail, fake, id };
+    }
+
+    it('announces the next charge of a running one, at the price of its plan', async () => {
+        const { body } = await detailOf({ status: 'active', next_charge_at: SOON });
+
+        expect(body.upcoming).toEqual([
+            { kind: 'charge', due_at: SOON, amount: '9990000', amount_display: '9.99' },
+        ]);
+    });
+
+    it('announces the next retry of a late one, as a retry', async () => {
+        const { body } = await detailOf({
+            status: 'unpaid',
+            payment_status: 'late',
+            next_retry_at: SOON,
+            // Not a pull: never read for a late one.
+            next_charge_at: LATER,
+        });
+
+        expect(body.upcoming).toEqual([
+            { kind: 'retry', due_at: SOON, amount: '9990000', amount_display: '9.99' },
+        ]);
+    });
+
+    it('announces nothing for a late one on Free, and hands on its deadline as it is', async () => {
+        const { body, fake, id } = await detailOf({
+            status: 'unpaid',
+            payment_status: 'late',
+            access: false,
+            next_retry_at: null,
+            retry_deadline: SOON,
+        });
+
+        expect(body.upcoming).toEqual([]);
+        expect(body.subscription).toMatchObject({ retry_deadline: SOON, next_retry_at: null });
+        // No entry, so no price to read.
+        expect(calls(fake).sort()).toEqual(['GET /v1/access', `GET /v1/subscriptions/${id}`]);
+    });
+
+    it('announces a retry on Free while one is due before the deadline', async () => {
+        const { body } = await detailOf({
+            status: 'unpaid',
+            next_retry_at: SOON,
+            retry_deadline: LATER,
+        });
+
+        expect(body.upcoming).toMatchObject([{ kind: 'retry', due_at: SOON }]);
+    });
+
+    it.each([
+        ['a cancelled', { status: 'cancelled', access_until: SOON }],
+        ['a stopped', { status: 'stopped', access: false }],
+        ['an ended', { status: 'ended', end_reason: 'cancelled', access: false }],
+        ['a superseded', { status: 'superseded', access: false }],
+        ['a pending', { status: 'pending', access: false, confirmed_at: null }],
+        ['an expired', { status: 'expired', access: false, confirmed_at: null }],
+        ['a failed', { status: 'failed', access: false, confirmed_at: null }],
+        ['a status newer than this release for', { status: 'frozen' }],
+        ['a parked active', { status: 'active', paused: true }],
+        ['a parked unpaid', { status: 'unpaid', paused: true }],
+    ])('announces nothing for %s one, whatever dates it carries', async (_name, fields) => {
+        const { body, fake } = await detailOf({
+            ...fields,
+            next_charge_at: SOON,
+            next_retry_at: SOON,
+        });
+
+        expect(body.upcoming).toEqual([]);
+        expect(calls(fake)).not.toContain('GET /v1/plans/pro');
+    });
+
+    it.each([
+        ['active', { status: 'active', next_charge_at: null, next_retry_at: SOON }],
+        ['unpaid', { status: 'unpaid', next_retry_at: null, next_charge_at: SOON }],
+    ])('announces nothing for an %s one with no date of its own', async (_name, fields) => {
+        const { body } = await detailOf(fields);
+
+        expect(body.upcoming).toEqual([]);
+    });
+
+    it.each([
+        ['Mesub no longer has', { plan: 'gone' }],
+        ['without a slug', { plan: null }],
+    ])('announces the charge without an amount for a plan %s', async (_name, fields) => {
+        const { body } = await detailOf({ next_charge_at: SOON, ...fields });
+
+        expect(body.upcoming).toEqual([
+            { kind: 'charge', due_at: SOON, amount: null, amount_display: null },
+        ]);
+    });
+
+    it('announces the charge without an amount when Mesub refuses the plan alone', async () => {
+        const { fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            confirmed_at: at(30),
+            next_charge_at: SOON,
+        });
+        fake.setAttempts(id, [{ attempted_at: at(30) }]);
+        const mesub = new Mesub({
+            apiKey: fake.apiKey,
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: (input, init) =>
+                String(input).includes('/v1/plans/')
+                    ? Promise.resolve(
+                          Response.json(
+                              { statusCode: 500, code: 'internal_error', message: 'Broken.' },
+                              { status: 500 },
+                          ),
+                      )
+                    : fake.fetch(input, init),
+        });
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({
+            upcoming: [{ kind: 'charge', due_at: SOON, amount: null, amount_display: null }],
+            // The payments were read all the same.
+            payments: [{ outcome: 'PAID' }],
+            payments_error: null,
+        });
+    });
+
+    it('reads the price of a plan the widget is kept off: the subscription is theirs', async () => {
+        const { call, fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'team',
+            external_id: 'user_ada',
+            next_charge_at: SOON,
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` }, { plans: ['pro'] });
+
+        expect((answer.body as Detail).upcoming).toMatchObject([{ amount: '9990000' }]);
+    });
 
     it('answers the subscription and its payments, newest first', async () => {
         const { client, call, fake } = setup();
@@ -490,8 +653,12 @@ describe('the widget routes: one subscription in full', () => {
         expect(body.listed_paid).toEqual({ count: 2, amount: '19980000' });
         expect(body.payments_error).toBeNull();
         // Its attempts are read by its own wallet and plan, whoever asks.
-        expect(calls(fake, before)).toEqual([`GET /v1/subscriptions/${id}`, 'GET /v1/access']);
-        expect(fake.requests.at(-1)?.query).toEqual({
+        expect(calls(fake, before).sort()).toEqual([
+            'GET /v1/access',
+            'GET /v1/plans/pro',
+            `GET /v1/subscriptions/${id}`,
+        ]);
+        expect(fake.requests.find((each) => each.path === '/v1/access')?.query).toEqual({
             wallet: WALLET,
             plan: 'pro',
             attempts: 'true',
@@ -777,6 +944,8 @@ describe('the widget routes: one subscription in full', () => {
                 payments: null,
                 listed_paid: null,
                 payments_error: { code, message: expect.any(String) },
+                // The date is the subscription's own; the price could not be read.
+                upcoming: [{ kind: 'charge', amount: null, amount_display: null }],
             });
             expect(JSON.stringify(answer)).not.toContain(fake.apiKey);
         },
@@ -947,6 +1116,7 @@ describe('mesubRoutes for Express', () => {
         expect(response.body).toMatchObject({
             subscription: { id },
             payments: [{ outcome: 'PAID', signature: 'sig_1' }],
+            upcoming: [{ kind: 'charge', amount: '9990000', amount_display: '9.99' }],
             listed_paid: { count: 1, amount: '9990000' },
             payments_error: null,
         });
@@ -1055,6 +1225,7 @@ describe('mesubRouteHandlers for Next', () => {
         expect(JSON.parse(text)).toMatchObject({
             subscription: { id },
             payments: [{ signature: 'sig_1' }, { outcome: 'BLOCKED' }],
+            upcoming: [{ kind: 'charge', due_at: expect.any(String), amount: '9990000' }],
             listed_paid: { count: 1, amount: '9990000' },
         });
         expect(text).not.toContain('user_ada');

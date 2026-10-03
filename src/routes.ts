@@ -131,6 +131,8 @@ export interface WidgetPayment {
 /** What `GET /subscriptions/:id` answers. */
 export interface WidgetSubscriptionDetail {
     subscription: Omit<ServerSubscription, 'email' | 'external_id'>;
+    /** What Mesub pulls next, soonest first: one entry at most, none when nothing is due. */
+    upcoming: WidgetUpcoming[];
     /**
      * The last pull attempts, newest first: as many as Mesub serves, five
      * today, so never a full history. Null when they could not be read or
@@ -147,6 +149,60 @@ export interface WidgetSubscriptionDetail {
     payments_error: { code: string; message: string } | null;
 }
 
+/** The one pull Mesub announces next for a subscription. */
+export interface WidgetUpcoming {
+    /** `charge` at the due date of a running one, `retry` of a missed one. */
+    kind: 'charge' | 'retry';
+    due_at: string;
+    /**
+     * The plan's price in the mint's smallest unit, and as a person counts
+     * it. Null when the plan could not be read, never guessed.
+     */
+    amount: string | null;
+    amount_display: string | null;
+}
+
+/**
+ * What Mesub will pull next: the next charge of a running subscription, the
+ * next retry of a late one, and nothing for any other, a parked seat
+ * included. One event at most: later periods are not served, so not computed.
+ * On Free a late one has no retry of Mesub's, only `retry_deadline`.
+ */
+async function upcomingOf(
+    client: Mesub,
+    subscription: ServerSubscription,
+): Promise<WidgetUpcoming[]> {
+    const { status, plan } = subscription;
+    const next =
+        status === 'active'
+            ? { kind: 'charge' as const, due_at: subscription.next_charge_at }
+            : status === 'unpaid'
+              ? { kind: 'retry' as const, due_at: subscription.next_retry_at }
+              : null;
+
+    // A date on any other status is no pull Mesub will run.
+    if (!next || next.due_at === null || subscription.paused) return [];
+
+    let price: { amount: string; amount_display: string } | null = null;
+
+    if (plan !== null && SLUG.test(plan)) {
+        try {
+            price = await client.plans.retrieve(plan);
+        } catch (error) {
+            if (!(error instanceof MesubError)) throw error;
+        }
+    }
+
+    return [
+        {
+            kind: next.kind,
+            due_at: next.due_at,
+            amount: price?.amount ?? null,
+            amount_display: price?.amount_display ?? null,
+        },
+    ];
+}
+
 /** The statuses nothing is ever pulled in: a checkout that never started. */
 const NEVER_STARTED = ['pending', 'expired', 'failed'];
 
@@ -160,7 +216,7 @@ function payment(attempt: ServedAttempt): WidgetPayment {
     };
 }
 
-type Payments = Omit<WidgetSubscriptionDetail, 'subscription'>;
+type Payments = Omit<WidgetSubscriptionDetail, 'subscription' | 'upcoming'>;
 
 function listed(payments: WidgetPayment[]): Payments {
     const paid = payments.filter((each) => each.outcome === 'PAID');
@@ -271,9 +327,14 @@ export async function handleWidget(
             const subscription = await client.subscriptions.retrieve(id);
             if (!isTheirs(subscription, asked)) return NO_SUBSCRIPTION();
 
+            const [upcoming, payments] = await Promise.all([
+                upcomingOf(client, subscription),
+                paymentsOf(client, subscription),
+            ]);
             const detail: WidgetSubscriptionDetail = {
                 subscription: shown(subscription),
-                ...(await paymentsOf(client, subscription)),
+                upcoming,
+                ...payments,
             };
 
             return { status: 200, body: detail };
