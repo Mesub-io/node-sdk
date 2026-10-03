@@ -133,10 +133,21 @@ asking. No Mesub token is read then, and nothing of `@mesub/react` is needed.
 ```ts
 import { requirePlan } from '@mesub/node/express';
 
+// Once, for TypeScript: what your login leaves on the request.
+declare global {
+    namespace Express {
+        interface Request {
+            user?: { id: string };
+        }
+    }
+}
+
 app.get(
     '/api/reports',
     yourLogin,
-    requirePlan('pro', { customer: (req) => ({ external_id: req.user.id }) }),
+    requirePlan('pro', {
+        customer: (req) => (req.user ? { external_id: req.user.id } : null),
+    }),
     (req, res) => res.json(buildReport(res.locals.mesub)),
 );
 ```
@@ -156,11 +167,24 @@ export const GET = withMesub(async (request, mesub) => Response.json(await repor
 
 ```ts
 // Nest
-@UseGuards(YourAuthGuard, RequirePlan('pro', { customer: (req) => ({ external_id: req.user.id }) }))
+import { type MesubRequest, RequirePlan } from '@mesub/node/nest';
+
+// The request as your own guard leaves it.
+interface AuthedRequest extends MesubRequest {
+    user?: { id: string };
+}
+
+@UseGuards(
+    YourAuthGuard,
+    RequirePlan<AuthedRequest>('pro', {
+        customer: (req) => (req.user ? { external_id: req.user.id } : null),
+    }),
+)
 ```
 
 - Return a customer as in [Who to ask about](#who-to-ask-about): `{ external_id }`,
   a wallet, or `{ email }`. It may be async.
+- The id is a string: with numeric ids, pass `String(user.id)`.
 - Return `null` or `undefined` when nobody is signed in: the guard answers 401.
   402 and 503 are answered as with a token.
 - Anything else (two identifiers, an empty string) is thrown as a `TypeError`:
@@ -342,6 +366,26 @@ const { wallet } = await mesub.verifyToken(token!);
 await mesub.hasAccess(wallet, 'pro'); // true or false, for a guard
 await mesub.access(wallet, 'pro'); // the full answer: status, dates, next charge
 ```
+
+## Show your plans
+
+For a pricing page, read your plans from Mesub rather than writing their
+price down twice:
+
+```ts
+const plans = await mesub.plans.list(); // sorted by slug
+const pro = await mesub.plans.retrieve('pro');
+
+// pro.amount_display "9.99", pro.symbol "USDC", pro.period_hours 720
+// pro.available: whether it takes new subscribers now
+```
+
+- `available` is false on a plan that is ending (`status: 'sunset'`, with
+  `ends_at`) and when your project is full: show "Subscribe" only when true.
+- `amount` is the price in the token's base units, a string; `amount_display`
+  is the same as a person reads it.
+- A slug your project lacks throws a `MesubError` `plan_not_found`.
+- Nothing is cached: call it where you render, and cache it your way.
 
 ## Subscribe from your server
 

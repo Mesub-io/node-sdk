@@ -21,6 +21,7 @@ import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'j
 import type { AccessAnswer, Customer } from './answer.js';
 import { Mesub, type MesubOptions } from './client.js';
 import { type Asked, customerOf } from './customer.js';
+import type { Plan } from './plans.js';
 import type {
     ServerSubscription,
     ServerSubscriptionList,
@@ -38,9 +39,10 @@ export interface FakeMesubOptions {
     projectId?: string;
     /**
      * The plans that exist: any other slug is answered 404 `plan_not_found`.
-     * By default every slug exists.
+     * By default every slug exists. A slug alone, or the fields `plans.list`
+     * and `plans.retrieve` should answer for it: the rest is filled in.
      */
-    plans?: string[];
+    plans?: Array<string | (Partial<Plan> & { slug: string })>;
     /** What `webhook()` signs with, and `client()` verifies with. Defaults to a fixed `whsec_` secret. */
     webhookSecret?: string;
 }
@@ -164,6 +166,7 @@ export class FakeMesub {
     readonly fetch: typeof globalThis.fetch;
 
     readonly #plans: Set<string> | null;
+    readonly #planList: Plan[];
     readonly #answers = new Map<string, AccessAnswer>();
     #subscriptions: ServerSubscription[] = [];
     /** The subscriptions a cancel, resume or close transaction was built for, by id. */
@@ -176,7 +179,11 @@ export class FakeMesub {
         this.baseUrl = (options.baseUrl ?? 'https://api.mesub.test').replace(/\/+$/, '');
         this.apiKey = options.apiKey ?? 'SUB_test_fake';
         this.projectId = options.projectId ?? 'proj_test';
-        this.#plans = options.plans ? new Set(options.plans) : null;
+        const plans = options.plans?.map((plan) =>
+            typeof plan === 'string' ? fakePlan(plan) : fakePlan(plan.slug, plan),
+        );
+        this.#plans = plans ? new Set(plans.map((plan) => plan.slug)) : null;
+        this.#planList = (plans ?? []).sort((a, b) => a.slug.localeCompare(b.slug));
         this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
         this.fetch = (input, init) => this.#handle(input, init);
     }
@@ -375,6 +382,21 @@ export class FakeMesub {
                 ...(retryable !== undefined && { retryable }),
                 ...(retryAfter !== undefined && { retryAfter }),
             });
+        }
+
+        if (method === 'GET' && path === '/v1/plans') {
+            return Response.json({ plans: this.#planList });
+        }
+        const slug = /^\/v1\/plans\/([^/]+)$/.exec(path)?.[1];
+        if (method === 'GET' && slug !== undefined) {
+            const plan =
+                this.#planList.find((each) => each.slug === slug) ??
+                // No list given: every slug exists, as for access.
+                (this.#plans === null ? fakePlan(slug) : undefined);
+
+            return plan
+                ? Response.json(plan)
+                : error(404, 'plan_not_found', `No plan under slug ${slug}`);
         }
 
         if (method === 'GET' && path === '/v1/access') return this.#access(query);
@@ -762,6 +784,28 @@ function withAttempts(answer: AccessAnswer, attempts: boolean): AccessAnswer {
 }
 
 /** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
+/** A plan as `/v1/plans` serves one: 9.99 USDC a month on devnet, unless told otherwise. */
+function fakePlan(slug: string, over: Partial<Plan> = {}): Plan {
+    return {
+        slug,
+        name: slug,
+        description: null,
+        project_name: 'Test project',
+        logo_url: null,
+        amount: '9990000',
+        amount_display: '9.99',
+        decimals: 6,
+        symbol: 'USDC',
+        mint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+        period_hours: 720,
+        network: 'devnet',
+        status: 'active',
+        available: true,
+        ends_at: null,
+        ...over,
+    };
+}
+
 function error(
     status: number,
     code: string,
