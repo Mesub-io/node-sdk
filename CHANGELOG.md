@@ -21,8 +21,16 @@ The first version published to npm. Requires Node 22 or later.
 - Answers are cached for the `revalidate_after` Mesub sends, in memory (an LRU
   of 10 000) or in a store of yours such as Redis, scoped by a hash of the API
   key so projects sharing a store stay apart (#12, #26, #54).
+- `CacheStore` gets an optional `delete`, so a store of two methods still
+  compiles: the memory store and the README's Redis example implement it. A
+  store without it gets an answer it should drop rewritten as stale instead
+  (#70).
 - When Mesub is down, the last answer is served for up to `maxStaleMs`
   (24 hours by default), never past its `access_until` (#26, #56).
+- Calls for the same answer share one request in flight: while one is out
+  for a customer and plan (or a customer's list), `access`, `hasAccess`,
+  `decide` and `accessList` wait for its answer, or its error, instead of
+  each sending their own. Guards share only with guards (#71).
 
 ### Options
 
@@ -48,7 +56,16 @@ The first version published to npm. Requires Node 22 or later.
 - A guard takes a plan, a list of which any one will do, or a function of the
   request giving either; `mesub.plan` says which one let the request through.
   3 plans at most per guard, each one a call to Mesub; a function runs only
-  once the token verifies (#38).
+  once the token verifies (#74).
+- A guard never retries a 429: it falls back at once, on the last answer it
+  knew or a 503 (#71).
+- The guards try the bearer, then the `mesub-token` cookie: a bearer of your
+  own (your session JWT) no longer hides the cookie. The `token` option says
+  where else the token travels, and is then the only place looked at (#72).
+- An async `onDenied` is awaited: what it throws or rejects with goes where
+  an integration error goes, `next(err)` under Express 4 as under 5, thrown
+  in Next and Nest. In Nest, an exception it throws after an `await` is the
+  one answered, not the default refusal (#73).
 
 ### Access tokens
 
@@ -63,7 +80,11 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/subscriptions` (#61).
 - `submit` sends the same request again when a send got no answer, three
   sends at most within its `budget`, then reads the subscription back rather
-  than guessing its outcome; a `MesubSubmitError` carries what it found.
+  than guessing its outcome; a `MesubSubmitError` carries what it found (#61).
+- Once `submit`, `retrieve` or `list` answer a subscription with access
+  (`active`, or `cancelled` before its end), the cached answers that still
+  say no for its wallet, external id and email are dropped, for its plan and
+  in `accessList`: `hasAccess` right after asks Mesub again (#70).
 - POST requests are never retried blindly, and take a per-call `timeout` and
   `signal` (#58).
 
@@ -85,9 +106,9 @@ The first version published to npm. Requires Node 22 or later.
 ### Releases and CI
 
 - Published from a version tag on main only, after a reviewer approves the
-  `npm` environment, with npm provenance and no npm token stored (#18).
+  `npm` environment, with npm provenance and no npm token stored (#18, #67).
 - The contract test runs in CI against a back built from Mesub-io/backend,
   covering `/v1/access` by external id and email, `/v1/subscriptions` and
-  `/v1/plans`.
-- Coverage is measured in CI, with a 90% floor.
+  `/v1/plans` (#66).
+- Coverage is measured in CI, with a 90% floor (#68).
 - Tested on Node 22 and 24, Express 4 and 5.
