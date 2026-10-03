@@ -1,7 +1,6 @@
 import { MesubError } from './errors.js';
 import { numberOf } from './options.js';
 import type { ServerSubscription } from './subscriptions.js';
-import type { HeaderSource } from './tokens.js';
 import { webhookEventFrom } from './validate.js';
 
 /**
@@ -11,6 +10,9 @@ import { webhookEventFrom } from './validate.js';
  * `webhook-events.ts` and `pull-events.ts`, which stay the source of truth.
  * Snake case, as the API serves it.
  */
+
+/** A Fetch `Headers` (Next, route handlers) or Node's plain object (Express). */
+export type HeaderSource = Headers | Record<string, string | string[] | undefined>;
 
 /** What every signing secret starts with, as the endpoint's dashboard page shows it. */
 const SECRET_PREFIX = 'whsec_';

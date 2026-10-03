@@ -3,7 +3,6 @@ import express, {
     type Request as ExpressRequest,
     type Response as ExpressResponse,
 } from 'express';
-import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 import request from 'supertest';
 
 import type { AccessAnswer, SubscriptionStatus } from '../src/answer.js';
@@ -17,17 +16,12 @@ import {
 import { Mesub, type MesubOptions } from '../src/index.js';
 
 const BASE = 'https://api.mesub.test';
-const PROJECT = 'proj_1';
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 
-let privateKey: CryptoKey;
-let jwk: JWK;
-
-beforeAll(async () => {
-    const pair = await generateKeyPair('ES256');
-    privateKey = pair.privateKey;
-    jwk = { ...(await exportJWK(pair.publicKey)), kid: 'key-1', alg: 'ES256', use: 'sig' };
-});
+/** Stands for the merchant's own verified session: who it says is signed in. */
+const SESSION = 'x-test-session';
+const SIGNED_IN = { [SESSION]: WALLET };
+const session = (req: ExpressRequest) => req.get(SESSION) ?? null;
 
 function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     return {
@@ -51,32 +45,9 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
-/** A merchant's own session JWT, sent as a bearer on every request: not a Mesub token. */
-function theirs() {
-    return new SignJWT({ role: 'admin' })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setSubject('merchant_user_9')
-        .setExpirationTime('1h')
-        .sign(new TextEncoder().encode('the-merchant-own-secret-32-bytes!!'));
-}
-
-async function token(over: { aud?: string; exp?: string } = {}) {
-    return new SignJWT({ wallet: WALLET })
-        .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
-        .setSubject('user_1')
-        .setAudience(over.aud ?? PROJECT)
-        .setIssuer(BASE)
-        .setIssuedAt()
-        .setExpirationTime(over.exp ?? '1h')
-        .sign(privateKey);
-}
-
 interface Mesh {
     /** What /v1/access answers, per call. */
     access?: (init?: RequestInit, url?: URL) => Response | Promise<Response>;
-    /** What the JWKS and /v1/project answer; healthy by default. */
-    keys?: () => Response;
-    project?: () => Response;
 }
 
 /** A Mesub whose API is a function, so each test says what it answers. */
@@ -85,10 +56,6 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
         calls.push(url.pathname);
-        if (url.pathname === '/.well-known/jwks.json')
-            return mesh.keys?.() ?? Response.json({ keys: [jwk] });
-        if (url.pathname === '/v1/project')
-            return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
             return (mesh.access ?? (() => Response.json(answer())))(init, url);
         throw new Error(`unexpected ${url.pathname}`);
@@ -120,16 +87,23 @@ function hang(init?: RequestInit) {
     });
 }
 
-/** An app with one guarded route that echoes res.locals.mesub. */
+/**
+ * An app with one guarded route that echoes res.locals.mesub. Signed in by
+ * the test session, unless `customer` is given.
+ */
 function app(
     client: Mesub,
-    options: Omit<RequirePlanOptions, 'client'> = {},
+    options: Partial<Omit<RequirePlanOptions, 'client'>> = {},
     plan: PlanOption<ExpressRequest> = 'pro',
 ) {
     const server = express();
-    server.get('/pro', requirePlan(plan, { ...options, client }), (_req, res) => {
-        res.json(res.locals['mesub'] as MesubLocals);
-    });
+    server.get(
+        '/pro',
+        requirePlan(plan, { customer: session, ...options, client }),
+        (_req, res) => {
+            res.json(res.locals['mesub'] as MesubLocals);
+        },
+    );
     // Integration errors land here, through next(err).
     server.use(
         (error: unknown, _req: ExpressRequest, res: ExpressResponse, _next: NextFunction) => {
@@ -144,9 +118,7 @@ describe('requirePlan', () => {
         it('lets a subscriber with access reach the route', async () => {
             const { client } = mesub();
 
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client)).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(200);
         });
@@ -154,12 +126,9 @@ describe('requirePlan', () => {
         it('leaves who they are and the answer on res.locals.mesub', async () => {
             const { client } = mesub();
 
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client)).get('/pro').set(SIGNED_IN);
 
             expect(response.body).toEqual({
-                userId: 'user_1',
                 wallet: WALLET,
                 customer: { kind: 'wallet', value: WALLET },
                 plan: 'pro',
@@ -168,17 +137,8 @@ describe('requirePlan', () => {
             });
         });
 
-        it('reads the token from the mesub-token cookie', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Cookie', `mesub-token=${await token()}`)
-                .expect(200);
-        });
-
-        // The wallet asked about is the token's, never one the request names.
-        it('asks Mesub about the wallet in the token', async () => {
+        // Who is asked about is who `customer` names, never one the request names.
+        it('asks Mesub about the wallet the session names', async () => {
             let asked: unknown = null;
             const { client } = mesub({
                 access: () => Response.json(answer()),
@@ -190,7 +150,7 @@ describe('requirePlan', () => {
 
             await request(app(client))
                 .get('/pro?wallet=Attacker111111111111111111111111111111111111')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .set('x-wallet', 'Attacker111111111111111111111111111111111111');
 
             expect(asked).toBe(WALLET);
@@ -200,157 +160,28 @@ describe('requirePlan', () => {
 
     describe('401, not signed in', () => {
         it.each([
-            ['no token at all', {} as Record<string, string>],
-            ['another scheme', { Authorization: 'Basic abc' }],
+            ['no session at all', {} as Record<string, string>],
+            // Only `customer` says who is asking: nothing else of the request is read.
+            [
+                'a bearer and a cookie the guard does not read',
+                { Authorization: `Bearer ${WALLET}`, Cookie: `wallet=${WALLET}` },
+            ],
         ])('answers 401 on %s', async (_label, headers) => {
-            const { client } = mesub();
+            const { client, calls } = mesub();
 
             const response = await request(app(client)).get('/pro').set(headers);
 
             expect(response.status).toBe(401);
             expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(calls).toEqual([]);
         });
 
-        it('answers 401 on a token for another project', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token({ aud: 'proj_2' })}`)
-                .expect(401);
-        });
-
-        it('answers 401 on an expired token', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token({ exp: '-10s' })}`)
-                .expect(401);
-        });
-
-        it('answers 401 on something that is not a token', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', 'Bearer not-a-token')
-                .expect(401);
-        });
-
-        it('answers 401, not 500, on a cookie that is not valid percent-encoding', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Cookie', 'mesub-token=%E0%A4%A')
-                .expect(401);
-        });
-
-        it('never asks /v1/access without a valid token', async () => {
+        it('never asks Mesub when nobody is signed in', async () => {
             const { client, calls } = mesub();
 
             await request(app(client)).get('/pro');
 
-            expect(calls).not.toContain('/v1/access');
-        });
-    });
-
-    // A merchant's own `Authorization: Bearer` must not hide the cookie (#36).
-    describe('a bearer that is not a Mesub token', () => {
-        it('falls back on the mesub-token cookie', async () => {
-            const { client } = mesub();
-
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`)
-                .set('Cookie', `mesub-token=${await token()}`);
-
-            expect(response.status).toBe(200);
-            expect(response.body.wallet).toBe(WALLET);
-        });
-
-        it('falls back on the cookie when the bearer is an expired Mesub token', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token({ exp: '-10s' })}`)
-                .set('Cookie', `mesub-token=${await token()}`)
-                .expect(200);
-        });
-
-        it('answers 401 when there is no cookie behind it', async () => {
-            const { client, calls } = mesub();
-
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`);
-
-            expect(response.status).toBe(401);
-            expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
-            expect(calls).not.toContain('/v1/access');
-        });
-
-        it('answers 401 when the cookie does not verify either', async () => {
-            const { client } = mesub();
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`)
-                .set('Cookie', `mesub-token=${await token({ aud: 'proj_2' })}`)
-                .expect(401);
-        });
-
-        // An outage is not a bad token: the next one would meet the same outage.
-        it('never tries the cookie once the keys could not be fetched', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
-            const verify = vi.spyOn(client, 'verifyToken');
-
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .set('Cookie', `mesub-token=${await token({ exp: '2h' })}`);
-
-            expect(response.status).toBe(503);
-            expect(verify).toHaveBeenCalledOnce();
-        });
-    });
-
-    describe('token option', () => {
-        it('reads the token where it says', async () => {
-            const { client } = mesub();
-
-            await request(app(client, { token: (req: ExpressRequest) => req.get('x-mesub-token') }))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`)
-                .set('x-mesub-token', await token())
-                .expect(200);
-        });
-
-        it('is then the only place looked at', async () => {
-            const { client } = mesub();
-
-            await request(app(client, { token: () => null }))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .set('Cookie', `mesub-token=${await token()}`)
-                .expect(401);
-        });
-
-        it('forwards a throw to next(err)', async () => {
-            const { client } = mesub();
-
-            const response = await request(
-                app(client, {
-                    token: () => {
-                        throw new MesubError('boom', { status: null, code: 'unexpected' });
-                    },
-                }),
-            ).get('/pro');
-
-            expect(response.status).toBe(500);
-            expect(response.body).toEqual({ forwarded: 'unexpected' });
+            expect(calls).toEqual([]);
         });
     });
 
@@ -366,7 +197,7 @@ describe('requirePlan', () => {
             return { queries, access };
         }
 
-        it('lets a customer through by external id, with no Mesub token at all', async () => {
+        it('lets a customer through by external id', async () => {
             const { queries, access } = asked();
             const { client, calls } = mesub({ access });
 
@@ -376,7 +207,7 @@ describe('requirePlan', () => {
 
             expect(response.status).toBe(200);
             expect(queries).toEqual([{ external_id: 'user_42', plan: 'pro' }]);
-            // No key and no project id fetched: nothing of Mesub's sign-in is used.
+            // The access check is the only call to Mesub.
             expect(calls).toEqual(['/v1/access']);
         });
 
@@ -441,27 +272,7 @@ describe('requirePlan', () => {
             },
         );
 
-        it('never reads a Mesub token, valid or not, bearer or cookie', async () => {
-            const { client, calls } = mesub();
-
-            await request(app(client, { customer: () => null }))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .set('Cookie', `mesub-token=${await token()}`)
-                .expect(401);
-
-            expect(calls).toEqual([]);
-        });
-
-        it('works while the keys cannot be fetched: they are not needed', async () => {
-            const { client } = mesub({ keys: () => new Response('down', { status: 503 }) });
-
-            await request(app(client, { customer: () => ({ external_id: 'user_42' }) }))
-                .get('/pro')
-                .expect(200);
-        });
-
-        it('leaves the customer, the wallet Mesub answered with, and no Mesub account', async () => {
+        it('leaves the customer and the wallet Mesub answered with', async () => {
             const { client } = mesub();
 
             const response = await request(
@@ -469,7 +280,6 @@ describe('requirePlan', () => {
             ).get('/pro');
 
             expect(response.body).toEqual({
-                userId: null,
                 wallet: WALLET,
                 customer: { kind: 'external_id', value: 'user_42' },
                 plan: 'pro',
@@ -550,20 +360,19 @@ describe('requirePlan', () => {
             }
         });
 
-        it('refuses to be built with a token too: which one is trusted would be unclear', () => {
+        it.each([
+            ['no options at all', undefined],
+            ['options without it', {}],
+            ['one that is not a function', { customer: { external_id: 'u1' } }],
+        ])('refuses %s when built, and says what to pass', (_name, options) => {
             const { client } = mesub();
+            const build = () =>
+                options === undefined
+                    ? (requirePlan as (plan: string) => unknown)('pro')
+                    : requirePlan('pro', { client, ...options } as never);
 
-            expect(() =>
-                requirePlan('pro', { client, customer: () => null, token: () => null }),
-            ).toThrow(TypeError);
-        });
-
-        it('refuses a customer that is not a function when built', () => {
-            const { client } = mesub();
-
-            expect(() =>
-                requirePlan('pro', { client, customer: { external_id: 'u1' } as never }),
-            ).toThrow(TypeError);
+            expect(build).toThrow(TypeError);
+            expect(build).toThrow(/needs `customer`: a function of the request/);
         });
 
         it('keeps one customer apart from another: no shared cached answer', async () => {
@@ -586,9 +395,7 @@ describe('requirePlan', () => {
                 access: () => Response.json(answer({ access: false, status: 'stopped' })),
             });
 
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client)).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(402);
             expect(response.body).toEqual({
@@ -608,11 +415,10 @@ describe('requirePlan', () => {
                         : Response.json(answer({ revalidate_after: 0 })),
             });
             const server = app(client);
-            const bearer = `Bearer ${await token()}`;
-            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+            await request(server).get('/pro').set(SIGNED_IN).expect(200);
 
             down = true;
-            const response = await request(server).get('/pro').set('Authorization', bearer);
+            const response = await request(server).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body.stale).toBe(true);
@@ -629,21 +435,7 @@ describe('requirePlan', () => {
                 access: () => Response.json({ message: 'down' }, { status }),
             });
 
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
-
-            expect(response.status).toBe(503);
-            expect(response.headers['retry-after']).toBe('30');
-            expect(response.body).toEqual({ access: false, reason: 'unavailable' });
-        });
-
-        it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
-
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client)).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(503);
             expect(response.headers['retry-after']).toBe('30');
@@ -654,9 +446,7 @@ describe('requirePlan', () => {
         it('answers 503 with Retry-After when Mesub does not answer within guardTimeout', async () => {
             const { client } = mesub({ access: hang }, { guardTimeout: 50 });
 
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client)).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(503);
             expect(response.headers['retry-after']).toBe('30');
@@ -673,38 +463,14 @@ describe('requirePlan', () => {
                 { guardTimeout: 50 },
             );
             const server = app(client);
-            const bearer = `Bearer ${await token()}`;
-            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+            // Seen once outside the guard, with no budget: 50 ms is short on a busy machine.
+            await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(true);
 
             down = true;
-            const response = await request(server).get('/pro').set('Authorization', bearer);
+            const response = await request(server).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body.stale).toBe(true);
-        });
-
-        it('answers 503 when the project id cannot be fetched', async () => {
-            const { client } = mesub({
-                project: () => Response.json({ message: 'down' }, { status: 503 }),
-            });
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .expect(503);
-        });
-
-        // A token of another project must not get in when the id is missing (#27).
-        it.each([
-            ['no id', {}],
-            ['an empty id', { id: '' }],
-        ])('answers 503, never 200, when /v1/project answers %s', async (_label, body) => {
-            const { client } = mesub({ project: () => Response.json(body) });
-
-            await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token({ aud: 'proj_other' })}`)
-                .expect(503);
         });
     });
 
@@ -722,7 +488,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body).toMatchObject({ plan: 'team', answer: { plan: 'team' } });
@@ -733,44 +499,49 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.body.plan).toBe('pro');
         });
 
         it('does not wait for the plans after the one that grants', async () => {
-            const { client } = mesub(
-                { access: perPlan({ pro: yes('pro'), team: hang }) },
-                { guardTimeout: 5_000 },
-            );
-            const bearer = `Bearer ${await token()}`;
-            const started = Date.now();
+            let gaveUp = false;
+            const team = (init?: RequestInit) => {
+                init?.signal?.addEventListener('abort', () => (gaveUp = true));
+                return hang(init);
+            };
+            const { client } = mesub({ access: perPlan({ pro: yes('pro'), team }) });
 
             await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', bearer)
+                .set(SIGNED_IN)
                 .expect(200);
 
-            // Waiting for `team` would take the whole guardTimeout: bound by that, not by a busy machine.
-            expect(Date.now() - started).toBeLessThan(4_000);
+            // No clock read: `team` is still out, with its whole budget ahead, when the answer is in.
+            expect(gaveUp).toBe(false);
         });
 
         // A guard holds a request for guardTimeout at most, whatever the number of plans.
         it('asks every plan within one guardTimeout', async () => {
+            let out = 0;
+            const outAtGiveUp: number[] = [];
+            const slow = (init?: RequestInit) => {
+                out += 1;
+                init?.signal?.addEventListener('abort', () => outAtGiveUp.push(out));
+                return hang(init);
+            };
             const { client } = mesub(
-                { access: perPlan({ a: hang, b: hang, c: hang }) },
+                { access: perPlan({ a: slow, b: slow, c: slow }) },
                 { guardTimeout: 500 },
             );
-            const bearer = `Bearer ${await token()}`;
-            const started = Date.now();
 
             await request(app(client, {}, ['a', 'b', 'c']))
                 .get('/pro')
-                .set('Authorization', bearer)
+                .set(SIGNED_IN)
                 .expect(503);
 
-            // One after the other would take three of them, 1500 ms.
-            expect(Date.now() - started).toBeLessThan(1_250);
+            // No clock read: one after the other, the first would give up before the next is asked.
+            expect(outAtGiveUp).toEqual([3, 3, 3]);
         });
 
         it("answers 402 with the first plan's status when none grants", async () => {
@@ -780,7 +551,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(402);
             expect(response.body).toEqual({
@@ -796,7 +567,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(503);
             expect(response.headers['retry-after']).toBe('30');
@@ -807,7 +578,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body.plan).toBe('team');
@@ -826,11 +597,10 @@ describe('requirePlan', () => {
                 }),
             });
             const server = app(client, {}, ['pro', 'team']);
-            const bearer = `Bearer ${await token()}`;
-            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+            await request(server).get('/pro').set(SIGNED_IN).expect(200);
 
             outage = true;
-            const response = await request(server).get('/pro').set('Authorization', bearer);
+            const response = await request(server).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body).toMatchObject({ plan: 'team', stale: true });
@@ -842,7 +612,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, (req) => String(req.query['tier'])))
                 .get('/pro?tier=team')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body.plan).toBe('team');
@@ -854,7 +624,7 @@ describe('requirePlan', () => {
 
             await request(app(client, {}, () => ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(200);
         });
 
@@ -864,7 +634,7 @@ describe('requirePlan', () => {
 
             await request(app(client, {}, ['pro', 'pro']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(200);
 
             expect(decide).toHaveBeenCalledOnce();
@@ -881,7 +651,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, ['pro', 'typo']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: 'plan_not_found' });
@@ -895,7 +665,7 @@ describe('requirePlan', () => {
         ])('refuses %s when the guard is built', (_label, plan) => {
             const { client } = mesub();
 
-            expect(() => requirePlan(plan, { client })).toThrow(TypeError);
+            expect(() => requirePlan(plan, { client, customer: session })).toThrow(/plan/);
         });
 
         // Each plan is one call to Mesub on every request: three, what a Dev project holds.
@@ -903,7 +673,7 @@ describe('requirePlan', () => {
             const { client } = mesub();
 
             expect(() =>
-                requirePlan(['pro', 'pro', 'team', 'team', 'max'], { client }),
+                requirePlan(['pro', 'pro', 'team', 'team', 'max'], { client, customer: session }),
             ).not.toThrow();
         });
 
@@ -913,14 +683,14 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, (req) => req.query['tier'] as string[]))
                 .get('/pro?tier=a&tier=b&tier=c&tier=d')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: 'other' });
             expect(decide).not.toHaveBeenCalled();
         });
 
-        it('never runs the function for a request without a Mesub token', async () => {
+        it('never runs the function for a request nobody is signed in on', async () => {
             const { client } = mesub();
             const plan = vi.fn(() => {
                 throw new Error('should not run');
@@ -937,7 +707,7 @@ describe('requirePlan', () => {
 
             const response = await request(app(client, {}, () => []))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: 'other' });
@@ -953,9 +723,7 @@ describe('requirePlan', () => {
                 res.redirect(302, `/subscribe?why=${denial.reason}`),
             );
 
-            const response = await request(app(client, { onDenied }))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client, { onDenied })).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(302);
             expect(response.headers['location']).toBe('/subscribe?why=no_access');
@@ -1021,6 +789,7 @@ describe('requirePlan', () => {
             const failure = new Error('onDenied failed');
             const middleware = requirePlan('pro', {
                 client,
+                customer: () => null,
                 onDenied: async () => {
                     throw failure;
                 },
@@ -1041,10 +810,7 @@ describe('requirePlan', () => {
             const { client } = mesub();
             const onDenied = vi.fn();
 
-            await request(app(client, { onDenied }))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .expect(200);
+            await request(app(client, { onDenied })).get('/pro').set(SIGNED_IN).expect(200);
             expect(onDenied).not.toHaveBeenCalled();
         });
     });
@@ -1052,7 +818,7 @@ describe('requirePlan', () => {
     // A broken integration must reach the merchant's error handler, not look like a denial.
     describe('integration errors', () => {
         it.each([
-            ['a bad secret key', 401, 'unauthorized'],
+            ['a bad API key', 401, 'unauthorized'],
             ['an unknown plan', 404, 'plan_not_found'],
         ])('forwards %s to next(err)', async (_label, status, code) => {
             const { client } = mesub({
@@ -1060,9 +826,7 @@ describe('requirePlan', () => {
                     Response.json({ message: 'nope', statusCode: status, code }, { status }),
             });
 
-            const response = await request(app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(app(client)).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: code });

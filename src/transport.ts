@@ -205,12 +205,12 @@ export class Transport {
 }
 
 /**
- * @internal A path under the base URL, which may carry its own path:
+ * A path under the base URL, which may carry its own path:
  * `https://proxy.example.com/mesub` and `/v1/access` make
  * `https://proxy.example.com/mesub/v1/access`. Never `new URL(path, base)`,
  * which drops the base's path for a path starting with `/`.
  */
-export function endpoint(baseUrl: string, path: string): URL {
+function endpoint(baseUrl: string, path: string): URL {
     return new URL(baseUrl + path);
 }
 

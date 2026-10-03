@@ -31,8 +31,6 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
-const PROJECT = 'proj_1';
-
 function sha256(text: string): string {
     return createHash('sha256').update(text).digest('hex');
 }
@@ -44,20 +42,6 @@ function hmac(kind: string, value: string, apiKey = 'SUB_test'): string {
 
 const SCOPE = `key-${sha256('SUB_test').slice(0, 16)}`;
 
-/** `/v1/project` answers `project`; every other call goes to `fetch`. */
-function withProject(
-    fetch: typeof globalThis.fetch,
-    project: () => Response | Error = () => json(200, { id: PROJECT }),
-): typeof globalThis.fetch {
-    return (async (input: string | URL | Request, init?: RequestInit) => {
-        if (new URL(String(input)).pathname !== '/v1/project') return fetch(input, init);
-
-        const answer = project();
-        if (answer instanceof Error) throw answer;
-        return answer;
-    }) as typeof globalThis.fetch;
-}
-
 /** No retries: an outage is one failed call, not three waits of backoff. */
 function client(
     fetch: typeof globalThis.fetch,
@@ -67,7 +51,7 @@ function client(
     return new Mesub({
         apiKey: 'SUB_test',
         baseUrl: 'https://api.mesub.test',
-        fetch: withProject(fetch),
+        fetch,
         maxRetries: 0,
         ...(cache ? { cache } : {}),
         ...options,
@@ -612,21 +596,19 @@ describe('access', () => {
         });
 
         // The scope needs no network: nothing to wait for during an outage.
-        it('never asks /v1/project for it', async () => {
-            const project = vi.fn(() => json(200, { id: PROJECT }));
+        it('costs no call to Mesub', async () => {
             const { fetch, calls } = mockFetch(json(200, answer()), json(200, answer()));
             const mesub = new Mesub({
                 apiKey: 'SUB_test',
                 baseUrl: 'https://api.mesub.test',
-                fetch: withProject(fetch, project),
+                fetch,
                 maxRetries: 0,
             });
 
             await mesub.access(WALLET, 'pro');
             await mesub.decide(WALLET, 'team');
 
-            expect(project).not.toHaveBeenCalled();
-            expect(calls).toHaveLength(2);
+            expect(calls.map((call) => call.url.pathname)).toEqual(['/v1/access', '/v1/access']);
         });
 
         it('keeps two projects sharing one store apart', async () => {
@@ -637,7 +619,7 @@ describe('access', () => {
                 new Mesub({
                     apiKey: `SUB_${id}`,
                     baseUrl: 'https://api.mesub.test',
-                    fetch: withProject(fetch, () => json(200, { id })),
+                    fetch,
                     cache: store,
                 });
 
@@ -648,41 +630,6 @@ describe('access', () => {
                 false,
             );
             expect(second.calls).toHaveLength(1);
-        });
-
-        it('scopes by a hash of the API key while /v1/project cannot answer', async () => {
-            const set = vi.fn();
-            const { fetch } = mockFetch(json(200, answer()));
-            const mesub = new Mesub({
-                apiKey: 'SUB_test',
-                baseUrl: 'https://api.mesub.test',
-                fetch: withProject(fetch, () => nest(503, 'Service Unavailable')),
-                cache: { get: () => undefined, set },
-            });
-
-            await mesub.access(WALLET, 'pro');
-
-            const key = set.mock.calls[0]![0] as string;
-            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:wallet:${WALLET}$`));
-            expect(key).not.toContain('SUB_test');
-        });
-
-        // An id the answer does not carry is no scope: never `undefined` in the key (#27).
-        it('scopes by a hash of the API key when /v1/project answers without an id', async () => {
-            const set = vi.fn();
-            const { fetch } = mockFetch(json(200, answer()));
-            const mesub = new Mesub({
-                apiKey: 'SUB_test',
-                baseUrl: 'https://api.mesub.test',
-                fetch: withProject(fetch, () => json(200, {})),
-                cache: { get: () => undefined, set },
-            });
-
-            await mesub.access(WALLET, 'pro');
-
-            const key = set.mock.calls[0]![0] as string;
-            expect(key).toMatch(new RegExp(`^mesub:access:key-[0-9a-f]{16}:pro:wallet:${WALLET}$`));
-            expect(key).not.toContain('undefined');
         });
 
         it('hashes two API keys apart', async () => {
@@ -713,9 +660,7 @@ describe('access', () => {
             const restarted = new Mesub({
                 apiKey: 'SUB_test',
                 baseUrl: 'https://api.mesub.test',
-                fetch: withProject(mockFetch(nest(503, 'Service Unavailable')).fetch, () =>
-                    nest(503, 'Service Unavailable'),
-                ),
+                fetch: mockFetch(nest(503, 'Service Unavailable')).fetch,
                 maxRetries: 0,
                 cache: store,
             });
@@ -1121,7 +1066,7 @@ describe('decide, for the guards', () => {
     });
 
     // The cache scope costs no call: the whole budget goes to /v1/access.
-    it('spends none of the budget on /v1/project', async () => {
+    it('spends the whole budget on /v1/access', async () => {
         const { fetch, calls } = mockFetch('hang');
         const mesub = await hashed(
             new Mesub({ apiKey: 'SUB_test', baseUrl: 'https://api.mesub.test', fetch }),

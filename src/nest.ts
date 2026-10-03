@@ -12,7 +12,7 @@ import type { Mesub } from './client.js';
 import {
     accessOf,
     askerOf,
-    checkAsker,
+    checkCustomer,
     checkPlan,
     type CustomerOption,
     type Denial,
@@ -23,10 +23,9 @@ import {
     type MesubAccess as Access,
     type PlanOption,
     plansOf,
-    type TokenOption,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
-import type { HeaderSource } from './tokens.js';
+import type { HeaderSource } from './webhooks.js';
 
 export { MesubError } from './errors.js';
 export type { CustomerOption, Denial, DenialReason, PlanOption } from './guard.js';
@@ -52,18 +51,12 @@ export interface RequirePlanOptions<Req extends MesubRequest = MesubRequest> {
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
     /**
-     * Where the Mesub access token is, when not in the bearer or the
-     * `mesub-token` cookie: a header of your own, a session. Then the only
-     * place looked at.
-     */
-    token?: TokenOption<Req>;
-    /**
-     * Who is asking, from your own auth, instead of a Mesub token:
+     * Who is asking, from your own auth:
      * `(req) => ({ external_id: req.user.id })`, a wallet or an email. Null when
      * nobody is signed in. It must come from a session you verified, never
-     * from the request itself. Not with `token`.
+     * from the request itself.
      */
-    customer?: CustomerOption<Req>;
+    customer: CustomerOption<Req>;
     /**
      * Answer a refusal yourself by throwing your own exception, with your own
      * status and body. It may be async: what it returns is awaited, and a
@@ -86,31 +79,29 @@ function setHeader(response: HeaderSink, name: string, value: string) {
 
 /**
  * A guard letting a request through only for a subscriber with access to that
- * plan: `@UseGuards(RequirePlan('pro'))` on a controller or a route. The plan
- * is a slug, a list of which any one will do (`['pro', 'team']`), or either
- * worked out per request. `@MesubAccess()` says which one let it through.
+ * plan: `@UseGuards(RequirePlan('pro', { customer }))` on a controller or a
+ * route. The plan is a slug, a list of which any one will do
+ * (`['pro', 'team']`), or either worked out per request. `@MesubAccess()` says
+ * which one let it through.
  *
- * With `customer`, who is asking is who your own auth says, and no Mesub
- * token is read. Otherwise the subscriber is who the Mesub access token says, from the Authorization
- * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
- * token), or where `token` says. Refusals throw an `HttpException` of 401
- * (nobody signed in), 402 (Mesub said no) or 503 with Retry-After (Mesub
- * unreachable, with no answer known for that subscriber). Integration errors
- * are thrown as they are, for Nest to log and answer 500.
+ * Who is asking is who `customer` says, from your own auth. Refusals throw an
+ * `HttpException` of 401 (nobody signed in), 402 (Mesub said no) or 503 with
+ * Retry-After (Mesub unreachable, with no answer known for that subscriber).
+ * Integration errors are thrown as they are, for Nest to log and answer 500.
  */
 export function RequirePlan<Req extends MesubRequest = MesubRequest>(
     plan: PlanOption<Req>,
-    options: RequirePlanOptions<Req> = {},
+    options: RequirePlanOptions<Req>,
 ): Type<CanActivate> {
     checkPlan(plan);
-    checkAsker(options);
+    checkCustomer(options);
 
     class MesubPlanGuard implements CanActivate {
         async canActivate(context: ExecutionContext): Promise<boolean> {
             const http = context.switchToHttp();
             const request = http.getRequest<Req>();
             const client = options.client ?? defaultClient();
-            const outcome = await guard(client, await askerOf(client, request, options), () =>
+            const outcome = await guard(client, await askerOf(request, options.customer), () =>
                 plansOf(plan, request),
             );
 

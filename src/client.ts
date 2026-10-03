@@ -4,10 +4,9 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
-import { apiKeyOf, baseUrlOf, headersOf, issuerOf, numberOf } from './options.js';
+import { apiKeyOf, baseUrlOf, headersOf, numberOf } from './options.js';
 import { Plans } from './plans.js';
 import { type ServerSubscription, Subscriptions } from './subscriptions.js';
-import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
 import { accessAnswerFrom, accessListFrom } from './validate.js';
 import { webhookSecretOf, Webhooks } from './webhooks.js';
@@ -31,20 +30,13 @@ export interface MesubOptions {
     apiKey?: string;
     /**
      * Defaults to `https://api.mesub.io`. May carry a path, e.g. behind a
-     * proxy at `https://proxy.example.com/mesub`: every call, the public keys
-     * included, is made under it.
+     * proxy at `https://proxy.example.com/mesub`: every call is made under it.
      */
     baseUrl?: string;
     /**
-     * What the access tokens' `iss` must be: Mesub's own public API URL.
-     * Defaults to `baseUrl`; set it when `baseUrl` is a proxy, e.g.
-     * `https://api.mesub.io`.
-     */
-    issuer?: string;
-    /**
-     * Extra headers sent with every call to Mesub, the public keys included:
-     * e.g. a Cloudflare Access service token for the proxy in front. Cannot
-     * set Authorization, User-Agent, Accept, Content-Type nor Mesub-Version.
+     * Extra headers sent with every call to Mesub: e.g. a Cloudflare Access
+     * service token for the proxy in front. Cannot set Authorization,
+     * User-Agent, Accept, Content-Type nor Mesub-Version.
      */
     headers?: Record<string, string>;
     /** A custom `fetch`, e.g. one bound to your own agent. Defaults to the global one. */
@@ -101,10 +93,6 @@ export class Mesub {
     protected readonly cache: AccessCache<AccessAnswer>;
     /** The lists of `accessList`, in the same store, under their own keys. */
     private readonly lists: AccessCache<AccessList>;
-    /** @internal */
-    protected readonly tokens: TokenVerifier;
-    /** Asked once per process; forgotten if it failed, so the next call asks again. */
-    private projectIdOnce: Promise<string> | undefined;
     /** What the cache keys are scoped by: a hash of the API key, computed once. */
     private readonly cacheScope: () => Promise<string>;
     /** What hashes emails and external ids in the cache keys: the API key, imported once. */
@@ -121,7 +109,6 @@ export class Mesub {
         // now rather than a 401 or a 1 ms timeout on every call.
         const apiKey = apiKeyOf(options.apiKey);
         const baseUrl = baseUrlOf(options.baseUrl, DEFAULT_BASE_URL);
-        const issuer = issuerOf(options.issuer, baseUrl);
         const headers = headersOf(options.headers);
         const webhookSecret = webhookSecretOf(options.webhookSecret);
         if (options.fetch !== undefined && typeof options.fetch !== 'function') {
@@ -167,47 +154,6 @@ export class Mesub {
         this.cacheScope = () => (cacheScope ??= hashScope(apiKey));
         let cacheSecret: Promise<HmacKey> | undefined;
         this.cacheSecret = () => (cacheSecret ??= importSecret(apiKey));
-        this.tokens = new TokenVerifier({
-            baseUrl,
-            issuer,
-            headers,
-            fetch,
-            projectId: () => this.projectId(),
-        });
-    }
-
-    /**
-     * Who the access token `@mesub/react` issued is about, verified locally
-     * with Mesub's public keys. Throws a MesubError `invalid_token` for a
-     * forged, expired or other project's token, `unavailable` when the keys
-     * or the project id could not be fetched.
-     */
-    async verifyToken(token: string): Promise<VerifiedToken> {
-        return this.tokens.verify(token);
-    }
-
-    /** The key's project id, from `GET /v1/project`, once per process. */
-    private projectId(call: CallOptions = {}): Promise<string> {
-        this.projectIdOnce ??= this.transport.get('/v1/project', {}, call).then(
-            (answer) => {
-                const { id } = (answer ?? {}) as { id?: unknown };
-
-                // Anything else would reach jose as no audience, which skips the
-                // check: a token of any project would pass (#27). Not kept, so
-                // the next call asks again.
-                if (typeof id !== 'string' || id === '') {
-                    this.projectIdOnce = undefined;
-                    throw missingProjectId();
-                }
-                return id;
-            },
-            (error: unknown) => {
-                this.projectIdOnce = undefined;
-                throw error;
-            },
-        );
-
-        return this.projectIdOnce;
     }
 
     /**
@@ -561,14 +507,6 @@ function importSecret(apiKey: string): Promise<HmacKey> {
 
 function hex(bytes: ArrayBuffer): string {
     return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-/** `/v1/project` answered without an id: like an outage, nobody can be identified. */
-function missingProjectId(): MesubError {
-    return new MesubError('Mesub answered /v1/project without a project id.', {
-        status: null,
-        code: 'unavailable',
-    });
 }
 
 /**
