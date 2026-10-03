@@ -627,6 +627,61 @@ Refusals throw a `MesubError` (see [Errors](#errors)), told apart by `apiCode`:
 | `invalid_request` |                              | a `signature` that is not a base58 transaction signature  |
 | `rate_limited`    |                              | more than 60 of these calls in a minute for the key       |
 
+## Routes for the React widget
+
+[`@mesub/react`](https://github.com/Mesub-io/react-sdk) never talks to Mesub:
+it calls your server, which holds the key. These routes are that server side,
+one line to mount. Without the widget you do not need them: `subscriptions.*`
+above is the same thing, by hand.
+
+```ts
+// Express, after your own login. Under Nest: the same app.use in main.ts.
+import { mesubRoutes } from '@mesub/node/express';
+
+app.use(
+    '/api/mesub',
+    yourLogin,
+    mesubRoutes({
+        customer: (req) => (req.user ? { external_id: req.user.id } : null),
+        email: (req) => req.user?.email,
+    }),
+);
+```
+
+```ts
+// Next, app/api/mesub/[...mesub]/route.ts
+import { mesubRouteHandlers } from '@mesub/node/next';
+
+export const { GET, POST } = mesubRouteHandlers({
+    customer: async (request) => {
+        const session = await yourSession(request);
+        return session ? { external_id: session.userId } : null;
+    },
+});
+```
+
+- `customer` is who your own auth says is asking, as on the guards, and it is
+  required. It must come from a session you verified, never from the request.
+  Null answers 401.
+- Every subscription created is tied to that customer, whatever the browser
+  sends. One that is not theirs answers 404, as one that does not exist.
+- `plans: ['pro', 'team']` keeps the widget to those plans. `email` says where
+  the customer's notices go.
+- A POST must be JSON, which a plain form on another site cannot send. Your
+  own CSRF protection still applies if you have one.
+- The browser never gets your API key, nor the email and the id you gave Mesub.
+
+What they serve, under your mount point:
+
+| Route                                                        | What it does                                |
+| ------------------------------------------------------------ | ------------------------------------------- |
+| `GET /plans/:slug`                                           | The plan to show. Public.                   |
+| `GET /subscriptions`                                         | The customer's subscriptions.               |
+| `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
+| `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |
+| `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
+| `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
+
 ## Webhooks
 
 Mesub posts an event to your endpoint when a subscription changes, signed

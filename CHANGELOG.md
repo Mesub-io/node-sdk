@@ -122,6 +122,14 @@ The first version published to npm. Requires Node 22 or later.
   nothing changed. A confirm that settled drops every cached access answer
   for that customer on that plan, the yes too (#50).
 
+### Routes for the React widget
+
+- `mesubRoutes` (Express, and Nest through `app.use`) and
+  `mesubRouteHandlers` (Next) serve what `@mesub/react` calls: a plan, the
+  customer's subscriptions, and each step of subscribing, cancelling, resuming
+  and closing. Who is asking comes from your own auth through `customer`; a
+  subscription that is not theirs answers 404 (#86).
+
 ### Webhooks
 
 - `mesub.webhooks.verify(body, headers)`, or `verifyWebhook` without a

@@ -18,7 +18,15 @@ import {
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
+import {
+    checkWidgetOptions,
+    handleWidget,
+    widgetCustomer,
+    type WidgetRoutesOptions,
+} from './routes.js';
+
 export { MesubError } from './errors.js';
+export type { WidgetRoutesOptions } from './routes.js';
 export type { CustomerOption, Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 export type { Asked } from './customer.js';
 export type { Customer } from './answer.js';
@@ -96,4 +104,82 @@ export function withMesub<Context = unknown>(
 
         return Response.json(denialBody(outcome), { status: denial.status, headers });
     };
+}
+
+/** Next's `context` of a catch-all route: `params` is a promise since Next 15. */
+interface CatchAllContext {
+    params?: Promise<Record<string, unknown>> | Record<string, unknown>;
+}
+
+/** The path after the mount point, from the catch-all segment: `/subscriptions/sub_1/cancel`. */
+async function pathOf(context: CatchAllContext | undefined): Promise<string> {
+    const params = (await context?.params) ?? {};
+    const segments = Object.values(params).find((value) => Array.isArray(value)) as
+        unknown[] | undefined;
+
+    return `/${(segments ?? []).map((segment) => encodeURIComponent(String(segment))).join('/')}`;
+}
+
+/**
+ * The routes `@mesub/react` calls, as an App Router catch-all:
+ *
+ *     // app/api/mesub/[...mesub]/route.ts
+ *     export const { GET, POST } = mesubRouteHandlers({ customer: async (request) => ... });
+ *
+ * `customer` says who is asking from your own verified session. Integration
+ * errors are thrown, for Next to log and answer 500.
+ */
+export function mesubRouteHandlers(options: WidgetRoutesOptions<Request>): {
+    GET: (request: Request, context?: CatchAllContext) => Promise<Response>;
+    POST: (request: Request, context?: CatchAllContext) => Promise<Response>;
+} {
+    checkWidgetOptions(options);
+
+    const handle = async (request: Request, context?: CatchAllContext): Promise<Response> => {
+        const path = await pathOf(context);
+        let body: unknown;
+
+        if (request.method !== 'GET') {
+            const text = await request.text();
+
+            if (text.length > 64 * 1024) {
+                return Response.json(
+                    { error: { code: 'payload_too_large', message: 'The body is too large.' } },
+                    { status: 413 },
+                );
+            }
+            try {
+                body = text === '' ? undefined : (JSON.parse(text) as unknown);
+            } catch {
+                return Response.json(
+                    { error: { code: 'invalid_request', message: 'The body is not JSON.' } },
+                    { status: 400 },
+                );
+            }
+        }
+
+        // A plan is public: nobody needs to be signed in to read a price.
+        const publicRead = request.method === 'GET' && path.startsWith('/plans/');
+        const asked = publicRead ? null : await widgetCustomer(request, options.customer);
+        const email = asked && options.email ? await options.email(request) : undefined;
+        const answer = await handleWidget(
+            options.client ?? defaultClient(),
+            {
+                method: request.method,
+                path,
+                body,
+                contentType: request.headers.get('content-type'),
+            },
+            asked,
+            { email, ...(options.plans && { plans: options.plans }) },
+        );
+
+        return Response.json(answer.body, {
+            status: answer.status,
+            // Per customer, and it moves: never a shared cache's to keep.
+            headers: { 'Cache-Control': 'no-store', ...answer.headers },
+        });
+    };
+
+    return { GET: handle, POST: handle };
 }
