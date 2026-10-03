@@ -48,11 +48,10 @@ The first version published to npm. Requires Node 22 or later.
   one: a `baseUrl` that is not https (plain http only to localhost), a
   timeout that is not a finite number of milliseconds above 0, a negative
   `maxRetries` or `maxStaleMs`, the publishable `PUB_` key instead of the
-  secret `SUB_` one (#62).
-- A `baseUrl` may carry a path, for a proxy: the API and the public keys are
-  both read under it. `issuer` says what a token's `iss` must be, the
-  `baseUrl` by default; `headers` adds headers to every call, the public keys
-  included, such as a Cloudflare Access service token (#63).
+  API key, `SUB_` (#62).
+- A `baseUrl` may carry a path, for a proxy: every call is made under it.
+  `headers` adds headers to every call, such as a Cloudflare Access service
+  token (#63).
 - Every call sends `Mesub-Version`, the API version the release was written
   against, exported as `API_VERSION` (#64).
 
@@ -67,35 +66,26 @@ The first version published to npm. Requires Node 22 or later.
 - `requirePlan` for Express, `withMesub` for Next route handlers, the
   `RequirePlan` guard and `@MesubAccess()` decorator for NestJS (#15, #16,
   #20).
+- Who is asking comes from `customer`, a function of the request returning
+  who your own login says is signed in (`{ external_id }`, a wallet or
+  `{ email }`, null for nobody, a 401). It is required: a guard built without
+  it throws a `TypeError`. The route gets `mesub.customer`, who was asked
+  about, and `mesub.wallet`, the wallet that pays as Mesub answered it (#79,
+  #87).
 - A guard answers within a time budget when Mesub is slow, and answers 503,
-  not 402, for a wallet it never saw while Mesub fails (#26).
+  not 402, for a customer it never saw while Mesub fails (#26).
 - A guard takes a plan, a list of which any one will do, or a function of the
   request giving either; `mesub.plan` says which one let the request through.
   3 plans at most per guard, each one a call to Mesub; a function runs only
-  once the token verifies (#74).
+  once `customer` named somebody (#74).
 - A guard never retries a 429: it falls back at once, on the last answer it
   knew or a 503 (#71).
-- The guards try the bearer, then the `mesub-token` cookie: a bearer of your
-  own (your session JWT) no longer hides the cookie. The `token` option says
-  where else the token travels, and is then the only place looked at (#72).
-- The guards take `customer`, a function of the request returning who your
-  own login says is asking (`{ external_id }`, a wallet or `{ email }`, null
-  for nobody): no Mesub token is read then, so a guard needs nothing of
-  `@mesub/react`. Not with `token`. `mesub.customer` says who was asked
-  about; `mesub.userId` and `mesub.wallet` may now be null (#79).
 - `RequirePlan<YourRequest>(...)` for NestJS: name your request type to read
   `req.user` in `customer` and `onDenied` without a cast (#84).
 - An async `onDenied` is awaited: what it throws or rejects with goes where
   an integration error goes, `next(err)` under Express 4 as under 5, thrown
   in Next and Nest. In Nest, an exception it throws after an `await` is the
   one answered, not the default refusal (#73).
-
-### Access tokens
-
-- `verifyToken` checks a Mesub access token against the project's JWKS
-  (ES256): signature, expiry, audience and issuer (#14).
-- A project id missing from `/v1/project` is refused before any token is
-  verified; malformed tokens and claims throw `invalid_token` (#52, #55).
 
 ### Subscribing from your server
 
@@ -151,9 +141,8 @@ The first version published to npm. Requires Node 22 or later.
 
 - `@mesub/node/testing` exports `FakeMesub`, a fake Mesub behind a `fetch`:
   `grant`, `deny` and `setAccess` set its answers, `client()` gives a real
-  `Mesub` wired to it, `token()` a token the guards accept, `fail()` an
-  outage or any error, `requests` what it received. Nothing of it reaches
-  the other entries (#65).
+  `Mesub` wired to it, `fail()` an outage or any error, `requests` what it
+  received. Nothing of it reaches the other entries (#65).
 - `FakeMesub` answers cancel, resume and close and their confirms, which
   land at once: the subscription and its access answers move, and a step the
   status does not allow is refused with Mesub's code (#50).
