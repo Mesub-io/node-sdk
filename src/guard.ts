@@ -1,29 +1,16 @@
 import type { AccessAnswer, Customer } from './answer.js';
 import { type Decision, Mesub } from './client.js';
 import { type Asked, customerOf } from './customer.js';
-import { MesubError } from './errors.js';
-import { type HeaderSource, tokensFrom } from './tokens.js';
 
 /** Why a request was turned away, and what it answers by default. */
 export type DenialReason = 'unauthenticated' | 'no_access' | 'unavailable';
 
-/**
- * Who is asking: the customer Mesub is asked about, and the Mesub account
- * when a Mesub token said so. From your own auth there is no Mesub account.
- */
-export interface Asker {
-    customer: Asked;
-    userId: string | null;
-}
-
 export type GuardOutcome =
-    | { allowed: true; asker: Asker; plan: string; decision: Decision }
+    | { allowed: true; customer: Asked; plan: string; decision: Decision }
     | { allowed: false; reason: DenialReason; decision?: Decision };
 
 /** Who is asking and what Mesub answered, as a guarded route receives it. */
 export interface MesubAccess {
-    /** The Mesub account, from a Mesub token. Null when `customer` named who is asking. */
-    userId: string | null;
     /**
      * The wallet that pays. Asked by external id or email, the one Mesub
      * answered with; null when the answer is the outage fallback's and holds none.
@@ -120,28 +107,6 @@ function checkedPlans(value: unknown): string[] {
 }
 
 /**
- * Where a guard finds the Mesub access token, when it is not in the bearer or
- * the `mesub-token` cookie: a header of your own, a session. Null or
- * undefined when there is none, a 401.
- */
-export type TokenOption<Req> = (request: Req) => string | null | undefined;
-
-/**
- * The tokens a guard tries, in turn: the one `token` returns when given, else
- * the bearer, then the `mesub-token` cookie.
- */
-export function tokensOf<Req extends { headers: HeaderSource }>(
-    request: Req,
-    token?: TokenOption<Req>,
-): string[] {
-    if (!token) return tokensFrom(request);
-
-    const found = token(request);
-
-    return typeof found === 'string' && found !== '' ? [found] : [];
-}
-
-/**
  * Who is asking, from your own auth: `(req) => ({ external_id: req.user.id })`,
  * a wallet, or an email. Null or undefined when nobody is signed in, a 401.
  * May be async.
@@ -154,77 +119,39 @@ export type CustomerOption<Req> = (
     request: Req,
 ) => Customer | string | null | undefined | Promise<Customer | string | null | undefined>;
 
-/** The two ways a guard learns who is asking. One at most. */
-export interface AskerOptions<Req> {
-    token?: TokenOption<Req>;
-    customer?: CustomerOption<Req>;
-}
-
-/**
- * Checked when the guard is built: `customer` replaces the Mesub token, so
- * both together is a guard that cannot say which one it trusts.
- */
-export function checkAsker<Req>(options: AskerOptions<Req>): void {
-    if (options.customer !== undefined && typeof options.customer !== 'function') {
-        throw new TypeError('`customer` is a function of the request, returning who is signed in.');
-    }
-    if (options.customer && options.token) {
+/** Checked when the guard is built: without `customer` it could not tell who is asking. */
+export function checkCustomer<Req>(options: { customer: CustomerOption<Req> }): void {
+    if (typeof options?.customer !== 'function') {
         throw new TypeError(
-            'Give a guard `customer` or `token`, not both: with `customer`, no Mesub token is read.',
+            'A guard needs `customer`: a function of the request returning who is signed in, ' +
+                'e.g. `(req) => ({ external_id: req.user.id })`.',
         );
     }
 }
 
-/** Nobody is signed in (null), or the keys could not be fetched to tell. */
-type Asking = Asker | null | 'unavailable';
-
 /**
- * Who is asking. From `customer` when given, and then from nothing else: no
- * token is read, no key fetched. Otherwise from the Mesub token: each one is
- * tried in turn, the first that verifies is who is asking.
+ * Who is asking, as `customer` names them, or null for nobody.
  *
  * A `customer` that returns something Mesub cannot be asked about (two
  * identifiers, an empty one, not a string) is a broken integration: thrown.
  */
-export async function askerOf<Req extends { headers: HeaderSource }>(
-    client: Mesub,
+export async function askerOf<Req>(
     request: Req,
-    options: AskerOptions<Req>,
-): Promise<Asking> {
-    if (options.customer) {
-        const named = await options.customer(request);
+    customer: CustomerOption<Req>,
+): Promise<Asked | null> {
+    const named = await customer(request);
 
-        if (named === null || named === undefined) return null;
+    if (named === null || named === undefined) return null;
 
-        const customer = customerOf(named);
+    const asked = customerOf(named);
 
-        if (customer.value === '') {
-            throw new TypeError(
-                '`customer` returned an empty value: return null when nobody is signed in.',
-            );
-        }
-
-        return { customer, userId: null };
+    if (asked.value === '') {
+        throw new TypeError(
+            '`customer` returned an empty value: return null when nobody is signed in.',
+        );
     }
 
-    for (const token of tokensOf(request, options.token)) {
-        try {
-            const verified = await client.verifyToken(token);
-
-            return {
-                customer: { kind: 'wallet', value: verified.wallet },
-                userId: verified.userId,
-            };
-        } catch (error) {
-            // Not a Mesub token, or not a valid one: maybe the next one is.
-            if (error instanceof MesubError && error.code === 'invalid_token') continue;
-            if (error instanceof MesubError && error.code === 'unavailable') return 'unavailable';
-
-            throw error;
-        }
-    }
-
-    return null;
+    return asked;
 }
 
 /** The customer as `decide` takes it. */
@@ -238,11 +165,7 @@ function asCustomer(asked: Asked): Customer | string {
  * The one decision the middlewares make: who is asking, from `askerOf`, then
  * whether they have access to one of the plans.
  *
- * - nobody is asking (no token that verifies, or `customer` returned null):
- *   `unauthenticated`
- * - the keys or the project id could not be fetched: `unavailable`, since
- *   nobody can be identified, so not even the outage fallback can apply.
- *   Never with `customer`, which fetches nothing
+ * - nobody is asking (`customer` returned null): `unauthenticated`
  * - the fallback of `hasAccess` otherwise, per plan, through `decide`,
  *   within the client's `guardTimeout`. The plans are asked at once, so
  *   several fit the same budget, and read in order: the first that grants
@@ -259,16 +182,13 @@ function asCustomer(asked: Asked): Customer | string {
  */
 export async function guard(
     client: Mesub,
-    asking: Asking,
+    asked: Asked | null,
     plansFor: () => readonly string[],
 ): Promise<GuardOutcome> {
-    if (asking === 'unavailable') return { allowed: false, reason: 'unavailable' };
-    if (!asking) return { allowed: false, reason: 'unauthenticated' };
-
-    const asker = asking;
+    if (!asked) return { allowed: false, reason: 'unauthenticated' };
 
     const plans = plansFor();
-    const customer = asCustomer(asker.customer);
+    const customer = asCustomer(asked);
     const pending = plans.map((plan) => client.decide(customer, plan));
 
     // The ones not read, once a plan before them grants, must not reject unhandled.
@@ -281,12 +201,12 @@ export async function guard(
         const decision = await next;
 
         if (decision.access) {
-            return { allowed: true, asker, plan: plans[index]!, decision };
+            return { allowed: true, customer: asked, plan: plans[index]!, decision };
         }
 
         first ??= decision;
         // Mesub failed or did not answer within the budget, and nothing was
-        // cached for that wallet and plan: not a no, an outage.
+        // cached for that customer and plan: not a no, an outage.
         if (decision.unavailable) unavailable ??= decision;
     }
 
@@ -305,10 +225,9 @@ export function denialBody(outcome: Extract<GuardOutcome, { allowed: false }>) {
 }
 
 export function accessOf(outcome: Extract<GuardOutcome, { allowed: true }>): MesubAccess {
-    const { customer, userId } = outcome.asker;
+    const { customer } = outcome;
 
     return {
-        userId,
         wallet:
             customer.kind === 'wallet' ? customer.value : (outcome.decision.answer?.wallet ?? null),
         customer,

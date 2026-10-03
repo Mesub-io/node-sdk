@@ -37,6 +37,7 @@ export type { RequestOptions } from './transport.js';
 export { verifyWebhook } from './webhooks.js';
 export type {
     CreatedDetail,
+    HeaderSource,
     NoDetail,
     PaymentFailedDetail,
     RenewedDetail,
@@ -57,4 +58,3 @@ export type {
     Webhooks,
 } from './webhooks.js';
 export * from './cache/index.js';
-export { type HeaderSource, TOKEN_COOKIE, tokenFrom, type VerifiedToken } from './tokens.js';

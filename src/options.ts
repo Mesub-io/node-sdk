@@ -109,19 +109,6 @@ export function numberOf(
     return given;
 }
 
-/**
- * What the access tokens' `iss` must be: the Mesub API's own public URL,
- * which is the base URL unless a proxy stands in front of it.
- */
-export function issuerOf(given: unknown, baseUrl: string): string {
-    if (given === undefined) return baseUrl;
-    if (typeof given !== 'string' || given === '') {
-        throw new TypeError('issuer must be a non-empty string: the Mesub API URL tokens name.');
-    }
-
-    return given;
-}
-
 /** Headers the SDK sets itself, and no extra header may replace. */
 const OWN_HEADERS = new Set([
     'authorization',
@@ -132,8 +119,8 @@ const OWN_HEADERS = new Set([
 ]);
 
 /**
- * Extra headers for every call, the JWKS included: for a proxy or an access
- * gateway in front of Mesub. Valid names and values only, and none of the
+ * Extra headers for every call: for a proxy or an access gateway in front of
+ * Mesub. Valid names and values only, and none of the
  * SDK's own, so the API key can never be swapped for another.
  */
 export function headersOf(given: unknown): Record<string, string> {

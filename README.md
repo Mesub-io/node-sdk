@@ -46,8 +46,8 @@ Three walkthroughs, in the order you need them:
    payment or stops.
 
 The [`@mesub/react`](https://github.com/Mesub-io/react-sdk) widget is
-optional: a ready-made sign-in and checkout. Today it still subscribes
-through an older path, being moved to the one above.
+optional: a ready-made checkout that calls your own server, see
+[Routes for the React widget](#routes-for-the-react-widget).
 
 ## Configuration
 
@@ -61,13 +61,13 @@ One key on your server, from your Mesub dashboard:
 
 ## Gate a route
 
-Ask Mesub before serving. How you name the customer depends on who signs
-your users in.
+Ask Mesub before serving. Your own login says who the user is; Mesub says
+whether they have access.
 
-### With your own login
+### With `hasAccess`
 
-Your login says who the user is: ask about them by your own id, the
-`external_id` you passed when they subscribed.
+Ask about the user by your own id, the `external_id` you passed when they
+subscribed.
 
 ```ts
 import { Mesub } from '@mesub/node';
@@ -124,11 +124,12 @@ Mesub may add a status, an end reason or an outcome: the SDK hands back one
 it does not know rather than throw, so keep a default branch. `paused` and
 `end_reason` are read as `false` and `null` from an API that predates them.
 
-#### The guards, with your own login
+### With a guard
 
-The guards do the same in one line, and answer the refusals themselves: give
+The guards, `requirePlan` (Express), `withMesub` (Next) and `RequirePlan`
+(Nest), do the same in one line, and answer the refusals themselves. Give
 them `customer`, a function of the request returning who your login says is
-asking. No Mesub token is read then, and nothing of `@mesub/react` is needed.
+asking: it is required, and the only way a guard learns who is asking.
 
 ```ts
 import { requirePlan } from '@mesub/node/express';
@@ -148,7 +149,10 @@ app.get(
     requirePlan('pro', {
         customer: (req) => (req.user ? { external_id: req.user.id } : null),
     }),
-    (req, res) => res.json(buildReport(res.locals.mesub)),
+    (req, res) => {
+        const { customer, wallet, answer } = res.locals.mesub; // who, and what Mesub said
+        res.json(buildReport(customer));
+    },
 );
 ```
 
@@ -167,37 +171,103 @@ export const GET = withMesub(async (request, mesub) => Response.json(await repor
 
 ```ts
 // Nest
-import { type MesubRequest, RequirePlan } from '@mesub/node/nest';
+import { Controller, Get, UseGuards } from '@nestjs/common';
+import { MesubAccess, type MesubRequest, RequirePlan } from '@mesub/node/nest';
 
 // The request as your own guard leaves it.
 interface AuthedRequest extends MesubRequest {
     user?: { id: string };
 }
 
+@Controller('reports')
 @UseGuards(
     YourAuthGuard,
     RequirePlan<AuthedRequest>('pro', {
         customer: (req) => (req.user ? { external_id: req.user.id } : null),
     }),
 )
+export class ReportsController {
+    @Get()
+    list(@MesubAccess() mesub: MesubAccess) {
+        return buildReport(mesub.customer);
+    }
+}
 ```
 
 - Return a customer as in [Who to ask about](#who-to-ask-about): `{ external_id }`,
   a wallet, or `{ email }`. It may be async.
 - The id is a string: with numeric ids, pass `String(user.id)`.
 - Return `null` or `undefined` when nobody is signed in: the guard answers 401.
-  402 and 503 are answered as with a token.
 - Anything else (two identifiers, an empty string) is thrown as a `TypeError`:
   a bug in the integration, never a refusal.
-- `customer` and `token` together are refused when the guard is built.
+- A guard built without `customer` throws a `TypeError` at once, before any
+  request.
 - The route gets `mesub.customer` (who was asked about), `mesub.wallet` (the
-  wallet that pays, as Mesub answered it) and `mesub.userId`, null here: it
-  is the Mesub account, which only a Mesub token names.
+  wallet that pays, as Mesub answered it), `mesub.plan` and `mesub.answer`:
+  on `res.locals.mesub` in Express, as the handler's second argument in Next,
+  through `@MesubAccess()` in Nest.
 
 > **The customer must come from a session you verified**, never from the
 > request itself: not a query, a body, nor a header the caller writes. A
 > guard reading `req.query.wallet` lets anyone in who types a subscriber's
 > address.
+
+All three answer a refusal themselves:
+
+| Status  | When                                                                                                    | Body                                             |
+| ------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **401** | `customer` returned `null` or `undefined`: nobody is signed in                                          | `{ access: false, reason: 'unauthenticated' }`   |
+| **402** | Mesub said this customer has no access to that plan, or to any of the list                              | `{ access: false, reason: 'no_access', status }` |
+| **503** | Mesub failed (outage, rate limit, `guardTimeout` run out) on a customer it never saw. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
+
+`onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
+own JSON. In Nest it throws your own exception, and the default refusal is
+thrown if it returns. It may be async: it is awaited, and what it throws or
+rejects with goes where an integration error goes. A broken integration (a
+bad API key, an unknown plan) is never a refusal: Express gets it through
+`next(err)`, Next and Nest through a thrown error, answered 500.
+
+#### Which plan
+
+The plan is a slug, a list, or a function of the request giving either:
+
+```ts
+requirePlan('pro', { customer }); // that plan
+requirePlan(['pro', 'team'], { customer }); // any one of them
+
+// worked out per request, from a list you wrote
+const PLANS = new Map([
+    ['reports', ['pro', 'team']],
+    ['exports', ['team']],
+]);
+requirePlan((req) => PLANS.get(String(req.params.feature)) ?? 'team', { customer });
+```
+
+`withMesub` takes the same as `{ plan }`, `RequirePlan` as its first argument.
+For a list, the plans are asked at once and read in order: the first that
+grants lets the request through, without waiting for the ones after it, and
+`mesub.plan` with `mesub.answer` say which plan it was and what Mesub
+answered for it. Each plan keeps its own outage fallback, within the one
+`guardTimeout`:
+
+| None of the plans grants, and                       | Answer                                                         |
+| --------------------------------------------------- | -------------------------------------------------------------- |
+| Mesub said no for every one                         | **402**, with the `status` of the first plan of the list       |
+| Mesub failed on one it never answered this customer | **503** with `Retry-After`: nobody knows yet whether it grants |
+
+The plan comes from what the route serves, never from what the request asks
+for: `(req) => req.query.tier` lets anyone pick the plan they are checked
+against. Map the request to a list you wrote, as above, or guard with every
+plan the route accepts and serve according to `mesub.plan`. A function runs
+only once `customer` named somebody, so an anonymous request never reaches it.
+
+A guard asks about **3 plans at most**, what a Dev project holds: each one is
+a call to Mesub on every request, against your key's 1000 calls a minute.
+
+An unknown plan is a broken integration, like a bad API key, unless a plan
+earlier in the list already let the request through. An empty list, an empty
+slug, or more than 3 plans is thrown when the guard is built, or on the
+request for a function.
 
 ### Who to ask about
 
@@ -215,7 +285,7 @@ await mesub.hasAccess({ email: 'ada@example.com' }, 'pro'); // the email given w
   across several: access if any of them grants it, and the answer names that
   wallet.
 - **`wallet`** for a wallet-only dApp, where the connected wallet is the
-  customer. This is what the guards use when they read a Mesub access token.
+  customer.
 - **`email`** as a fallback, or for a support lookup: it is the address given
   when they subscribed, never verified by Mesub, so anyone could have typed
   it.
@@ -235,137 +305,6 @@ const { plans } = await mesub.accessList({ external_id: user.id });
 It is cached on its own, for its own `revalidate_after`, and throws like
 `access` when Mesub cannot answer. `access` and `hasAccess` always need a plan:
 called without one, they throw a `TypeError` instead of asking.
-
-### With a Mesub access token
-
-Without `customer`, the guards, `requirePlan` (Express), `withMesub` (Next)
-and `RequirePlan` (Nest), take the customer from a Mesub **access token**: a one-hour
-token that the `@mesub/react` widget's sign-in issues today, sent in
-`Authorization: Bearer` and in a `mesub-token` cookie. They verify it locally,
-with Mesub's public keys (fetched once from `/.well-known/jwks.json`), ask
-about the wallet behind it, and answer refusals themselves. The wallet then
-comes from that token alone, never from the request.
-
-With Express:
-
-```ts
-import { requirePlan } from '@mesub/node/express';
-
-app.get('/api/reports', requirePlan('pro'), (req, res) => {
-    const { wallet, answer } = res.locals.mesub; // who, and what Mesub said
-    res.json(buildReport(wallet));
-});
-```
-
-With a Next.js App Router route handler:
-
-```ts
-import { withMesub } from '@mesub/node/next';
-
-export const GET = withMesub(
-    async (request, mesub, context) => Response.json(await buildReport(mesub.wallet)),
-    { plan: 'pro' },
-);
-```
-
-With a NestJS controller or route:
-
-```ts
-import { Controller, Get, UseGuards } from '@nestjs/common';
-import { MesubAccess, RequirePlan } from '@mesub/node/nest';
-
-@Controller('reports')
-@UseGuards(RequirePlan('pro'))
-export class ReportsController {
-    @Get()
-    list(@MesubAccess() mesub: MesubAccess) {
-        return buildReport(mesub.wallet);
-    }
-}
-```
-
-All three read the Mesub access token from `Authorization: Bearer`, then from
-the `mesub-token` cookie: when your app already sends a bearer of its own (your
-session JWT), a bearer that does not verify as a Mesub token falls back on the
-cookie. If the token travels elsewhere, say where with `token`; it is then the
-only place looked at:
-
-```ts
-requirePlan('pro', { token: (req) => req.get('x-mesub-token') });
-```
-
-All three answer a refusal themselves:
-
-| Status  | When                                                                                                                               | Body                                             |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| **401** | No token, or one that is forged, expired, or for another project                                                                   | `{ access: false, reason: 'unauthenticated' }`   |
-| **402** | Mesub said this subscriber has no access to that plan, or to any of the list                                                       | `{ access: false, reason: 'no_access', status }` |
-| **503** | Nobody can be identified, or Mesub failed (outage, rate limit, `guardTimeout` run out) on a wallet it never saw. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
-
-`onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
-own JSON. In Nest it throws your own exception, and the default refusal is
-thrown if it returns. It may be async: it is awaited, and what it throws or
-rejects with goes where an integration error goes. A broken integration (a
-bad API key, an unknown plan) is never a refusal: Express gets it through
-`next(err)`, Next and Nest through a thrown error, answered 500.
-
-#### Which plan
-
-The plan is a slug, a list, or a function of the request giving either:
-
-```ts
-requirePlan('pro'); // that plan
-requirePlan(['pro', 'team']); // any one of them
-
-// worked out per request, from a list you wrote
-const PLANS = new Map([
-    ['reports', ['pro', 'team']],
-    ['exports', ['team']],
-]);
-requirePlan((req) => PLANS.get(String(req.params.feature)) ?? 'team');
-```
-
-`withMesub` takes the same as `{ plan }`, `RequirePlan` as its first argument.
-For a list, the plans are asked at once and read in order: the first that
-grants lets the request through, without waiting for the ones after it, and
-`mesub.plan` with `mesub.answer` say which plan it was and what Mesub
-answered for it. Each plan keeps its own outage fallback, within the one
-`guardTimeout`:
-
-| None of the plans grants, and                         | Answer                                                         |
-| ----------------------------------------------------- | -------------------------------------------------------------- |
-| Mesub said no for every one                           | **402**, with the `status` of the first plan of the list       |
-| Mesub failed on one it never answered for this wallet | **503** with `Retry-After`: nobody knows yet whether it grants |
-
-The plan comes from what the route serves, never from what the request asks
-for: `(req) => req.query.tier` lets anyone pick the plan they are checked
-against. Map the request to a list you wrote, as above, or guard with every
-plan the route accepts and serve according to `mesub.plan`. A function runs
-only once the Mesub token verifies, so an anonymous request never reaches it.
-
-A guard asks about **3 plans at most**, what a Dev project holds: each one is
-a call to Mesub on every request, against your key's 1000 calls a minute.
-
-An unknown plan is a broken integration, like a bad API key, unless a plan
-earlier in the list already let the request through. An empty list, an empty
-slug, or more than 3 plans is thrown when the guard is built, or on the
-request for a function.
-
-#### Without a middleware
-
-What the guards do, by hand:
-
-```ts
-import { Mesub, tokenFrom } from '@mesub/node';
-
-const mesub = new Mesub(); // reads MESUB_API_KEY
-
-const token = tokenFrom(request); // Authorization bearer, else the mesub-token cookie
-const { wallet } = await mesub.verifyToken(token!);
-
-await mesub.hasAccess(wallet, 'pro'); // true or false, for a guard
-await mesub.access(wallet, 'pro'); // the full answer: status, dates, next charge
-```
 
 ## Show your plans
 
@@ -407,7 +346,7 @@ leaves your server.
     ```
 
     Pass `external_id` when your app has a login: it is how
-    [Gate a route](#with-your-own-login) finds this customer, whichever wallet
+    [Gate a route](#gate-a-route) finds this customer, whichever wallet
     pays. Called again for the same plan and wallet while nothing landed,
     `create` answers the same subscription with a fresh transaction, and the
     `email` and `external_id` of the last call replace those before.
@@ -746,8 +685,6 @@ client: `await verifyWebhook(await request.text(), request.headers)`.
 
 ## When Mesub does not answer
 
-- **Verifying a token** needs Mesub only on the first token after a start, and
-  after a key rotation: the keys and the project id are then kept in memory.
 - **`hasAccess`** never locks out a paying subscriber for an outage, nor lets a
   stranger in: after its retries it serves the last answer it knew for that
   customer and plan, even stale (for up to 24 hours, see `maxStaleMs`), and
@@ -758,10 +695,10 @@ client: `await verifyWebhook(await request.text(), request.headers)`.
   retries happen only while they fit, a `Retry-After` that would outlast it
   is not waited, and a 429 is never retried. When it runs out, or Mesub fails
   (5xx, 429, network), the guard answers from the last answer it knew, like
-  `hasAccess`, or 503 with `Retry-After: 30` for a wallet it never saw, since
-  nobody knows yet whether it pays: 402 only ever means Mesub said no.
-  Verifying the token is not counted: it needs Mesub only once per process,
-  as said above.
+  `hasAccess`, or 503 with `Retry-After: 30` for a customer it never saw,
+  since nobody knows yet whether they pay: 402 only ever means Mesub said no.
+  The access check is the only call a guard makes to Mesub: who is asking
+  comes from your own login.
 - **Many requests at once** for a customer not in the cache send Mesub one
   request, not one each: 50 checks of the same wallet on the same plan wait
   for the same answer, or the same error. The guards share theirs with each
@@ -789,7 +726,6 @@ that: `guardTimeout` binds the guards only.
 new Mesub({
     apiKey, // default: process.env.MESUB_API_KEY
     baseUrl, // default: https://api.mesub.io, may carry a path
-    issuer, // the tokens' iss, default: baseUrl
     headers, // extra headers on every call, e.g. for a proxy
     timeout, // per attempt, ms, default 5000
     maxRetries, // default 2
@@ -805,19 +741,16 @@ They are checked once, by `new Mesub()`, which throws a `TypeError` naming
 the option: a `baseUrl` that is not https (plain http only to `localhost` or
 `127.0.0.1`: every call carries the key), a timeout that is not a positive
 number of milliseconds, `maxRetries` or `maxStaleMs` below 0, or the
-publishable `PUB_` key where the secret `SUB_` one goes. On an edge runtime
+publishable `PUB_` key where the API key (`SUB_`) goes. On an edge runtime
 without `process.env` (Cloudflare Workers), pass `apiKey` yourself.
 
-Behind a proxy, `baseUrl` may carry a path: every call, the public keys
-included, goes under it (`https://proxy.example.com/mesub/v1/access`,
-`.../mesub/.well-known/jwks.json`). The access tokens still name Mesub's own
-URL as their issuer, so say which, and add whatever the proxy asks for, such
-as a Cloudflare Access service token:
+Behind a proxy, `baseUrl` may carry a path: every call goes under it
+(`https://proxy.example.com/mesub/v1/access`). Add whatever the proxy asks
+for, such as a Cloudflare Access service token:
 
 ```ts
 new Mesub({
     baseUrl: 'https://proxy.example.com/mesub',
-    issuer: 'https://api.mesub.io',
     headers: {
         'CF-Access-Client-Id': process.env.CF_ACCESS_CLIENT_ID!,
         'CF-Access-Client-Secret': process.env.CF_ACCESS_CLIENT_SECRET!,
@@ -826,8 +759,7 @@ new Mesub({
 ```
 
 `headers` cannot replace the SDK's own (`Authorization`, `User-Agent`,
-`Accept`, `Content-Type`, `Mesub-Version`), and the API key is never sent for
-the public keys.
+`Accept`, `Content-Type`, `Mesub-Version`).
 
 The memory cache is per process and emptied on restart. A store is three
 methods, so Redis is a few lines, and keeps the outage fallback across
@@ -888,7 +820,6 @@ and a stable `code` to branch on:
 | `conflict`        | 409, e.g. a wallet already subscribed                                   |
 | `rate_limited`    | 429, after the retries                                                  |
 | `unavailable`     | 5xx, a timeout or a network error, after the retries                    |
-| `invalid_token`   | an access token that fails verification                                 |
 | `invalid_webhook` | a webhook that fails verification: signature, headers or timestamp      |
 | `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
 
@@ -912,8 +843,8 @@ see [Subscribe from your server](#subscribe-from-your-server).
 ## Test your integration
 
 `@mesub/node/testing` is a fake Mesub for your own tests: it answers what the
-SDK asks (`/v1/access`, `/v1/project`, `/v1/subscriptions`, the public keys)
-from what each test sets, through a `fetch` handed to the client. No network,
+SDK asks (`/v1/access`, `/v1/plans`, `/v1/subscriptions`) from what each
+test sets, through a `fetch` handed to the client. No network,
 no Mesub account, and nothing of it in your production bundle.
 
 ```ts
@@ -928,11 +859,10 @@ fake.deny(wallet, 'team', { status: 'stopped' }); // or setAccess(...) for any a
 
 await mesub.hasAccess(wallet, 'pro'); // true
 
-// A guard, end to end: a token signed by the fake, for its project.
-app.get('/api/reports', requirePlan('pro', { client: mesub }), handler);
-await request(app)
-    .get('/api/reports')
-    .set('Authorization', `Bearer ${await fake.token(wallet)}`);
+// A guard, end to end: the test says who is signed in.
+const customer = () => ({ external_id: 'user_42' });
+app.get('/api/reports', requirePlan('pro', { client: mesub, customer }), handler);
+await request(app).get('/api/reports'); // 200
 
 fake.fail('outage'); // every access and subscriptions call answers 503, until fail(null)
 fake.fail({ status: 429, code: 'rate_limited', retryAfter: 2 });
@@ -963,7 +893,7 @@ signs a body of your own.
 ## Requirements
 
 Node 22 or later. Express, Next and `@nestjs/common` are optional peer
-dependencies: install the one you use. `jose` is the only runtime dependency.
+dependencies: install the one you use. There is no runtime dependency.
 
 What CI runs the tests against: Node 22 and 24; Express 5, and Express 4 on
 Node 22; Nest 12. `@mesub/node/next` imports nothing from Next, only the Web
@@ -1001,7 +931,7 @@ error code under the SDK. With the back running locally (`pnpm start:dev` in
 Mesub-io/backend):
 
 ```sh
-# in the backend: write a merchant, a key, a plan and a subscriber's token
+# in the backend: write a merchant, a key, its plans and their subscribers
 pnpm -s contract:fixture > /tmp/mesub-contract.env
 
 # here

@@ -169,41 +169,23 @@ describe('FakeMesub', () => {
         expect(error).toMatchObject({ status: 429, code: 'rate_limited', retryAfter: 2000 });
     });
 
-    it('signs tokens its clients verify', async () => {
-        const fake = new FakeMesub();
-        const mesub = fake.client();
-
-        await expect(
-            mesub.verifyToken(await fake.token(WALLET, { userId: 'user_1' })),
-        ).resolves.toEqual({ userId: 'user_1', wallet: WALLET });
-        expect(
-            await codeOf(mesub.verifyToken(await fake.token(WALLET, { expiresIn: '-1m' }))),
-        ).toBe('invalid_token');
-        // Another fake's key, project or issuer is not this one's.
-        expect(await codeOf(mesub.verifyToken(await new FakeMesub().token(WALLET)))).toBe(
-            'invalid_token',
-        );
-    });
-
     it('drives a guard end to end', async () => {
         const fake = new FakeMesub();
         fake.grant(WALLET, 'pro');
         const app = express().get(
             '/pro',
-            requirePlan('pro', { client: fake.client() }),
+            // Stands for the app's own login: a test header names who is signed in.
+            requirePlan('pro', {
+                client: fake.client(),
+                customer: (req) => req.get('x-test-user') ?? null,
+            }),
             (_q, res) => {
                 res.json({ ok: true });
             },
         );
 
-        await request(app)
-            .get('/pro')
-            .set('Authorization', `Bearer ${await fake.token(WALLET)}`)
-            .expect(200, { ok: true });
-        await request(app)
-            .get('/pro')
-            .set('Authorization', `Bearer ${await fake.token(OTHER)}`)
-            .expect(402);
+        await request(app).get('/pro').set('x-test-user', WALLET).expect(200, { ok: true });
+        await request(app).get('/pro').set('x-test-user', OTHER).expect(402);
         await request(app).get('/pro').expect(401);
     });
 
@@ -516,10 +498,7 @@ describe('FakeMesub', () => {
         const mesub = fake.client();
 
         await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
-        await expect(mesub.verifyToken(await fake.token(WALLET))).resolves.toMatchObject({
-            wallet: WALLET,
-        });
-        expect(fake.requests.map((r) => r.path)).toContain('/.well-known/jwks.json');
+        expect(fake.requests.map((r) => r.path)).toEqual(['/v1/access']);
     });
 
     it('forgets everything on reset', async () => {

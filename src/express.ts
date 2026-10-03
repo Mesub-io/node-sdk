@@ -5,7 +5,7 @@ import type { Mesub } from './client.js';
 import {
     accessOf,
     askerOf,
-    checkAsker,
+    checkCustomer,
     checkPlan,
     type CustomerOption,
     type Denial,
@@ -16,7 +16,6 @@ import {
     type MesubAccess,
     type PlanOption,
     plansOf,
-    type TokenOption,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
@@ -40,18 +39,12 @@ export interface RequirePlanOptions {
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
     /**
-     * Where the Mesub access token is, when not in the bearer or the
-     * `mesub-token` cookie: `(req) => req.get('x-mesub-token')`. Then the
-     * only place looked at.
-     */
-    token?: TokenOption<Request>;
-    /**
-     * Who is asking, from your own auth, instead of a Mesub token:
+     * Who is asking, from your own auth:
      * `(req) => ({ external_id: req.user.id })`, a wallet or an email. Null when
      * nobody is signed in. It must come from a session you verified, never
-     * from the request itself. Not with `token`.
+     * from the request itself.
      */
-    customer?: CustomerOption<Request>;
+    customer: CustomerOption<Request>;
     /**
      * Answer a refusal yourself: a redirect, a page, your own JSON. It may be
      * async: what it returns is awaited, and a throw or a rejection goes to
@@ -66,24 +59,22 @@ export interface RequirePlanOptions {
  * out per request from a list you wrote, never read from the request itself.
  * `res.locals.mesub.plan` says which one let it through.
  *
- * With `customer`, who is asking is who your own auth says, and no Mesub
- * token is read. Otherwise the subscriber is who the Mesub access token says, from the Authorization
- * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
- * token), or where `token` says. Refusals answer 401 (nobody signed in),
- * 402 (Mesub said no) or 503 with Retry-After (Mesub unreachable, with no
- * answer known for that subscriber). Integration errors go to `next(err)`.
+ * Who is asking is who `customer` says, from your own auth. Refusals answer
+ * 401 (nobody signed in), 402 (Mesub said no) or 503 with Retry-After (Mesub
+ * unreachable, with no answer known for that subscriber). Integration errors
+ * go to `next(err)`.
  */
 export function requirePlan(
     plan: PlanOption<Request>,
-    options: RequirePlanOptions = {},
+    options: RequirePlanOptions,
 ): RequestHandler {
     checkPlan(plan);
-    checkAsker(options);
+    checkCustomer(options);
 
     return async (req, res, next) => {
         try {
             const client = options.client ?? defaultClient();
-            const outcome = await guard(client, await askerOf(client, req, options), () =>
+            const outcome = await guard(client, await askerOf(req, options.customer), () =>
                 plansOf(plan, req),
             );
 

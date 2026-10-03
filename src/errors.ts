@@ -5,10 +5,8 @@ import type { ServerSubscription } from './subscriptions.js';
  * causes within one apart. `unexpected` covers any status without its own
  * code (408, 413, a 2xx whose body is not JSON or not of the shape the SDK
  * reads, a 404 whose body is not a Mesub error, so a wrong `baseUrl`, ...).
- * `invalid_token` is an access token that fails verification: forged,
- * expired, or for another project. `invalid_webhook` is a webhook that fails
- * verification: a header missing, no signature matching the secret, a
- * timestamp too far from now.
+ * `invalid_webhook` is a webhook that fails verification: a header missing,
+ * no signature matching the secret, a timestamp too far from now.
  */
 export type MesubErrorCode =
     | 'invalid_request'
@@ -19,7 +17,6 @@ export type MesubErrorCode =
     | 'conflict'
     | 'rate_limited'
     | 'unavailable'
-    | 'invalid_token'
     | 'invalid_webhook'
     | 'unexpected';
 

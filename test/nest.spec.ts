@@ -10,7 +10,6 @@ import {
     UseGuards,
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
 import request from 'supertest';
 
 import type { AccessAnswer } from '../src/answer.js';
@@ -25,18 +24,14 @@ import {
 } from '../src/nest.js';
 
 const BASE = 'https://api.mesub.test';
-const PROJECT = 'proj_1';
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 const ATTACKER = 'Attacker111111111111111111111111111111111111';
 
-let privateKey: CryptoKey;
-let jwk: JWK;
-
-beforeAll(async () => {
-    const pair = await generateKeyPair('ES256');
-    privateKey = pair.privateKey;
-    jwk = { ...(await exportJWK(pair.publicKey)), kid: 'key-1', alg: 'ES256', use: 'sig' };
-});
+/** Stands for the merchant's own verified session: who it says is signed in. */
+const SESSION = 'x-test-session';
+const SIGNED_IN = { [SESSION]: WALLET };
+const session = (request: MesubRequest) =>
+    (request.headers as Record<string, string | undefined>)[SESSION];
 
 function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     return {
@@ -60,32 +55,9 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
-/** A merchant's own session JWT, sent as a bearer on every request: not a Mesub token. */
-function theirs() {
-    return new SignJWT({ role: 'admin' })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setSubject('merchant_user_9')
-        .setExpirationTime('1h')
-        .sign(new TextEncoder().encode('the-merchant-own-secret-32-bytes!!'));
-}
-
-async function token(over: { aud?: string; exp?: string } = {}) {
-    return new SignJWT({ wallet: WALLET })
-        .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
-        .setSubject('user_1')
-        .setAudience(over.aud ?? PROJECT)
-        .setIssuer(BASE)
-        .setIssuedAt()
-        .setExpirationTime(over.exp ?? '1h')
-        .sign(privateKey);
-}
-
 interface Mesh {
     /** What /v1/access answers, per call. */
     access?: (init?: RequestInit, url?: URL) => Response | Promise<Response>;
-    /** What the JWKS and /v1/project answer; healthy by default. */
-    keys?: () => Response;
-    project?: () => Response;
 }
 
 /** A Mesub whose API is a function, so each test says what it answers. */
@@ -94,10 +66,6 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
         calls.push(url.pathname);
-        if (url.pathname === '/.well-known/jwks.json')
-            return mesh.keys?.() ?? Response.json({ keys: [jwk] });
-        if (url.pathname === '/v1/project')
-            return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
             return (mesh.access ?? (() => Response.json(answer())))(init, url);
         throw new Error(`unexpected ${url.pathname}`);
@@ -135,12 +103,17 @@ afterEach(async () => {
     await Promise.all(apps.splice(0).map((nest) => nest.close()));
 });
 
-/** A Nest app with a guarded route echoing `@MesubAccess()`, and a guarded controller. */
+/**
+ * A Nest app with a guarded route echoing `@MesubAccess()`, and a guarded
+ * controller. Signed in by the test session, unless `customer` is given.
+ */
 async function app(
     client: Mesub,
-    options: Omit<RequirePlanOptions, 'client'> = {},
+    given: Partial<Omit<RequirePlanOptions, 'client'>> = {},
     plan: PlanOption<MesubRequest> = 'pro',
 ) {
+    const options = { customer: session, ...given };
+
     @Controller()
     class RouteController {
         @Get('pro')
@@ -181,7 +154,7 @@ describe('RequirePlan', () => {
 
             await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(200);
         });
 
@@ -190,10 +163,9 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.body).toEqual({
-                userId: 'user_1',
                 wallet: WALLET,
                 customer: { kind: 'wallet', value: WALLET },
                 plan: 'pro',
@@ -202,23 +174,14 @@ describe('RequirePlan', () => {
             });
         });
 
-        it('reads the token from the mesub-token cookie', async () => {
-            const { client } = mesub();
-
-            await request(await app(client))
-                .get('/pro')
-                .set('Cookie', `mesub-token=${await token()}`)
-                .expect(200);
-        });
-
-        // The wallet asked about is the token's, never one the request names.
-        it('asks Mesub about the wallet in the token', async () => {
+        // Who is asked about is who `customer` names, never one the request names.
+        it('asks Mesub about the wallet the session names', async () => {
             const { client } = mesub();
             const decide = vi.spyOn(client, 'decide');
 
             const response = await request(await app(client))
                 .get(`/pro?wallet=${ATTACKER}`)
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .set('x-wallet', ATTACKER);
 
             expect(decide).toHaveBeenCalledWith(WALLET, 'pro');
@@ -237,10 +200,14 @@ describe('RequirePlan', () => {
 
     describe('401, not signed in', () => {
         it.each([
-            ['no token at all', {} as Record<string, string>],
-            ['another scheme', { Authorization: 'Basic abc' }],
+            ['no session at all', {} as Record<string, string>],
+            // Only `customer` says who is asking: nothing else of the request is read.
+            [
+                'a bearer and a cookie the guard does not read',
+                { Authorization: `Bearer ${WALLET}`, Cookie: `wallet=${WALLET}` },
+            ],
         ])('answers 401 on %s', async (_label, headers) => {
-            const { client } = mesub();
+            const { client, calls } = mesub();
 
             const response = await request(await app(client))
                 .get('/pro')
@@ -248,99 +215,20 @@ describe('RequirePlan', () => {
 
             expect(response.status).toBe(401);
             expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(calls).toEqual([]);
         });
 
-        it('answers 401 on a token for another project', async () => {
-            const { client } = mesub();
-
-            await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token({ aud: 'proj_2' })}`)
-                .expect(401);
-        });
-
-        it('answers 401 on an expired token', async () => {
-            const { client } = mesub();
-
-            await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token({ exp: '-10s' })}`)
-                .expect(401);
-        });
-
-        it('answers 401 on something that is not a token', async () => {
-            const { client } = mesub();
-
-            await request(await app(client))
-                .get('/pro')
-                .set('Authorization', 'Bearer not-a-token')
-                .expect(401);
-        });
-
-        it('never asks /v1/access without a valid token', async () => {
+        it('never asks Mesub when nobody is signed in', async () => {
             const { client, calls } = mesub();
 
             await request(await app(client)).get('/pro');
 
-            expect(calls).not.toContain('/v1/access');
-        });
-    });
-
-    // A merchant's own `Authorization: Bearer` must not hide the cookie (#36).
-    describe('a bearer that is not a Mesub token', () => {
-        it('falls back on the mesub-token cookie', async () => {
-            const { client } = mesub();
-
-            const response = await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`)
-                .set('Cookie', `mesub-token=${await token()}`);
-
-            expect(response.status).toBe(200);
-            expect(response.body.wallet).toBe(WALLET);
-        });
-
-        it('answers 401 when there is no cookie behind it', async () => {
-            const { client } = mesub();
-
-            await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`)
-                .expect(401);
-        });
-
-        it('never tries the cookie once the keys could not be fetched', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
-            const verify = vi.spyOn(client, 'verifyToken');
-
-            await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .set('Cookie', `mesub-token=${await token({ exp: '2h' })}`)
-                .expect(503);
-            expect(verify).toHaveBeenCalledOnce();
-        });
-
-        it('reads the token where the token option says, and only there', async () => {
-            const { client } = mesub();
-            const server = await app(client, {
-                token: (request) => (request.headers as Record<string, string>)['x-mesub-token'],
-            });
-
-            await request(server)
-                .get('/pro')
-                .set('Authorization', `Bearer ${await theirs()}`)
-                .set('x-mesub-token', await token())
-                .expect(200);
-            await request(server)
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
-                .expect(401);
+            expect(calls).toEqual([]);
         });
     });
 
     describe('customer option: who is asking, from the merchant own auth', () => {
-        it('lets a customer through by external id, with no Mesub token at all', async () => {
+        it('lets a customer through by external id', async () => {
             const queries: Record<string, string>[] = [];
             const { client, calls } = mesub({
                 access: (_init, url) => {
@@ -357,7 +245,6 @@ describe('RequirePlan', () => {
             expect(queries).toEqual([{ external_id: 'user_42', plan: 'pro' }]);
             expect(calls).toEqual(['/v1/access']);
             expect(response.body).toEqual({
-                userId: null,
                 wallet: WALLET,
                 customer: { kind: 'external_id', value: 'user_42' },
                 plan: 'pro',
@@ -378,13 +265,13 @@ describe('RequirePlan', () => {
         });
 
         it.each([null, undefined])(
-            'answers 401 when it returns %s, a Mesub token or not',
+            'answers 401 when it returns %s: nobody is signed in',
             async (none) => {
                 const { client, calls } = mesub();
 
-                const response = await request(await app(client, { customer: () => none }))
-                    .get('/pro')
-                    .set('Authorization', `Bearer ${await token()}`);
+                const response = await request(await app(client, { customer: () => none })).get(
+                    '/pro',
+                );
 
                 expect(response.status).toBe(401);
                 expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
@@ -415,12 +302,19 @@ describe('RequirePlan', () => {
                 .expect(500);
         });
 
-        it('refuses to be built with a token too', () => {
+        it.each([
+            ['no options at all', undefined],
+            ['options without it', {}],
+            ['one that is not a function', { customer: { external_id: 'u1' } }],
+        ])('refuses %s when built, and says what to pass', (_name, options) => {
             const { client } = mesub();
+            const build = () =>
+                options === undefined
+                    ? (RequirePlan as (plan: string) => unknown)('pro')
+                    : RequirePlan('pro', { client, ...options } as never);
 
-            expect(() =>
-                RequirePlan('pro', { client, customer: () => null, token: () => null }),
-            ).toThrow(TypeError);
+            expect(build).toThrow(TypeError);
+            expect(build).toThrow(/needs `customer`: a function of the request/);
         });
     });
 
@@ -432,7 +326,7 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(402);
             expect(response.body).toEqual({
@@ -452,11 +346,10 @@ describe('RequirePlan', () => {
                         : Response.json(answer({ revalidate_after: 0 })),
             });
             const server = await app(client);
-            const bearer = `Bearer ${await token()}`;
-            await request(server).get('/pro').set('Authorization', bearer).expect(200);
+            await request(server).get('/pro').set(SIGNED_IN).expect(200);
 
             down = true;
-            const response = await request(server).get('/pro').set('Authorization', bearer);
+            const response = await request(server).get('/pro').set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body.stale).toBe(true);
@@ -475,19 +368,7 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
-
-            expect(response.status).toBe(503);
-            expect(response.headers['retry-after']).toBe('30');
-            expect(response.body).toEqual({ access: false, reason: 'unavailable' });
-        });
-
-        it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
-
-            const response = await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(503);
             expect(response.headers['retry-after']).toBe('30');
@@ -500,35 +381,24 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(503);
             expect(response.headers['retry-after']).toBe('30');
             expect(response.body).toEqual({ access: false, reason: 'unavailable' });
         });
 
-        it('answers 503 when the project id cannot be fetched', async () => {
-            const { client } = mesub({
-                project: () => Response.json({ message: 'down' }, { status: 503 }),
-            });
-
-            const response = await request(await app(client))
-                .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
-
-            expect(response.status).toBe(503);
-            expect(response.headers['retry-after']).toBe('30');
-        });
-
         // A Fastify reply has `header`, not `setHeader`.
         it('sets Retry-After on a Fastify reply too', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
+            const { client } = mesub({ access: () => new Response('boom', { status: 500 }) });
             const reply = { header: vi.fn() };
-            const headers = { authorization: `Bearer ${await token()}` };
             const context = {
-                switchToHttp: () => ({ getRequest: () => ({ headers }), getResponse: () => reply }),
+                switchToHttp: () => ({
+                    getRequest: () => ({ headers: SIGNED_IN }),
+                    getResponse: () => reply,
+                }),
             } as unknown as ExecutionContext;
-            const guard = new (RequirePlan('pro', { client }))();
+            const guard = new (RequirePlan('pro', { client, customer: session }))();
 
             const thrown = await (guard.canActivate(context) as Promise<boolean>).catch(
                 (error: unknown) => error,
@@ -558,7 +428,7 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body).toMatchObject({ plan: 'team', answer: { plan: 'team' } });
@@ -569,7 +439,7 @@ describe('RequirePlan', () => {
 
             await request(await app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(402);
         });
 
@@ -580,7 +450,7 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client, {}, tier))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .set('x-tier', 'team');
 
             expect(response.status).toBe(200);
@@ -590,21 +460,23 @@ describe('RequirePlan', () => {
         it('refuses an empty list when built, and answers 500 on one a function gives', async () => {
             const { client } = mesub();
 
-            expect(() => RequirePlan([], { client })).toThrow(TypeError);
+            expect(() => RequirePlan([], { client, customer: session })).toThrow(/plan/);
             await request(await app(client, {}, () => []))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(500);
         });
 
-        it('refuses more than three plans, and never runs the function without a token', async () => {
+        it('refuses more than three plans, and never runs the function for nobody', async () => {
             const { client } = mesub();
             const plan = vi.fn(() => ['pro', 'team', 'max', 'org']);
 
-            expect(() => RequirePlan(['pro', 'team', 'max', 'org'], { client })).toThrow(TypeError);
+            expect(() =>
+                RequirePlan(['pro', 'team', 'max', 'org'], { client, customer: session }),
+            ).toThrow(/3 plans at most/);
             await request(await app(client, {}, plan))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(500);
 
             plan.mockClear();
@@ -626,7 +498,7 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client, { onDenied }))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(403);
             expect(response.body).toEqual({ upgrade: '/subscribe?why=no_access' });
@@ -683,6 +555,7 @@ describe('RequirePlan', () => {
             let finished = false;
             const guard = new (RequirePlan('pro', {
                 client,
+                customer: session,
                 onDenied: async () => {
                     await new Promise((resolve) => setTimeout(resolve, 10));
                     finished = true;
@@ -709,7 +582,7 @@ describe('RequirePlan', () => {
 
             await request(await app(client, { onDenied }))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set(SIGNED_IN)
                 .expect(200);
             expect(onDenied).not.toHaveBeenCalled();
         });
@@ -718,7 +591,7 @@ describe('RequirePlan', () => {
     // A broken integration must reach Nest as an error, not look like a denial.
     describe('integration errors', () => {
         it.each([
-            ['a bad secret key', 401],
+            ['a bad API key', 401],
             ['an unknown plan', 404],
         ])('answers 500 on %s', async (_label, status) => {
             const { client } = mesub({
@@ -727,7 +600,7 @@ describe('RequirePlan', () => {
 
             const response = await request(await app(client))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`);
+                .set(SIGNED_IN);
 
             expect(response.status).toBe(500);
             expect(response.body).not.toHaveProperty('access');
@@ -741,10 +614,12 @@ describe('RequirePlan', () => {
                         { status: 404 },
                     ),
             });
-            const guard = new (RequirePlan('pro', { client }))();
-            const headers = { authorization: `Bearer ${await token()}` };
+            const guard = new (RequirePlan('pro', { client, customer: session }))();
             const context = {
-                switchToHttp: () => ({ getRequest: () => ({ headers }), getResponse: () => ({}) }),
+                switchToHttp: () => ({
+                    getRequest: () => ({ headers: SIGNED_IN }),
+                    getResponse: () => ({}),
+                }),
             } as unknown as ExecutionContext;
 
             const thrown = await (guard.canActivate(context) as Promise<boolean>).catch(
@@ -762,9 +637,7 @@ describe('RequirePlan', () => {
             const server = await app(client);
 
             await request(server).get('/reports').expect(401);
-            const response = await request(server)
-                .get('/reports')
-                .set('Authorization', `Bearer ${await token()}`);
+            const response = await request(server).get('/reports').set(SIGNED_IN);
 
             expect(response.status).toBe(200);
             expect(response.body).toEqual({ wallet: WALLET });

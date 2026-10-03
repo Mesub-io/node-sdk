@@ -1,8 +1,8 @@
 /**
  * `@mesub/node/testing`: a fake Mesub, for a merchant's own tests. It answers
- * what the SDK calls (`/v1/access`, `/v1/project`, `/v1/subscriptions` and
- * its cancel, resume and close, the public keys) from what the test sets, through a `fetch` handed to the
- * client: no network, no backend, no test framework of its own.
+ * what the SDK calls (`/v1/access`, `/v1/plans`, `/v1/subscriptions` and its
+ * cancel, resume and close) from what the test sets, through a `fetch` handed
+ * to the client: no network, no backend, no test framework of its own.
  *
  * ```ts
  * import { FakeMesub } from '@mesub/node/testing';
@@ -16,8 +16,6 @@
  * await mesub.webhooks.verify(body, headers); // the event
  * ```
  */
-import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
-
 import type { AccessAnswer, Customer } from './answer.js';
 import { Mesub, type MesubOptions } from './client.js';
 import { type Asked, customerOf } from './customer.js';
@@ -35,8 +33,6 @@ export interface FakeMesubOptions {
     baseUrl?: string;
     /** The only key it accepts; any other is answered 401. Defaults to `SUB_test_fake`. */
     apiKey?: string;
-    /** What `/v1/project` answers, and the `aud` of its tokens. Defaults to `proj_test`. */
-    projectId?: string;
     /**
      * The plans that exist: any other slug is answered 404 `plan_not_found`.
      * By default every slug exists. A slug alone, or the fields `plans.list`
@@ -97,13 +93,6 @@ export interface FakeFailure {
     retryAfter?: number;
 }
 
-export interface FakeTokenOptions {
-    /** The token's `sub`. Defaults to `user_test`. */
-    userId?: string;
-    /** A jose duration (`'1h'`, `'-1m'` for one already expired) or epoch seconds. Defaults to `'1h'`. */
-    expiresIn?: string | number;
-}
-
 /** What a test may set of an access answer: all but the plan, named apart. */
 export type FakeAccess = Partial<Omit<AccessAnswer, 'plan'>>;
 
@@ -133,7 +122,6 @@ const OUTAGE: FakeFailure = {
     message: 'Mesub is unavailable.',
 };
 
-const KID = 'fake-key-1';
 /** 24 bytes, as Mesub's secrets are. Only ever a test's. */
 const FAKE_WEBHOOK_SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
 const FAKE_WALLET = '11111111111111111111111111111111';
@@ -152,13 +140,12 @@ const REASONS: Record<number, string> = {
 
 /**
  * A fake Mesub API. Each test sets what a customer has with `grant`, `deny`
- * or `setAccess`, gets a client wired to it with `client()`, an access token
- * the guards accept with `token()`, and makes it fail with `fail()`.
+ * or `setAccess`, gets a client wired to it with `client()`, and makes it
+ * fail with `fail()`.
  */
 export class FakeMesub {
     readonly baseUrl: string;
     readonly apiKey: string;
-    readonly projectId: string;
     readonly webhookSecret: string;
     /** Every call received, oldest first. */
     readonly requests: FakeRequest[] = [];
@@ -172,13 +159,11 @@ export class FakeMesub {
     /** The subscriptions a cancel, resume or close transaction was built for, by id. */
     readonly #built = new Map<string, Set<FakeAction>>();
     #failure: FakeFailure | null = null;
-    #keys: Promise<{ privateKey: CryptoKey; jwk: JWK }> | undefined;
     #ids = 0;
 
     constructor(options: FakeMesubOptions = {}) {
         this.baseUrl = (options.baseUrl ?? 'https://api.mesub.test').replace(/\/+$/, '');
         this.apiKey = options.apiKey ?? 'SUB_test_fake';
-        this.projectId = options.projectId ?? 'proj_test';
         const plans = options.plans?.map((plan) =>
             typeof plan === 'string' ? fakePlan(plan) : fakePlan(plan.slug, plan),
         );
@@ -275,47 +260,20 @@ export class FakeMesub {
     }
 
     /**
-     * Every call to `/v1/access` and `/v1/subscriptions` answers that error
-     * from now on, `'outage'` a 503, until `fail(null)`. The public keys and
-     * `/v1/project`, which a client fetches once, keep answering.
+     * Every call answers that error from now on, `'outage'` a 503, until
+     * `fail(null)`.
      */
     fail(failure: FakeFailure | 'outage' | null): void {
         this.#failure = failure === 'outage' ? OUTAGE : failure;
     }
 
-    /**
-     * An access token for that wallet, as `@mesub/react` hands it: signed by
-     * this fake's key, for its project, so `verifyToken` and the guards of a
-     * client of this fake accept it.
-     */
-    async token(wallet: string, options: FakeTokenOptions = {}): Promise<string> {
-        const { privateKey } = await this.#keyPair();
-
-        return new SignJWT({ wallet })
-            .setProtectedHeader({ alg: 'ES256', kid: KID })
-            .setSubject(options.userId ?? 'user_test')
-            .setAudience(this.projectId)
-            .setIssuer(this.baseUrl)
-            .setIssuedAt()
-            .setExpirationTime(options.expiresIn ?? '1h')
-            .sign(privateKey);
-    }
-
-    /** Forgets every answer, subscription, failure and request. The keys stay. */
+    /** Forgets every answer, subscription, failure and request. */
     reset(): void {
         this.#answers.clear();
         this.#subscriptions = [];
         this.#built.clear();
         this.#failure = null;
         this.requests.length = 0;
-    }
-
-    #keyPair() {
-        this.#keys ??= generateKeyPair('ES256').then(async ({ privateKey, publicKey }) => ({
-            privateKey,
-            jwk: { ...(await exportJWK(publicKey)), kid: KID, alg: 'ES256', use: 'sig' },
-        }));
-        return this.#keys;
     }
 
     #subscription(
@@ -367,14 +325,8 @@ export class FakeMesub {
         const body = typeof init.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined;
         this.requests.push({ method, path, query, headers, body });
 
-        if (method === 'GET' && path === '/.well-known/jwks.json') {
-            return Response.json({ keys: [(await this.#keyPair()).jwk] });
-        }
         if (headers.get('authorization') !== `Bearer ${this.apiKey}`) {
             return error(401, 'invalid_api_key', 'That API key is not valid.');
-        }
-        if (method === 'GET' && path === '/v1/project') {
-            return Response.json({ id: this.projectId });
         }
         if (this.#failure) {
             const { status, code, message, retryable, retryAfter } = this.#failure;

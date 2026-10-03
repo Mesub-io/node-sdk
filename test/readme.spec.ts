@@ -2,6 +2,7 @@ import type { Request } from 'express';
 
 import { requirePlan } from '../src/express.js';
 import { type MesubRequest, RequirePlan } from '../src/nest.js';
+import { withMesub } from '../src/next.js';
 import { FakeMesub } from '../src/testing.js';
 
 /**
@@ -46,5 +47,21 @@ describe('the README snippets for your own login', () => {
 
     it('still takes a guard with no request type named', () => {
         expect(RequirePlan('pro', { client, customer: () => null })).toBeTypeOf('function');
+    });
+
+    // `customer` is required in the types too: each line must fail to compile without it.
+    it('compiles no guard without customer', () => {
+        // @ts-expect-error no options
+        expect(() => requirePlan('pro')).toThrow(TypeError);
+        // @ts-expect-error no customer
+        expect(() => requirePlan('pro', { client })).toThrow(TypeError);
+        // @ts-expect-error no customer
+        expect(() => withMesub(() => new Response('ok'), { plan: 'pro', client })).toThrow(
+            TypeError,
+        );
+        // @ts-expect-error no options
+        expect(() => RequirePlan('pro')).toThrow(TypeError);
+        // @ts-expect-error no customer
+        expect(() => RequirePlan('pro', { client })).toThrow(TypeError);
     });
 });

@@ -15,7 +15,6 @@ const env = {
     key: process.env['MESUB_CONTRACT_KEY'] ?? '',
     plan: process.env['MESUB_CONTRACT_PLAN'] ?? '',
     wallet: process.env['MESUB_CONTRACT_WALLET'] ?? '',
-    token: process.env['MESUB_CONTRACT_TOKEN'] ?? '',
     // The merchant's customer (Mesub-io/backend#210): two wallets, two plans.
     externalId: process.env['MESUB_CONTRACT_EXTERNAL_ID'] ?? '',
     email: process.env['MESUB_CONTRACT_EMAIL'] ?? '',
@@ -473,22 +472,6 @@ describe.skipIf(!env.url)('contract with the back', () => {
             });
 
             expect(await codeOf(stranger.hasAccess(STRANGER, env.plan))).toBe('unauthorized');
-        });
-    });
-
-    describe('access tokens', () => {
-        // The JWKS, the key format, /v1/project, aud and iss, all at once.
-        it('verifies a token the back issued, and names its wallet', async () => {
-            await expect(mesub().verifyToken(env.token)).resolves.toMatchObject({
-                wallet: env.wallet,
-            });
-        });
-
-        it('refuses the same token once edited', async () => {
-            const [header, payload, signature] = env.token.split('.');
-            const edited = `${header}.${payload}x.${signature}`;
-
-            expect(await codeOf(mesub().verifyToken(edited))).toBe('invalid_token');
         });
     });
 

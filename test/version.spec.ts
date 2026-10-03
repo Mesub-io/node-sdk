@@ -33,28 +33,6 @@ describe('the API version', () => {
         }
     });
 
-    it('is sent for the public keys too', async () => {
-        const seen: Headers[] = [];
-        const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-            const url = new URL(String(input instanceof Request ? input.url : input));
-            if (url.pathname === '/v1/project') return Response.json({ id: 'proj_1' });
-            seen.push(new Headers(init?.headers));
-            return Response.json({ keys: [] });
-        });
-        const mesub = new Mesub({
-            apiKey: 'SUB_test',
-            fetch: fetch as unknown as typeof globalThis.fetch,
-        });
-
-        // Well formed enough for jose to look for its key, never verified.
-        const part = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
-        const token = `${part({ alg: 'ES256', kid: 'key-1' })}.${part({ sub: 'u' })}.c2ln`;
-        await mesub.verifyToken(token).catch(() => null);
-
-        expect(seen.length).toBeGreaterThan(0);
-        expect(seen[0]!.get('mesub-version')).toBe(API_VERSION);
-    });
-
     it('cannot be replaced through headers', () => {
         expect(
             () => new Mesub({ apiKey: 'SUB_test', headers: { 'mesub-version': '2020-01-01' } }),

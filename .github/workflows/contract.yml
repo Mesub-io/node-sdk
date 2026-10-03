@@ -129,7 +129,7 @@ jobs:
           node scripts/contract-fixture.mjs > "$RUNNER_TEMP/contract.env"
           while IFS='=' read -r name value; do
             case "$name" in
-              MESUB_CONTRACT_KEY|MESUB_CONTRACT_TOKEN) echo "::add-mask::$value" ;;
+              MESUB_CONTRACT_KEY) echo "::add-mask::$value" ;;
             esac
           done < "$RUNNER_TEMP/contract.env"
           cat "$RUNNER_TEMP/contract.env" >> "$GITHUB_ENV"

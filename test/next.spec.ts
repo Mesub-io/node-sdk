@@ -1,22 +1,15 @@
-import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
-
 import type { AccessAnswer } from '../src/answer.js';
 import { Mesub, type MesubOptions } from '../src/index.js';
 import { MesubError, withMesub, type MesubAccess, type WithMesubOptions } from '../src/next.js';
 
 const BASE = 'https://api.mesub.test';
-const PROJECT = 'proj_1';
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 const ATTACKER = 'Attacker111111111111111111111111111111111111';
 
-let privateKey: CryptoKey;
-let jwk: JWK;
-
-beforeAll(async () => {
-    const pair = await generateKeyPair('ES256');
-    privateKey = pair.privateKey;
-    jwk = { ...(await exportJWK(pair.publicKey)), kid: 'key-1', alg: 'ES256', use: 'sig' };
-});
+/** Stands for the merchant's own verified session: who it says is signed in. */
+const SESSION = 'x-test-session';
+const SIGNED_IN = { [SESSION]: WALLET };
+const session = (request: Request) => request.headers.get(SESSION);
 
 function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     return {
@@ -40,32 +33,9 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     };
 }
 
-/** A merchant's own session JWT, sent as a bearer on every request: not a Mesub token. */
-function theirs() {
-    return new SignJWT({ role: 'admin' })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setSubject('merchant_user_9')
-        .setExpirationTime('1h')
-        .sign(new TextEncoder().encode('the-merchant-own-secret-32-bytes!!'));
-}
-
-async function token(over: { aud?: string; exp?: string } = {}) {
-    return new SignJWT({ wallet: WALLET })
-        .setProtectedHeader({ alg: 'ES256', kid: 'key-1' })
-        .setSubject('user_1')
-        .setAudience(over.aud ?? PROJECT)
-        .setIssuer(BASE)
-        .setIssuedAt()
-        .setExpirationTime(over.exp ?? '1h')
-        .sign(privateKey);
-}
-
 interface Mesh {
     /** What /v1/access answers, per call. */
     access?: (init?: RequestInit, url?: URL) => Response | Promise<Response>;
-    /** What the JWKS and /v1/project answer; healthy by default. */
-    keys?: () => Response;
-    project?: () => Response;
 }
 
 /** A Mesub whose API is a function, so each test says what it answers. */
@@ -74,10 +44,6 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
     const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input));
         calls.push(url.pathname);
-        if (url.pathname === '/.well-known/jwks.json')
-            return mesh.keys?.() ?? Response.json({ keys: [jwk] });
-        if (url.pathname === '/v1/project')
-            return mesh.project?.() ?? Response.json({ id: PROJECT });
         if (url.pathname === '/v1/access')
             return (mesh.access ?? (() => Response.json(answer())))(init, url);
         throw new Error(`unexpected ${url.pathname}`);
@@ -113,12 +79,15 @@ interface Ctx {
     params: Promise<{ id: string }>;
 }
 
-/** A guarded route handler that echoes what it was handed. */
-function route(client: Mesub, options: Omit<WithMesubOptions, 'client' | 'plan'> = {}) {
+/**
+ * A guarded route handler that echoes what it was handed. Signed in by the
+ * test session, unless `customer` is given.
+ */
+function route(client: Mesub, options: Partial<Omit<WithMesubOptions, 'client' | 'plan'>> = {}) {
     return withMesub<Ctx>(
         async (_request, mesub: MesubAccess, context) =>
             Response.json({ mesub, params: await context.params }),
-        { plan: 'pro', client, ...options },
+        { plan: 'pro', client, customer: session, ...options },
     );
 }
 
@@ -128,21 +97,16 @@ function get(headers: Record<string, string> = {}, path = '/api/pro/42') {
 
 const context: Ctx = { params: Promise.resolve({ id: '42' }) };
 
-async function bearer(over: Parameters<typeof token>[0] = {}) {
-    return { Authorization: `Bearer ${await token(over)}` };
-}
-
 describe('withMesub', () => {
     describe('letting through', () => {
         it('hands the handler who is asking, the answer and the untouched context', async () => {
             const { client } = mesub();
 
-            const response = await route(client)(get(await bearer()), context);
+            const response = await route(client)(get(SIGNED_IN), context);
 
             expect(response.status).toBe(200);
             expect(await response.json()).toEqual({
                 mesub: {
-                    userId: 'user_1',
                     wallet: WALLET,
                     customer: { kind: 'wallet', value: WALLET },
                     plan: 'pro',
@@ -158,34 +122,23 @@ describe('withMesub', () => {
             const handler = vi.fn(
                 (_request: Request, _mesub: MesubAccess, _context: Ctx) => new Response('ok'),
             );
-            const request = get(await bearer());
+            const request = get(SIGNED_IN);
 
-            await withMesub(handler, { plan: 'pro', client })(request, context);
+            await withMesub(handler, { plan: 'pro', client, customer: session })(request, context);
 
             expect(handler.mock.calls[0]![0]).toBe(request);
             expect(handler.mock.calls[0]![2]).toBe(context);
         });
 
-        it('reads the token from the mesub-token cookie', async () => {
-            const { client } = mesub();
-
-            const response = await route(client)(
-                get({ Cookie: `theme=dark; mesub-token=${await token()}` }),
-                context,
-            );
-
-            expect(response.status).toBe(200);
-        });
-
-        // The wallet asked about is the token's, never one the request names.
-        it('asks Mesub about the wallet in the token', async () => {
+        // Who is asked about is who `customer` names, never one the request names.
+        it('asks Mesub about the wallet the session names', async () => {
             const { client } = mesub();
             const spy = vi
                 .spyOn(client, 'decide')
                 .mockResolvedValue({ access: true, answer: answer(), stale: false });
 
             await route(client)(
-                get({ ...(await bearer()), 'x-wallet': ATTACKER }, `/api/pro?wallet=${ATTACKER}`),
+                get({ ...SIGNED_IN, 'x-wallet': ATTACKER }, `/api/pro?wallet=${ATTACKER}`),
                 context,
             );
 
@@ -196,8 +149,8 @@ describe('withMesub', () => {
             const { client } = mesub();
             const own = new Response('made here', { status: 201, headers: { 'x-own': '1' } });
 
-            const response = await withMesub(() => own, { plan: 'pro', client })(
-                get(await bearer()),
+            const response = await withMesub(() => own, { plan: 'pro', client, customer: session })(
+                get(SIGNED_IN),
                 context,
             );
 
@@ -210,8 +163,8 @@ describe('withMesub', () => {
         ])('works with %s', async (_label, handler) => {
             const { client } = mesub();
 
-            const response = await withMesub(handler, { plan: 'pro', client })(
-                get(await bearer()),
+            const response = await withMesub(handler, { plan: 'pro', client, customer: session })(
+                get(SIGNED_IN),
                 context,
             );
 
@@ -221,104 +174,35 @@ describe('withMesub', () => {
 
     describe('401, not signed in', () => {
         it.each([
-            ['no token at all', {} as Record<string, string>],
-            ['another scheme', { Authorization: 'Basic abc' }],
-            ['something that is not a token', { Authorization: 'Bearer not-a-token' }],
+            ['no session at all', {} as Record<string, string>],
+            // Only `customer` says who is asking: nothing else of the request is read.
+            [
+                'a bearer and a cookie the guard does not read',
+                { Authorization: `Bearer ${WALLET}`, Cookie: `wallet=${WALLET}` },
+            ],
         ])('answers 401 on %s', async (_label, headers) => {
-            const { client } = mesub();
+            const { client, calls } = mesub();
 
             const response = await route(client)(get(headers), context);
 
             expect(response.status).toBe(401);
             expect(await response.json()).toEqual({ access: false, reason: 'unauthenticated' });
+            expect(calls).toEqual([]);
         });
 
-        it('answers 401 on a token for another project', async () => {
-            const { client } = mesub();
-
-            const response = await route(client)(get(await bearer({ aud: 'proj_2' })), context);
-
-            expect(response.status).toBe(401);
-        });
-
-        it('answers 401 on an expired token', async () => {
-            const { client } = mesub();
-
-            const response = await route(client)(get(await bearer({ exp: '-10s' })), context);
-
-            expect(response.status).toBe(401);
-        });
-
-        it('never asks /v1/access nor calls the handler without a valid token', async () => {
+        it('never asks Mesub nor calls the handler when nobody is signed in', async () => {
             const { client, calls } = mesub();
             const handler = vi.fn(() => new Response('ok'));
 
-            await withMesub(handler, { plan: 'pro', client })(get(), context);
+            await withMesub(handler, { plan: 'pro', client, customer: session })(get(), context);
 
-            expect(calls).not.toContain('/v1/access');
+            expect(calls).toEqual([]);
             expect(handler).not.toHaveBeenCalled();
         });
     });
 
-    // A merchant's own `Authorization: Bearer` must not hide the cookie (#36).
-    describe('a bearer that is not a Mesub token', () => {
-        it('falls back on the mesub-token cookie', async () => {
-            const { client } = mesub();
-
-            const response = await route(client)(
-                get({
-                    Authorization: `Bearer ${await theirs()}`,
-                    Cookie: `mesub-token=${await token()}`,
-                }),
-                context,
-            );
-
-            expect(response.status).toBe(200);
-        });
-
-        it('answers 401 when there is no cookie behind it', async () => {
-            const { client } = mesub();
-
-            const response = await route(client)(
-                get({ Authorization: `Bearer ${await theirs()}` }),
-                context,
-            );
-
-            expect(response.status).toBe(401);
-        });
-
-        it('never tries the cookie once the keys could not be fetched', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
-            const verify = vi.spyOn(client, 'verifyToken');
-
-            const response = await route(client)(
-                get({ ...(await bearer()), Cookie: `mesub-token=${await token({ exp: '2h' })}` }),
-                context,
-            );
-
-            expect(response.status).toBe(503);
-            expect(verify).toHaveBeenCalledOnce();
-        });
-
-        it('reads the token where the token option says, and only there', async () => {
-            const { client } = mesub();
-            const custom = route(client, {
-                token: (request) => request.headers.get('x-mesub-token'),
-            });
-
-            const found = await custom(
-                get({ Authorization: `Bearer ${await theirs()}`, 'x-mesub-token': await token() }),
-                context,
-            );
-            const ignored = await custom(get(await bearer()), context);
-
-            expect(found.status).toBe(200);
-            expect(ignored.status).toBe(401);
-        });
-    });
-
     describe('customer option: who is asking, from the merchant own auth', () => {
-        it('lets a customer through by external id, with no Mesub token at all', async () => {
+        it('lets a customer through by external id', async () => {
             const queries: Record<string, string>[] = [];
             const { client, calls } = mesub({
                 access: (_init, url) => {
@@ -335,7 +219,6 @@ describe('withMesub', () => {
             expect(queries).toEqual([{ external_id: 'user_42', plan: 'pro' }]);
             expect(calls).toEqual(['/v1/access']);
             expect(((await response.json()) as { mesub: MesubAccess }).mesub).toEqual({
-                userId: null,
                 wallet: WALLET,
                 customer: { kind: 'external_id', value: 'user_42' },
                 plan: 'pro',
@@ -358,14 +241,11 @@ describe('withMesub', () => {
         });
 
         it.each([null, undefined])(
-            'answers 401 when it returns %s, a Mesub token or not',
+            'answers 401 when it returns %s: nobody is signed in',
             async (none) => {
                 const { client, calls } = mesub();
 
-                const response = await route(client, { customer: () => none })(
-                    get(await bearer()),
-                    context,
-                );
+                const response = await route(client, { customer: () => none })(get(), context);
 
                 expect(response.status).toBe(401);
                 expect(calls).toEqual([]);
@@ -397,12 +277,16 @@ describe('withMesub', () => {
             );
         });
 
-        it('refuses to be built with a token too', () => {
+        it.each([
+            ['is missing', {}],
+            ['is not a function', { customer: { external_id: 'u1' } }],
+        ])('refuses to wrap when it %s, and says what to pass', (_name, options) => {
             const { client } = mesub();
+            const wrap = () =>
+                withMesub(() => new Response('ok'), { plan: 'pro', client, ...options } as never);
 
-            expect(() => route(client, { customer: () => null, token: () => null })).toThrow(
-                TypeError,
-            );
+            expect(wrap).toThrow(TypeError);
+            expect(wrap).toThrow(/needs `customer`: a function of the request/);
         });
     });
 
@@ -412,7 +296,7 @@ describe('withMesub', () => {
                 access: () => Response.json(answer({ access: false, status: 'stopped' })),
             });
 
-            const response = await route(client)(get(await bearer()), context);
+            const response = await route(client)(get(SIGNED_IN), context);
 
             expect(response.status).toBe(402);
             expect(response.headers.get('retry-after')).toBeNull();
@@ -433,11 +317,10 @@ describe('withMesub', () => {
                         : Response.json(answer({ revalidate_after: 0 })),
             });
             const handler = route(client);
-            const headers = await bearer();
-            expect((await handler(get(headers), context)).status).toBe(200);
+            expect((await handler(get(SIGNED_IN), context)).status).toBe(200);
 
             down = true;
-            const response = await handler(get(headers), context);
+            const response = await handler(get(SIGNED_IN), context);
 
             expect(response.status).toBe(200);
             expect(((await response.json()) as { mesub: MesubAccess }).mesub.stale).toBe(true);
@@ -454,17 +337,7 @@ describe('withMesub', () => {
                 access: () => Response.json({ message: 'down' }, { status }),
             });
 
-            const response = await route(client)(get(await bearer()), context);
-
-            expect(response.status).toBe(503);
-            expect(response.headers.get('retry-after')).toBe('30');
-            expect(await response.json()).toEqual({ access: false, reason: 'unavailable' });
-        });
-
-        it('answers 503 with Retry-After when the keys cannot be fetched', async () => {
-            const { client } = mesub({ keys: () => new Response('boom', { status: 500 }) });
-
-            const response = await route(client)(get(await bearer()), context);
+            const response = await route(client)(get(SIGNED_IN), context);
 
             expect(response.status).toBe(503);
             expect(response.headers.get('retry-after')).toBe('30');
@@ -475,22 +348,11 @@ describe('withMesub', () => {
         it('answers 503 with Retry-After when Mesub does not answer within guardTimeout', async () => {
             const { client } = mesub({ access: hang }, { guardTimeout: 50 });
 
-            const response = await route(client)(get(await bearer()), context);
+            const response = await route(client)(get(SIGNED_IN), context);
 
             expect(response.status).toBe(503);
             expect(response.headers.get('retry-after')).toBe('30');
             expect(await response.json()).toEqual({ access: false, reason: 'unavailable' });
-        });
-
-        it('answers 503 when the project id cannot be fetched', async () => {
-            const { client } = mesub({
-                project: () => Response.json({ message: 'down' }, { status: 503 }),
-            });
-
-            const response = await route(client)(get(await bearer()), context);
-
-            expect(response.status).toBe(503);
-            expect(response.headers.get('retry-after')).toBe('30');
         });
     });
 
@@ -503,10 +365,11 @@ describe('withMesub', () => {
         it('lets through on the first plan of the list that grants, and says which', async () => {
             const { client } = mesub({ access: perPlan({ pro: no, team: yes }) });
 
-            const response = await withMesub(echo, { plan: ['pro', 'team'], client })(
-                get(await bearer()),
-                context,
-            );
+            const response = await withMesub(echo, {
+                plan: ['pro', 'team'],
+                client,
+                customer: session,
+            })(get(SIGNED_IN), context);
 
             expect(response.status).toBe(200);
             expect(await response.json()).toMatchObject({ plan: 'team', answer: { plan: 'team' } });
@@ -515,10 +378,11 @@ describe('withMesub', () => {
         it('answers 402 when none grants', async () => {
             const { client } = mesub({ access: perPlan({ pro: no, team: no }) });
 
-            const response = await withMesub(echo, { plan: ['pro', 'team'], client })(
-                get(await bearer()),
-                context,
-            );
+            const response = await withMesub(echo, {
+                plan: ['pro', 'team'],
+                client,
+                customer: session,
+            })(get(SIGNED_IN), context);
 
             expect(response.status).toBe(402);
         });
@@ -528,9 +392,10 @@ describe('withMesub', () => {
             const guarded = withMesub(echo, {
                 plan: (request) => new URL(request.url).searchParams.get('tier') ?? 'pro',
                 client,
+                customer: session,
             });
 
-            const response = await guarded(get(await bearer(), '/api/x?tier=team'), context);
+            const response = await guarded(get(SIGNED_IN, '/api/x?tier=team'), context);
 
             expect(response.status).toBe(200);
             expect(((await response.json()) as MesubAccess).plan).toBe('team');
@@ -539,25 +404,31 @@ describe('withMesub', () => {
         it('refuses an empty list when wrapping, and throws one a function gives', async () => {
             const { client } = mesub();
 
-            expect(() => withMesub(echo, { plan: [], client })).toThrow(TypeError);
+            expect(() => withMesub(echo, { plan: [], client, customer: session })).toThrow(/plan/);
             await expect(
-                withMesub(echo, { plan: () => [], client })(get(await bearer()), context),
-            ).rejects.toThrow(TypeError);
+                withMesub(echo, { plan: () => [], client, customer: session })(
+                    get(SIGNED_IN),
+                    context,
+                ),
+            ).rejects.toThrow(/plan/);
         });
 
-        it('refuses more than three plans, and never runs the function without a token', async () => {
+        it('refuses more than three plans, and never runs the function for nobody', async () => {
             const { client } = mesub();
             const plan = vi.fn(() => ['pro', 'team', 'max', 'org']);
 
-            expect(() => withMesub(echo, { plan: ['pro', 'team', 'max', 'org'], client })).toThrow(
-                TypeError,
-            );
+            expect(() =>
+                withMesub(echo, { plan: ['pro', 'team', 'max', 'org'], client, customer: session }),
+            ).toThrow(/3 plans at most/);
             await expect(
-                withMesub(echo, { plan, client })(get(await bearer()), context),
-            ).rejects.toThrow(TypeError);
+                withMesub(echo, { plan, client, customer: session })(get(SIGNED_IN), context),
+            ).rejects.toThrow(/3 plans at most/);
 
             plan.mockClear();
-            const response = await withMesub(echo, { plan, client })(get(), context);
+            const response = await withMesub(echo, { plan, client, customer: session })(
+                get(),
+                context,
+            );
 
             expect(response.status).toBe(401);
             expect(plan).not.toHaveBeenCalled();
@@ -572,7 +443,7 @@ describe('withMesub', () => {
             const onDenied = vi.fn((denial: { reason: string }) =>
                 Response.redirect(`https://shop.test/subscribe?why=${denial.reason}`, 302),
             );
-            const request = get(await bearer());
+            const request = get(SIGNED_IN);
 
             const response = await route(client, { onDenied })(request, context);
 
@@ -618,7 +489,7 @@ describe('withMesub', () => {
             const { client } = mesub();
             const onDenied = vi.fn(() => new Response(null, { status: 418 }));
 
-            const response = await route(client, { onDenied })(get(await bearer()), context);
+            const response = await route(client, { onDenied })(get(SIGNED_IN), context);
 
             expect(response.status).toBe(200);
             expect(onDenied).not.toHaveBeenCalled();
@@ -628,7 +499,7 @@ describe('withMesub', () => {
     // A broken integration must reach Next as a thrown error, not look like a denial.
     describe('integration errors', () => {
         it.each([
-            ['a bad secret key', 401, 'unauthorized'],
+            ['a bad API key', 401, 'unauthorized'],
             ['an unknown plan', 404, 'plan_not_found'],
         ])('throws %s', async (_label, status, code) => {
             const { client } = mesub({
@@ -637,8 +508,8 @@ describe('withMesub', () => {
             });
             const handler = vi.fn(() => new Response('ok'));
 
-            const failing = withMesub(handler, { plan: 'pro', client })(
-                get(await bearer()),
+            const failing = withMesub(handler, { plan: 'pro', client, customer: session })(
+                get(SIGNED_IN),
                 context,
             );
 
