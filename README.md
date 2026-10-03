@@ -124,6 +124,57 @@ Mesub may add a status, an end reason or an outcome: the SDK hands back one
 it does not know rather than throw, so keep a default branch. `paused` and
 `end_reason` are read as `false` and `null` from an API that predates them.
 
+#### The guards, with your own login
+
+The guards do the same in one line, and answer the refusals themselves: give
+them `customer`, a function of the request returning who your login says is
+asking. No Mesub token is read then, and nothing of `@mesub/react` is needed.
+
+```ts
+import { requirePlan } from '@mesub/node/express';
+
+app.get(
+    '/api/reports',
+    yourLogin,
+    requirePlan('pro', { customer: (req) => ({ external_id: req.user.id }) }),
+    (req, res) => res.json(buildReport(res.locals.mesub)),
+);
+```
+
+```ts
+// Next, app/api/reports/route.ts
+import { withMesub } from '@mesub/node/next';
+
+export const GET = withMesub(async (request, mesub) => Response.json(await report(mesub)), {
+    plan: 'pro',
+    customer: async (request) => {
+        const session = await yourSession(request);
+        return session ? { external_id: session.userId } : null;
+    },
+});
+```
+
+```ts
+// Nest
+@UseGuards(YourAuthGuard, RequirePlan('pro', { customer: (req) => ({ external_id: req.user.id }) }))
+```
+
+- Return a customer as in [Who to ask about](#who-to-ask-about): `{ external_id }`,
+  a wallet, or `{ email }`. It may be async.
+- Return `null` or `undefined` when nobody is signed in: the guard answers 401.
+  402 and 503 are answered as with a token.
+- Anything else (two identifiers, an empty string) is thrown as a `TypeError`:
+  a bug in the integration, never a refusal.
+- `customer` and `token` together are refused when the guard is built.
+- The route gets `mesub.customer` (who was asked about), `mesub.wallet` (the
+  wallet that pays, as Mesub answered it) and `mesub.userId`, null here: it
+  is the Mesub account, which only a Mesub token names.
+
+> **The customer must come from a session you verified**, never from the
+> request itself: not a query, a body, nor a header the caller writes. A
+> guard reading `req.query.wallet` lets anyone in who types a subscriber's
+> address.
+
 ### Who to ask about
 
 `access`, `hasAccess`, `accessList` and `subscriptions.list` take a customer,
@@ -140,7 +191,7 @@ await mesub.hasAccess({ email: 'ada@example.com' }, 'pro'); // the email given w
   across several: access if any of them grants it, and the answer names that
   wallet.
 - **`wallet`** for a wallet-only dApp, where the connected wallet is the
-  customer. This is what the guards use, from the access token.
+  customer. This is what the guards use when they read a Mesub access token.
 - **`email`** as a fallback, or for a support lookup: it is the address given
   when they subscribed, never verified by Mesub, so anyone could have typed
   it.
@@ -163,13 +214,13 @@ called without one, they throw a `TypeError` instead of asking.
 
 ### With a Mesub access token
 
-The guards, `requirePlan` (Express), `withMesub` (Next) and `RequirePlan`
-(Nest), take the customer from a Mesub **access token** instead: a one-hour
+Without `customer`, the guards, `requirePlan` (Express), `withMesub` (Next)
+and `RequirePlan` (Nest), take the customer from a Mesub **access token**: a one-hour
 token that the `@mesub/react` widget's sign-in issues today, sent in
 `Authorization: Bearer` and in a `mesub-token` cookie. They verify it locally,
 with Mesub's public keys (fetched once from `/.well-known/jwks.json`), ask
-about the wallet behind it, and answer refusals themselves. The wallet always
-comes from that token, never from anything your code or the request passes.
+about the wallet behind it, and answer refusals themselves. The wallet then
+comes from that token alone, never from the request.
 
 With Express:
 

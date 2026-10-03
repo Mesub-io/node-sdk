@@ -4,7 +4,10 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { Mesub } from './client.js';
 import {
     accessOf,
+    askerOf,
+    checkAsker,
     checkPlan,
+    type CustomerOption,
     type Denial,
     defaultClient,
     denialBody,
@@ -14,12 +17,13 @@ import {
     type PlanOption,
     plansOf,
     type TokenOption,
-    tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 
 export { MesubError } from './errors.js';
-export type { Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
+export type { CustomerOption, Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
+export type { Asked } from './customer.js';
+export type { Customer } from './answer.js';
 
 /** What `requirePlan` leaves on `res.locals.mesub` for the route. */
 export type MesubLocals = MesubAccess;
@@ -34,6 +38,13 @@ export interface RequirePlanOptions {
      */
     token?: TokenOption<Request>;
     /**
+     * Who is asking, from your own auth, instead of a Mesub token:
+     * `(req) => ({ external_id: req.user.id })`, a wallet or an email. Null when
+     * nobody is signed in. It must come from a session you verified, never
+     * from the request itself. Not with `token`.
+     */
+    customer?: CustomerOption<Request>;
+    /**
      * Answer a refusal yourself: a redirect, a page, your own JSON. It may be
      * async: what it returns is awaited, and a throw or a rejection goes to
      * `next(err)`, under Express 4 as under 5.
@@ -47,9 +58,10 @@ export interface RequirePlanOptions {
  * out per request from a list you wrote, never read from the request itself.
  * `res.locals.mesub.plan` says which one let it through.
  *
- * The subscriber is who the Mesub access token says, from the Authorization
+ * With `customer`, who is asking is who your own auth says, and no Mesub
+ * token is read. Otherwise the subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
- * token), or where `token` says. Refusals answer 401 (no valid token),
+ * token), or where `token` says. Refusals answer 401 (nobody signed in),
  * 402 (Mesub said no) or 503 with Retry-After (Mesub unreachable, with no
  * answer known for that subscriber). Integration errors go to `next(err)`.
  */
@@ -58,13 +70,13 @@ export function requirePlan(
     options: RequirePlanOptions = {},
 ): RequestHandler {
     checkPlan(plan);
+    checkAsker(options);
 
     return async (req, res, next) => {
         try {
-            const outcome = await guard(
-                options.client ?? defaultClient(),
-                tokensOf(req, options.token),
-                () => plansOf(plan, req),
+            const client = options.client ?? defaultClient();
+            const outcome = await guard(client, await askerOf(client, req, options), () =>
+                plansOf(plan, req),
             );
 
             if (outcome.allowed) {

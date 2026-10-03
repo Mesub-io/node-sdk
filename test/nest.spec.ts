@@ -193,6 +193,7 @@ describe('RequirePlan', () => {
             expect(response.body).toEqual({
                 userId: 'user_1',
                 wallet: WALLET,
+                customer: { kind: 'wallet', value: WALLET },
                 plan: 'pro',
                 answer: answer(),
                 stale: false,
@@ -333,6 +334,91 @@ describe('RequirePlan', () => {
                 .get('/pro')
                 .set('Authorization', `Bearer ${await token()}`)
                 .expect(401);
+        });
+    });
+
+    describe('customer option: who is asking, from the merchant own auth', () => {
+        it('lets a customer through by external id, with no Mesub token at all', async () => {
+            const queries: Record<string, string>[] = [];
+            const { client, calls } = mesub({
+                access: (_init, url) => {
+                    queries.push(Object.fromEntries(url!.searchParams));
+                    return Response.json(answer());
+                },
+            });
+
+            const response = await request(
+                await app(client, { customer: () => ({ external_id: 'user_42' }) }),
+            ).get('/pro');
+
+            expect(response.status).toBe(200);
+            expect(queries).toEqual([{ external_id: 'user_42', plan: 'pro' }]);
+            expect(calls).toEqual(['/v1/access']);
+            expect(response.body).toEqual({
+                userId: null,
+                wallet: WALLET,
+                customer: { kind: 'external_id', value: 'user_42' },
+                plan: 'pro',
+                answer: answer(),
+                stale: false,
+            });
+        });
+
+        it('may be async, and guards a whole controller too', async () => {
+            const { client } = mesub();
+
+            const response = await request(
+                await app(client, { customer: async () => ({ email: 'ada@example.com' }) }),
+            ).get('/reports');
+
+            expect(response.status).toBe(200);
+            expect(response.body).toEqual({ wallet: WALLET });
+        });
+
+        it.each([null, undefined])(
+            'answers 401 when it returns %s, a Mesub token or not',
+            async (none) => {
+                const { client, calls } = mesub();
+
+                const response = await request(await app(client, { customer: () => none }))
+                    .get('/pro')
+                    .set('Authorization', `Bearer ${await token()}`);
+
+                expect(response.status).toBe(401);
+                expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+                expect(calls).toEqual([]);
+            },
+        );
+
+        it('answers 402 when Mesub says no for that customer', async () => {
+            const { client } = mesub({
+                access: () =>
+                    Response.json(answer({ access: false, status: 'none', wallet: null })),
+            });
+
+            await request(await app(client, { customer: () => WALLET }))
+                .get('/pro')
+                .expect(402);
+        });
+
+        it('answers 500 for what cannot be asked about: a broken integration, not a refusal', async () => {
+            const { client } = mesub();
+
+            await request(
+                await app(client, {
+                    customer: () => ({ external_id: 'u', email: 'a@b.co' }) as never,
+                }),
+            )
+                .get('/pro')
+                .expect(500);
+        });
+
+        it('refuses to be built with a token too', () => {
+            const { client } = mesub();
+
+            expect(() =>
+                RequirePlan('pro', { client, customer: () => null, token: () => null }),
+            ).toThrow(TypeError);
         });
     });
 

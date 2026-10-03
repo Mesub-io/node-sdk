@@ -159,6 +159,7 @@ describe('requirePlan', () => {
             expect(response.body).toEqual({
                 userId: 'user_1',
                 wallet: WALLET,
+                customer: { kind: 'wallet', value: WALLET },
                 plan: 'pro',
                 answer: answer(),
                 stale: false,
@@ -348,6 +349,232 @@ describe('requirePlan', () => {
 
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: 'unexpected' });
+        });
+    });
+
+    describe('customer option: who is asking, from the merchant own auth', () => {
+        /** What /v1/access was asked, as its query. */
+        function asked() {
+            const queries: Record<string, string>[] = [];
+            const access: NonNullable<Mesh['access']> = (_init, url) => {
+                queries.push(Object.fromEntries(url!.searchParams));
+                return Response.json(answer());
+            };
+
+            return { queries, access };
+        }
+
+        it('lets a customer through by external id, with no Mesub token at all', async () => {
+            const { queries, access } = asked();
+            const { client, calls } = mesub({ access });
+
+            const response = await request(
+                app(client, { customer: () => ({ external_id: 'user_42' }) }),
+            ).get('/pro');
+
+            expect(response.status).toBe(200);
+            expect(queries).toEqual([{ external_id: 'user_42', plan: 'pro' }]);
+            // No key and no project id fetched: nothing of Mesub's sign-in is used.
+            expect(calls).toEqual(['/v1/access']);
+        });
+
+        it.each([
+            ['a wallet as a string', WALLET, { wallet: WALLET }],
+            ['a wallet as an object', { wallet: WALLET }, { wallet: WALLET }],
+            ['an email, normalised', { email: ' Ada@Example.com ' }, { email: 'ada@example.com' }],
+            ['an external id, trimmed', { external_id: ' u1 ' }, { external_id: 'u1' }],
+        ])('asks Mesub about %s', async (_name, named, query) => {
+            const { queries, access } = asked();
+            const { client } = mesub({ access });
+
+            await request(app(client, { customer: () => named }))
+                .get('/pro')
+                .expect(200);
+
+            expect(queries).toEqual([{ ...query, plan: 'pro' }]);
+        });
+
+        it('may be async', async () => {
+            const { client } = mesub();
+
+            await request(app(client, { customer: async () => ({ external_id: 'user_42' }) }))
+                .get('/pro')
+                .expect(200);
+        });
+
+        it('reads it from the request the merchant verified', async () => {
+            const { queries, access } = asked();
+            const { client } = mesub({ access });
+            const server = express();
+            server.use((req, _res, next) => {
+                (req as ExpressRequest & { user?: { id: string } }).user = { id: 'user_7' };
+                next();
+            });
+            server.get(
+                '/pro',
+                requirePlan('pro', {
+                    client,
+                    customer: (req) => ({
+                        external_id: (req as ExpressRequest & { user: { id: string } }).user.id,
+                    }),
+                }),
+                (_req, res) => res.json({ ok: true }),
+            );
+
+            await request(server).get('/pro').expect(200);
+
+            expect(queries).toEqual([{ external_id: 'user_7', plan: 'pro' }]);
+        });
+
+        it.each([null, undefined])(
+            'answers 401 when it returns %s: nobody is signed in',
+            async (none) => {
+                const { client, calls } = mesub();
+
+                const response = await request(app(client, { customer: () => none })).get('/pro');
+
+                expect(response.status).toBe(401);
+                expect(response.body).toEqual({ access: false, reason: 'unauthenticated' });
+                expect(calls).toEqual([]);
+            },
+        );
+
+        it('never reads a Mesub token, valid or not, bearer or cookie', async () => {
+            const { client, calls } = mesub();
+
+            await request(app(client, { customer: () => null }))
+                .get('/pro')
+                .set('Authorization', `Bearer ${await token()}`)
+                .set('Cookie', `mesub-token=${await token()}`)
+                .expect(401);
+
+            expect(calls).toEqual([]);
+        });
+
+        it('works while the keys cannot be fetched: they are not needed', async () => {
+            const { client } = mesub({ keys: () => new Response('down', { status: 503 }) });
+
+            await request(app(client, { customer: () => ({ external_id: 'user_42' }) }))
+                .get('/pro')
+                .expect(200);
+        });
+
+        it('leaves the customer, the wallet Mesub answered with, and no Mesub account', async () => {
+            const { client } = mesub();
+
+            const response = await request(
+                app(client, { customer: () => ({ external_id: 'user_42' }) }),
+            ).get('/pro');
+
+            expect(response.body).toEqual({
+                userId: null,
+                wallet: WALLET,
+                customer: { kind: 'external_id', value: 'user_42' },
+                plan: 'pro',
+                answer: answer(),
+                stale: false,
+            });
+        });
+
+        it('answers 402 when Mesub says no for that customer', async () => {
+            const { client } = mesub({
+                access: () =>
+                    Response.json(answer({ access: false, status: 'none', wallet: null })),
+            });
+
+            const response = await request(
+                app(client, { customer: () => ({ email: 'ada@example.com' }) }),
+            ).get('/pro');
+
+            expect(response.status).toBe(402);
+            expect(response.body).toEqual({ access: false, reason: 'no_access', status: 'none' });
+        });
+
+        it('answers 503 with Retry-After when Mesub is down and nothing is cached', async () => {
+            const { client } = mesub({ access: () => new Response('down', { status: 503 }) });
+
+            const response = await request(
+                app(client, { customer: () => ({ external_id: 'user_42' }) }),
+            ).get('/pro');
+
+            expect(response.status).toBe(503);
+            expect(response.headers['retry-after']).toBe('30');
+        });
+
+        it('does not work out the plan for nobody', async () => {
+            const { client } = mesub();
+            const plan = vi.fn(() => 'pro');
+
+            await request(app(client, { customer: () => null }, plan))
+                .get('/pro')
+                .expect(401);
+
+            expect(plan).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            ['two identifiers', { external_id: 'u1', email: 'a@b.co' }],
+            ['none', {}],
+            ['a value that is not a string', { external_id: 42 }],
+            ['an empty string', ''],
+            ['an empty external id', { external_id: '  ' }],
+            ['a number', 42],
+        ])(
+            'forwards %s to next(err): a broken integration, not a refusal',
+            async (_name, named) => {
+                const { client, calls } = mesub();
+
+                const response = await request(app(client, { customer: () => named as never })).get(
+                    '/pro',
+                );
+
+                expect(response.status).toBe(500);
+                expect(response.body).toEqual({ forwarded: 'other' });
+                expect(calls).toEqual([]);
+            },
+        );
+
+        it('forwards a throw, and a rejection, to next(err)', async () => {
+            const { client } = mesub();
+            const boom = () => {
+                throw new MesubError('boom', { status: null, code: 'unexpected' });
+            };
+
+            for (const customer of [boom, async () => boom()]) {
+                const response = await request(app(client, { customer })).get('/pro');
+
+                expect(response.status).toBe(500);
+                expect(response.body).toEqual({ forwarded: 'unexpected' });
+            }
+        });
+
+        it('refuses to be built with a token too: which one is trusted would be unclear', () => {
+            const { client } = mesub();
+
+            expect(() =>
+                requirePlan('pro', { client, customer: () => null, token: () => null }),
+            ).toThrow(TypeError);
+        });
+
+        it('refuses a customer that is not a function when built', () => {
+            const { client } = mesub();
+
+            expect(() =>
+                requirePlan('pro', { client, customer: { external_id: 'u1' } as never }),
+            ).toThrow(TypeError);
+        });
+
+        it('keeps one customer apart from another: no shared cached answer', async () => {
+            const { queries, access } = asked();
+            const { client } = mesub({ access });
+            let who = 'user_1';
+            const server = app(client, { customer: () => ({ external_id: who }) });
+
+            await request(server).get('/pro').expect(200);
+            who = 'user_2';
+            await request(server).get('/pro').expect(200);
+
+            expect(queries.map((query) => query['external_id'])).toEqual(['user_1', 'user_2']);
         });
     });
 
