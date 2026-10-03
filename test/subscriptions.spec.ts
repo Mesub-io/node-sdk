@@ -18,6 +18,8 @@ function subscription(overrides: Partial<ServerSubscription> = {}): ServerSubscr
     return {
         id: 'sub_1',
         status: 'active',
+        paused: false,
+        end_reason: null,
         access: true,
         payment_status: 'paid',
         plan: 'pro',
@@ -746,6 +748,87 @@ describe('subscriptions.retrieve', () => {
         });
     });
 
+    // Served since Mesub-io/backend#236: a back from before still answers.
+    it('reads a missing paused as false and a missing end_reason as null', async () => {
+        const { paused: _, end_reason: __, ...older } = subscription();
+        const { fetch } = mockFetch(
+            json(200, older),
+            json(200, { data: [older], has_more: false }),
+            json(201, { subscription: older }),
+        );
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.retrieve('sub_1')).resolves.toEqual(subscription());
+        await expect(client.subscriptions.list({ wallet: WALLET })).resolves.toEqual({
+            data: [subscription()],
+            has_more: false,
+        });
+        await expect(
+            client.subscriptions.submit('sub_1', {
+                transaction: 'dHg=',
+                terms_signature: SIGNATURE,
+            }),
+        ).resolves.toEqual({ subscription: subscription() });
+    });
+
+    it.each([
+        'cancelled',
+        'plan_removed',
+        'plan_replaced',
+        'plan_ended',
+        'authority_closed',
+        'closed',
+    ] as const)('takes an ended subscription whose end_reason is %s', async (end_reason) => {
+        const ended = subscription({
+            status: 'ended',
+            end_reason,
+            access: false,
+            payment_status: 'none',
+            access_until: null,
+            next_charge_at: null,
+        });
+        const { fetch } = mockFetch(
+            json(200, ended),
+            json(200, { data: [ended], has_more: false }),
+        );
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.retrieve('sub_1')).resolves.toEqual(ended);
+        await expect(client.subscriptions.list({ wallet: WALLET })).resolves.toEqual({
+            data: [ended],
+            has_more: false,
+        });
+    });
+
+    it('takes an end_reason it does not know, and an ended one with none', async () => {
+        const unknown = subscription({
+            status: 'ended',
+            access: false,
+            end_reason: 'merchant_refunded' as ServerSubscription['end_reason'],
+        });
+        const unrecorded = subscription({ status: 'ended', access: false, end_reason: null });
+        const { fetch } = mockFetch(json(200, unknown), json(200, unrecorded));
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.retrieve('sub_1')).resolves.toEqual(unknown);
+        await expect(client.subscriptions.retrieve('sub_2')).resolves.toEqual(unrecorded);
+    });
+
+    it.each(['active', 'unpaid', 'cancelled'] as const)(
+        'takes a paused %s subscription, its status unchanged',
+        async (status) => {
+            const parked = subscription({
+                status,
+                paused: true,
+                payment_status: 'none',
+                next_charge_at: null,
+            });
+            const { fetch } = mockFetch(json(200, parked));
+
+            await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(parked);
+        },
+    );
+
     it('takes a superseded subscription and its retry deadline', async () => {
         const superseded = subscription({
             status: 'superseded',
@@ -767,6 +850,13 @@ describe('subscriptions.retrieve', () => {
             'retry_deadline is not a date or null',
         ],
         ['access as a string', subscription({ access: 'yes' as never }), 'access is not a boolean'],
+        ['paused as a string', subscription({ paused: 'no' as never }), 'paused is not a boolean'],
+        ['paused as null', subscription({ paused: null as never }), 'paused is not a boolean'],
+        [
+            'an end_reason that is not a string',
+            subscription({ end_reason: 7 as never }),
+            'end_reason is not a string or null',
+        ],
         [
             'a date that is not one',
             subscription({ access_until: 'soon' }),
@@ -925,6 +1015,8 @@ describe('the access cache once a subscription lands', () => {
             plan: 'pro',
             access: false,
             status: 'none',
+            paused: false,
+            end_reason: null,
             payment_status: 'none',
             subscribed_since: null,
             first_subscribed_at: null,

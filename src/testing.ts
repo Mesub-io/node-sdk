@@ -108,6 +108,8 @@ export type FakeAccess = Partial<Omit<AccessAnswer, 'plan'>>;
 const NOTHING: Omit<AccessAnswer, 'wallet' | 'plan'> = {
     access: false,
     status: 'none',
+    paused: false,
+    end_reason: null,
     payment_status: 'none',
     subscribed_since: null,
     first_subscribed_at: null,
@@ -313,6 +315,8 @@ export class FakeMesub {
         return {
             id: this.#nextId(),
             status: 'active',
+            paused: false,
+            end_reason: null,
             access: true,
             payment_status: 'paid',
             email: null,

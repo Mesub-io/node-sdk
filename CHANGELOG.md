@@ -27,6 +27,16 @@ The first version published to npm. Requires Node 22 or later.
   (#70).
 - When Mesub is down, the last answer is served for up to `maxStaleMs`
   (24 hours by default), never past its `access_until` (#26, #56).
+- The answer carries `paused` (a seat parked over the project's cap: status
+  unchanged, nothing charged, access to the end of the paid period) and
+  `end_reason`, why an `ended` one ended: `cancelled`, `plan_removed`,
+  `plan_replaced`, `plan_ended`, `authority_closed` or `closed`, typed as
+  `EndReason`. A `cancelled` subscription reads `ended`, with `end_reason`
+  `cancelled`, once its end date passed. An attempt's `outcome` may be
+  `BLOCKED`: nothing was tried, and none of it the subscriber's doing. An
+  API that predates the two fields is read as `paused: false` and
+  `end_reason: null`, and a reason or an outcome newer than this release is
+  handed back, not refused (#78).
 - Calls for the same answer share one request in flight: while one is out
   for a customer and plan (or a customer's list), `access`, `hasAccess`,
   `decide` and `accessList` wait for its answer, or its error, instead of
@@ -85,6 +95,9 @@ The first version published to npm. Requires Node 22 or later.
   (`active`, or `cancelled` before its end), the cached answers that still
   say no for its wallet, external id and email are dropped, for its plan and
   in `accessList`: `hasAccess` right after asks Mesub again (#70).
+- A subscription carries `paused` and `end_reason` as `/v1/access` answers
+  them, from `retrieve`, `list`, `submit` and in a webhook's `data`, with
+  the same defaults from an API that predates them (#78).
 - POST requests are never retried blindly, and take a per-call `timeout` and
   `signal` (#58).
 

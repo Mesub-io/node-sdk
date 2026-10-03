@@ -8,6 +8,9 @@
  * `superseded` is a stopped subscription the wallet came back over
  * (Mesub-io/backend#213): the row that replaced it is the one in force, so
  * `/v1/access` answers that one, but the back's type allows it.
+ *
+ * `cancelled` only while the cancellation runs: once its end date passed it
+ * reads `ended`, with `end_reason` `cancelled` (Mesub-io/backend#236).
  */
 export type SubscriptionStatus =
     | 'pending'
@@ -23,7 +26,19 @@ export type SubscriptionStatus =
 /** `late` only while a pull failed and a retry is pending. */
 export type PaymentStatus = 'paid' | 'late' | 'none';
 
-export type PullOutcome = 'PAID' | 'SKIPPED' | 'REJECTED';
+/**
+ * Why a subscription ended (Mesub-io/backend#236): cancelled and past its end
+ * date, the plan deleted, replaced by another at its address or past its own
+ * end, the wallet's authorisation closed without Mesub or through it.
+ */
+export type EndReason =
+    'cancelled' | 'plan_removed' | 'plan_replaced' | 'plan_ended' | 'authority_closed' | 'closed';
+
+/**
+ * `BLOCKED` is a pull nothing was tried for, none of it the subscriber's
+ * doing (Mesub's fee payer, the network): it never counts against them.
+ */
+export type PullOutcome = 'PAID' | 'SKIPPED' | 'REJECTED' | 'BLOCKED';
 
 /** One pull attempt, newest first, as the subscriber it concerns may see it. */
 export interface ServedAttempt {
@@ -45,6 +60,19 @@ export interface AccessAnswer {
     /** The only field a guard needs. */
     access: boolean;
     status: SubscriptionStatus;
+    /**
+     * A seat parked over the project's cap (Mesub-io/backend#236): `status`
+     * stays as it was, nothing is charged, and access runs to the end of the
+     * paid period. Read as false from a back that predates it.
+     */
+    paused: boolean;
+    /**
+     * Why it ended, only when `status` is `ended`; null on one that ended
+     * before the back recorded reasons. Read as null from a back that
+     * predates it.
+     */
+    end_reason: EndReason | null;
+    /** `none` on a paused seat: nothing is billed, so nothing is late. */
     payment_status: PaymentStatus;
     subscribed_since: string | null;
     first_subscribed_at: string | null;
@@ -57,8 +85,9 @@ export interface AccessAnswer {
      * Free only (Mesub-io/backend#191): when hand retries of a missed pull
      * close, two minutes before the end of its period; past it the
      * subscription stops. Null on every other tier, whose retries are in
-     * `next_retry_at`. Read as null from a back that predates it; undefined
-     * only on an answer cached by an older SDK.
+     * `next_retry_at`. Read as null from a back that predates it. Like
+     * `paused` and `end_reason`, undefined only on an answer cached by an
+     * older SDK.
      */
     retry_deadline: string | null;
     /** Only when asked for with `{ attempts: true }`. */

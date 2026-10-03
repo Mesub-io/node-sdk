@@ -35,6 +35,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         plan: 'pro',
         access: true,
         status: 'active',
+        paused: false,
+        end_reason: null,
         payment_status: 'paid',
         subscribed_since: null,
         first_subscribed_at: null,

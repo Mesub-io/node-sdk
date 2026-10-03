@@ -22,7 +22,7 @@ interface Field {
      * A field newer than some backs still serving: absent, it is set to this
      * value rather than refused, so the answer still holds its type.
      */
-    absent?: null;
+    absent?: null | false;
     /** A field the back leaves out when it has nothing to say: absent is fine, as is. */
     optional?: true;
 }
@@ -47,6 +47,9 @@ const DATE_OR_NULL: Field = {
 };
 /** `retry_deadline`, served since Mesub-io/backend#191: null when a back predates it. */
 const RETRY_DEADLINE: Field = { ...DATE_OR_NULL, absent: null };
+/** `paused` and `end_reason`, served since Mesub-io/backend#236: false and null before it. */
+const PAUSED: Field = { ...BOOLEAN, absent: false };
+const END_REASON: Field = { ...STRING_OR_NULL, absent: null };
 /**
  * What the cache turns into its dates: NaN or Infinity would never go stale.
  * A negative one is read as 0 there, so it is let through.
@@ -58,9 +61,9 @@ const SECONDS: Field = {
 
 /**
  * Every field of an `AccessAnswer` but `attempts`, which is checked apart: a
- * field added to the type and not here fails to compile. A status or an
- * outcome is only checked to be a string, never against the list: one the
- * back adds later must not turn every guard into an error.
+ * field added to the type and not here fails to compile. A status, an end
+ * reason or an outcome is only checked to be a string, never against the
+ * list: one the back adds later must not turn every guard into an error.
  */
 const ANSWER = {
     /** Null asked by external id or email, for a customer with nothing on that plan. */
@@ -68,6 +71,8 @@ const ANSWER = {
     plan: STRING,
     access: BOOLEAN,
     status: STRING,
+    paused: PAUSED,
+    end_reason: END_REASON,
     payment_status: STRING,
     subscribed_since: DATE_OR_NULL,
     first_subscribed_at: DATE_OR_NULL,
@@ -148,6 +153,8 @@ function plansProblem(body: unknown): string | null {
 const SUBSCRIPTION = {
     id: STRING,
     status: STRING,
+    paused: PAUSED,
+    end_reason: END_REASON,
     access: BOOLEAN,
     payment_status: STRING,
     plan: STRING_OR_NULL,

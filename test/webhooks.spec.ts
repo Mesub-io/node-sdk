@@ -37,6 +37,8 @@ function backendHeaders(secret: string, id: string, timestamp: number, body: str
 const SUBSCRIPTION = {
     id: 'sub_test',
     status: 'active',
+    paused: false,
+    end_reason: null,
     access: true,
     payment_status: 'paid',
     plan: 'pro',
@@ -121,6 +123,50 @@ describe('verifyWebhook', () => {
             created_at: '2026-01-15T12:00:00.000Z',
             data: { ...SUBSCRIPTION, detail: DETAILS['subscription.renewed'] },
         });
+    });
+
+    // `data` is a subscription: `paused` and `end_reason` are read like retrieve's.
+    it('reads a body from a back that predates paused and end_reason', async () => {
+        const { paused: _, end_reason: __, ...older } = SUBSCRIPTION;
+        const raw = body('subscription.cancelled', {}, older as typeof SUBSCRIPTION);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
+    });
+
+    it.each(['plan_removed', 'authority_closed', 'closed', 'not_known_yet'])(
+        'hands back an ended subscription whose end_reason is %s',
+        async (end_reason) => {
+            const ended = {
+                ...SUBSCRIPTION,
+                status: 'ended',
+                end_reason: end_reason as never,
+                access: false,
+            };
+            const raw = body('subscription.ended', {}, ended);
+
+            const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+                secret: SECRET,
+            });
+
+            expect(event.data).toMatchObject({ status: 'ended', end_reason, paused: false });
+        },
+    );
+
+    it('hands back a paused subscription', async () => {
+        const raw = body('subscription.renewed', DETAILS['subscription.renewed'], {
+            ...SUBSCRIPTION,
+            paused: true,
+        });
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.data.paused).toBe(true);
     });
 
     it('signs the Standard Webhooks test vector as the spec libraries do', async () => {
@@ -439,6 +485,8 @@ describe('verifyWebhook', () => {
 
     it.each([
         ['a subscription field', body('test', {}, { ...SUBSCRIPTION, access: 'yes' as never })],
+        ['a boolean paused', body('test', {}, { ...SUBSCRIPTION, paused: 'no' as never })],
+        ['a string end_reason', body('test', {}, { ...SUBSCRIPTION, end_reason: 4 as never })],
         ['a detail field', body('subscription.renewed', { amount: '1' })],
         ['the detail', JSON.stringify({ type: 'test', created_at: NOW, data: SUBSCRIPTION })],
     ])('throws unexpected for a signed body missing %s', async (_what, raw) => {
