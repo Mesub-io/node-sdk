@@ -108,6 +108,32 @@ describe('FakeMesub', () => {
         ]);
     });
 
+    it('gives a subscription its attempts, filled in, for its customer however named', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const { id, confirmed_at } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_42',
+        });
+
+        const set = fake.setAttempts(id, [
+            {},
+            { outcome: 'REJECTED', reason: 'insufficient-balance' },
+        ]);
+
+        expect(set[0]).toMatchObject({ outcome: 'PAID', reason: null, amount: '9990000' });
+        for (const customer of [WALLET, { external_id: 'user_42' }]) {
+            await expect(mesub.access(customer, 'pro', { attempts: true })).resolves.toMatchObject({
+                wallet: WALLET,
+                subscribed_since: confirmed_at,
+                attempts: set,
+            });
+        }
+        expect(await mesub.access(WALLET, 'pro')).not.toHaveProperty('attempts');
+        expect(() => fake.setAttempts('sub_nope', [])).toThrow(/sub_nope/);
+    });
+
     it('answers attempts when asked', async () => {
         const fake = new FakeMesub();
         const attempt = {

@@ -16,7 +16,7 @@
  * await mesub.webhooks.verify(body, headers); // the event
  * ```
  */
-import type { AccessAnswer, Customer } from './answer.js';
+import type { AccessAnswer, Customer, ServedAttempt } from './answer.js';
 import { Mesub, type MesubOptions } from './client.js';
 import { type Asked, customerOf } from './customer.js';
 import type { Plan } from './plans.js';
@@ -233,6 +233,33 @@ export class FakeMesub {
 
         this.#subscriptions.push(subscription);
         return subscription;
+    }
+
+    /**
+     * The pull attempts of that subscription, as `/v1/access` answers them to
+     * its customer with `attempts`: the answer becomes about that subscription.
+     * Each is a paid one of 9.99 USDC now unless told otherwise; hand them
+     * newest first, as Mesub serves them. Throws for an id the fake does not hold.
+     */
+    setAttempts(id: string, attempts: Array<Partial<ServedAttempt>>): ServedAttempt[] {
+        const subscription = this.#subscriptions.find((each) => each.id === id);
+        if (!subscription) throw new Error(`The fake holds no subscription ${id}.`);
+
+        const now = new Date().toISOString();
+        const filled = attempts.map((attempt): ServedAttempt => ({
+            outcome: 'PAID',
+            reason: null,
+            amount: '9990000',
+            attempted_at: now,
+            signature: 'fake_signature',
+            ...attempt,
+        }));
+
+        this.#answer(subscription, {
+            subscribed_since: subscription.confirmed_at,
+            attempts: filled,
+        });
+        return filled;
     }
 
     /**
