@@ -15,6 +15,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         plan: 'pro',
         access: true,
         status: 'active',
+        paused: false,
+        end_reason: null,
         payment_status: 'paid',
         subscribed_since: '2026-09-01T00:00:00.000Z',
         first_subscribed_at: '2026-09-01T00:00:00.000Z',
@@ -251,7 +253,32 @@ describe('access', () => {
                 without('retry_deadline', 'soon'),
                 'retry_deadline is not a date or null',
             ],
+            ['paused as a string', without('paused', 'no'), 'paused is not a boolean'],
+            ['paused as null', without('paused', null), 'paused is not a boolean'],
+            [
+                'an end_reason that is not a string',
+                without('end_reason', 3),
+                'end_reason is not a string or null',
+            ],
+            [
+                'an end_reason as a boolean',
+                without('end_reason', false),
+                'end_reason is not a string or null',
+            ],
             ['attempts that are not a list', without('attempts', {}), 'attempts is not a list'],
+            [
+                'an attempt whose outcome is not a string',
+                without('attempts', [
+                    {
+                        outcome: null,
+                        reason: null,
+                        amount: '1000000',
+                        attempted_at: START.toISOString(),
+                        signature: null,
+                    },
+                ]),
+                'attempts[0].outcome is not a string',
+            ],
             [
                 'an attempt without an amount',
                 without('attempts', [
@@ -310,6 +337,176 @@ describe('access', () => {
             await expect(mesub.access(OTHER_WALLET, 'pro')).resolves.toMatchObject({
                 retry_deadline: deadline,
             });
+        });
+
+        // Served since Mesub-io/backend#236: a back from before still answers.
+        it('reads a missing paused as false and a missing end_reason as null', async () => {
+            const older = without('paused');
+            delete older['end_reason'];
+            const { fetch } = mockFetch(json(200, older));
+
+            const read = await client(fetch).access(WALLET, 'pro');
+
+            expect(read).toEqual(answer());
+            expect(read).toMatchObject({ paused: false, end_reason: null });
+        });
+
+        it('reads only one of the two missing, keeping the other as sent', async () => {
+            const { fetch } = mockFetch(
+                json(200, without('end_reason')),
+                json(200, { ...without('paused'), status: 'ended', end_reason: 'closed' }),
+            );
+            const mesub = client(fetch);
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                paused: false,
+                end_reason: null,
+            });
+            await expect(mesub.access(OTHER_WALLET, 'pro')).resolves.toMatchObject({
+                paused: false,
+                end_reason: 'closed',
+            });
+        });
+
+        it('caches an older answer with the two defaults filled in', async () => {
+            const set = vi.fn();
+            const older = without('paused');
+            delete older['end_reason'];
+            const { fetch } = mockFetch(json(200, older));
+
+            await client(fetch, { get: () => undefined, set }).access(WALLET, 'pro');
+
+            expect(set).toHaveBeenCalledWith(
+                expect.any(String),
+                expect.objectContaining({ value: answer() }),
+                expect.any(Number),
+            );
+        });
+
+        it('fills the defaults in each plan of a list from an older back', async () => {
+            const older = without('paused');
+            delete older['end_reason'];
+            const { fetch } = mockFetch(json(200, { plans: [older], revalidate_after: 60 }));
+
+            await expect(client(fetch).accessList(WALLET)).resolves.toEqual({
+                plans: [answer()],
+                revalidate_after: 60,
+            });
+        });
+
+        it('names the plan of a list whose paused is not a boolean', async () => {
+            const { fetch } = mockFetch(
+                json(200, { plans: [answer(), without('paused', 1)], revalidate_after: 60 }),
+            );
+
+            const error = await client(fetch)
+                .accessList(WALLET)
+                .catch((caught: unknown) => caught);
+
+            expect(error).toMatchObject({ code: 'unexpected' });
+            expect((error as MesubError).message).toContain('plans[1].paused is not a boolean');
+        });
+
+        it.each([
+            'cancelled',
+            'plan_removed',
+            'plan_replaced',
+            'plan_ended',
+            'authority_closed',
+            'closed',
+        ] as const)('takes an ended answer whose end_reason is %s', async (end_reason) => {
+            const ended = answer({
+                access: false,
+                status: 'ended',
+                end_reason,
+                payment_status: 'none',
+                next_charge_at: null,
+            });
+            const { fetch } = mockFetch(json(200, ended));
+            const mesub = client(fetch);
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(ended);
+        });
+
+        it('takes an ended answer with no reason recorded', async () => {
+            const ended = answer({ access: false, status: 'ended', end_reason: null });
+            const { fetch } = mockFetch(json(200, ended));
+
+            await expect(client(fetch).access(WALLET, 'pro')).resolves.toEqual(ended);
+        });
+
+        // A reason the back adds later must not turn a guard into an error.
+        it('takes an end_reason it does not know, and answers no from hasAccess', async () => {
+            const ended = answer({
+                access: false,
+                status: 'ended',
+                end_reason: 'merchant_refunded' as AccessAnswer['end_reason'],
+            });
+            const { fetch } = mockFetch(json(200, ended), json(200, ended));
+            const mesub = client(fetch);
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(ended);
+            await expect(mesub.hasAccess(OTHER_WALLET, 'pro')).resolves.toBe(false);
+        });
+
+        // Parked over the project's cap: the status stays, nothing is billed.
+        it.each(['active', 'unpaid', 'cancelled'] as const)(
+            'takes a paused %s seat, its status unchanged',
+            async (status) => {
+                const parked = answer({
+                    status,
+                    paused: true,
+                    payment_status: 'none',
+                    next_charge_at: null,
+                    access_until: '2026-10-01T00:00:00.000Z',
+                });
+                const { fetch } = mockFetch(json(200, parked), json(200, parked));
+                const mesub = client(fetch);
+
+                await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(parked);
+                await expect(mesub.hasAccess(OTHER_WALLET, 'pro')).resolves.toBe(true);
+            },
+        );
+
+        it.each(['PAID', 'SKIPPED', 'REJECTED', 'BLOCKED'] as const)(
+            'takes a %s attempt',
+            async (outcome) => {
+                const body = answer({
+                    attempts: [
+                        {
+                            outcome,
+                            reason: outcome === 'PAID' ? null : 'fee-payer-empty',
+                            amount: '1000000',
+                            attempted_at: START.toISOString(),
+                            signature: null,
+                        },
+                    ],
+                });
+                const { fetch } = mockFetch(json(200, body));
+
+                await expect(
+                    client(fetch).access(WALLET, 'pro', { attempts: true }),
+                ).resolves.toEqual(body);
+            },
+        );
+
+        it('takes an outcome it does not know', async () => {
+            const body = answer({
+                attempts: [
+                    {
+                        outcome: 'DEFERRED' as never,
+                        reason: null,
+                        amount: '1000000',
+                        attempted_at: START.toISOString(),
+                        signature: null,
+                    },
+                ],
+            });
+            const { fetch } = mockFetch(json(200, body));
+
+            await expect(client(fetch).access(WALLET, 'pro', { attempts: true })).resolves.toEqual(
+                body,
+            );
         });
 
         it('takes a superseded status', async () => {
