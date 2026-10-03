@@ -1882,7 +1882,8 @@ describe('concurrent lookups', () => {
         const mesub = client(fetch);
 
         const before = mesub.hasAccess(WALLET, 'pro');
-        await settled();
+        // In flight for sure: the key is hashed first, which a timer tick does not wait for.
+        await vi.waitFor(() => expect(calls).toHaveLength(1));
         await mesub.subscriptions.retrieve('sub_1');
         release();
 

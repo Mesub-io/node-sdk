@@ -87,6 +87,8 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
         baseUrl: BASE,
         fetch: fetch as unknown as typeof globalThis.fetch,
         maxRetries: 0,
+        // The default budget is 2 s: on a busy machine it would decide a test that is not about it.
+        guardTimeout: 30_000,
         ...options,
     });
 
