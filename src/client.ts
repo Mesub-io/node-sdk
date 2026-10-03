@@ -142,8 +142,10 @@ export class Mesub {
                 integer: true,
             }),
         });
-        this.subscriptions = new Subscriptions(this.transport, (subscription) =>
-            this.landed(subscription),
+        this.subscriptions = new Subscriptions(
+            this.transport,
+            (subscription) => this.landed(subscription),
+            (subscription) => this.landed(subscription, true),
         );
         this.webhooks = new Webhooks(webhookSecret, (event) => this.landed(event.data));
         const store = options.cache ?? new MemoryStore<AccessAnswer | AccessList>();
@@ -373,11 +375,15 @@ export class Mesub {
      * `hasAccess` right after a submit kept answering the cached no until
      * `revalidate_after` ran out. A store that fails costs nothing more than
      * that: it never throws.
+     *
+     * With `moved`, one a confirm just cancelled, resumed or closed: every
+     * answer cached for its customer is dropped, the yes too, since its
+     * status and dates changed whatever its access.
      */
-    private async landed(subscription: ServerSubscription): Promise<void> {
+    private async landed(subscription: ServerSubscription, moved = false): Promise<void> {
         const { plan } = subscription;
 
-        if (!subscription.access) return;
+        if (!moved && !subscription.access) return;
 
         try {
             for (const asked of customersOf(subscription)) {
@@ -391,13 +397,20 @@ export class Mesub {
                 }
 
                 if (plan !== null) {
-                    await this.cache.forget(slot.who, plan, slot.scope, (answer) => !answer.access);
+                    await this.cache.forget(
+                        slot.who,
+                        plan,
+                        slot.scope,
+                        (answer) => moved || !answer.access,
+                    );
                 }
                 await this.lists.forget(
                     slot.who,
                     null,
                     slot.scope,
-                    (list) => !list.plans.some((answer) => answer.plan === plan && answer.access),
+                    (list) =>
+                        moved ||
+                        !list.plans.some((answer) => answer.plan === plan && answer.access),
                 );
             }
         } catch {

@@ -2,12 +2,14 @@ import {
     type AccessAnswer,
     type AccessList,
     type CacheStore,
+    type ConfirmResult,
     type ListParams,
     MemoryStore,
     Mesub,
     MesubError,
     MesubSubmitError,
     type ServerSubscription,
+    type WalletTransaction,
 } from '../src/index.js';
 import { type FetchCall, coded, json, mockFetch, nest } from './helpers.js';
 
@@ -703,6 +705,292 @@ describe('subscriptions.submit', () => {
     });
 });
 
+const ACTIONS = ['cancel', 'resume', 'close'] as const;
+type Action = (typeof ACTIONS)[number];
+
+/** The method that builds each action's transaction, and the one that confirms it. */
+const build = (client: Mesub, action: Action, id = 'sub_1', options = {}) =>
+    client.subscriptions[action](id, options);
+const confirm = (
+    client: Mesub,
+    action: Action,
+    id = 'sub_1',
+    params = { signature: SIGNATURE },
+    options = {},
+): Promise<ConfirmResult> =>
+    ({
+        cancel: () => client.subscriptions.confirmCancel(id, params, options),
+        resume: () => client.subscriptions.confirmResume(id, params, options),
+        close: () => client.subscriptions.confirmClose(id, params, options),
+    })[action]();
+
+describe.each(ACTIONS)('subscriptions.%s', (action) => {
+    const unsigned: WalletTransaction = {
+        transaction: 'AQAAAA==',
+        last_valid_block_height: '312345678',
+    };
+    const route = `POST /v1/subscriptions/:id/${action}`;
+
+    it('posts to the subscription with no body, and answers what the wallet signs', async () => {
+        const { fetch, calls } = mockFetch(json(201, unsigned));
+
+        await expect(build(mesub(fetch), action)).resolves.toEqual(unsigned);
+
+        expect(calls[0]!.url.href).toBe(`https://api.test/v1/subscriptions/sub_1/${action}`);
+        expect(calls[0]!.init.method).toBe('POST');
+        expect(calls[0]!.init.body).toBeUndefined();
+        expect(new Headers(calls[0]!.init.headers).get('authorization')).toBe('Bearer sk_test');
+    });
+
+    it('escapes the id in the path', async () => {
+        const { fetch, calls } = mockFetch(json(201, unsigned));
+
+        await build(mesub(fetch), action, 'a/b c');
+
+        expect(calls[0]!.url.pathname).toBe(`/v1/subscriptions/a%2Fb%20c/${action}`);
+    });
+
+    it('refuses an empty id, sending nothing', async () => {
+        const { fetch } = mockFetch();
+
+        await expect(build(mesub(fetch), action, '')).rejects.toMatchObject({
+            status: null,
+            code: 'invalid_request',
+        });
+        expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        [401, 'invalid_api_key', 'unauthorized', false],
+        [403, 'forbidden', 'forbidden', false],
+        [404, 'subscription_not_found', 'not_found', false],
+        [409, 'subscription_not_active', 'conflict', false],
+        [409, 'subscription_not_cancelled', 'conflict', false],
+        [409, 'close_too_early', 'conflict', false],
+        [429, 'rate_limited', 'rate_limited', true],
+        [503, 'network_unavailable', 'unavailable', true],
+    ])('throws a %i %s as %s, never sent again', async (status, apiCode, code, retryable) => {
+        const { fetch } = mockFetch(
+            coded(status, apiCode, 'Refused.', retryable, { 'retry-after': '7' }),
+        );
+
+        const { error } = await settle(build(mesub(fetch), action));
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).toMatchObject({ status, code, apiCode, retryable, retryAfter: 7_000 });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('is not sent again after a network error', async () => {
+        const { fetch } = mockFetch(new TypeError('fetch failed'), json(201, unsigned));
+
+        const { error } = await settle(build(mesub(fetch), action));
+
+        expect(error).toMatchObject({ status: null, code: 'unavailable' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("gives up at the client's timeout, and at the call's when it has one", async () => {
+        const { fetch } = mockFetch('hang', 'hang');
+        const client = mesub(fetch);
+
+        const byDefault = settle(build(client, action));
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect((await byDefault).error).toMatchObject({ status: null, code: 'unavailable' });
+
+        const shorter = settle(build(client, action, 'sub_1', { timeout: 1_000 }));
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect((await shorter).error).toMatchObject({ status: null, code: 'unavailable' });
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops on an abort', async () => {
+        const controller = new AbortController();
+        const { fetch } = mockFetch('hang');
+        const result = settle(build(mesub(fetch), action, 'sub_1', { signal: controller.signal }));
+
+        controller.abort();
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ name: 'AbortError' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['no transaction', { last_valid_block_height: '1' }, 'transaction is missing'],
+        [
+            'a block height that is a number',
+            { ...unsigned, last_valid_block_height: 312345678 },
+            'last_valid_block_height is not a string',
+        ],
+        ['a list', [], 'the body is not an object'],
+        ['a subscription instead', subscription(), 'transaction is missing'],
+    ])('throws unexpected on an answer with %s', async (_label, body, problem) => {
+        const { fetch } = mockFetch(json(201, body));
+
+        await expect(build(mesub(fetch), action)).rejects.toMatchObject({
+            status: 201,
+            code: 'unexpected',
+            message: `Mesub answered ${route} with an answer this SDK cannot read: ${problem}.`,
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe.each([
+    ['confirmCancel', 'cancel', subscription({ status: 'cancelled', next_charge_at: null })],
+    ['confirmResume', 'resume', subscription()],
+    [
+        'confirmClose',
+        'close',
+        subscription({ status: 'ended', end_reason: 'closed', access: false, access_until: null }),
+    ],
+] as const)('subscriptions.%s', (_method, action, settled) => {
+    const route = `POST /v1/subscriptions/:id/${action}/confirm`;
+
+    it("posts the wallet's signature, and answers what settled", async () => {
+        const { fetch, calls } = mockFetch(json(201, { subscription: settled }));
+
+        await expect(confirm(mesub(fetch), action)).resolves.toEqual({ subscription: settled });
+
+        expect(calls[0]!.url.href).toBe(
+            `https://api.test/v1/subscriptions/sub_1/${action}/confirm`,
+        );
+        expect(calls[0]!.init.method).toBe('POST');
+        expect(calls[0]!.init.body).toBe(`{"signature":"${SIGNATURE}"}`);
+    });
+
+    it('sends nothing but the signature', async () => {
+        const { fetch, calls } = mockFetch(json(201, { subscription: settled }));
+        const params = { signature: SIGNATURE, wallet: WALLET };
+
+        await confirm(mesub(fetch), action, 'sub_1', params);
+
+        expect(calls[0]!.init.body).toBe(`{"signature":"${SIGNATURE}"}`);
+    });
+
+    it("answers the subscription as it was, with Mesub's reason, when nothing landed", async () => {
+        const body = { subscription: subscription(), reason: 'The transaction failed on chain.' };
+        const { fetch } = mockFetch(json(201, body));
+
+        await expect(confirm(mesub(fetch), action)).resolves.toEqual(body);
+    });
+
+    it('escapes the id, and refuses an empty one', async () => {
+        const { fetch, calls } = mockFetch(json(201, { subscription: settled }));
+        const client = mesub(fetch);
+
+        await confirm(client, action, 'a/b');
+        expect(calls[0]!.url.pathname).toBe(`/v1/subscriptions/a%2Fb/${action}/confirm`);
+
+        await expect(confirm(client, action, '')).rejects.toMatchObject({
+            code: 'invalid_request',
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        [400, 'nothing_to_confirm', 'invalid_request', false],
+        [401, 'invalid_api_key', 'unauthorized', false],
+        [403, 'forbidden', 'forbidden', false],
+        [404, 'subscription_not_found', 'not_found', false],
+        [409, 'subscription_not_active', 'conflict', false],
+        [429, 'rate_limited', 'rate_limited', true],
+        [503, 'network_unavailable', 'unavailable', true],
+    ])('throws a %i %s as %s, never sent again', async (status, apiCode, code, retryable) => {
+        const { fetch } = mockFetch(
+            coded(status, apiCode, 'Refused.', retryable, { 'retry-after': '10' }),
+        );
+
+        const { error } = await settle(confirm(mesub(fetch), action));
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).not.toBeInstanceOf(MesubSubmitError);
+        expect(error).toMatchObject({ status, code, apiCode, retryable, retryAfter: 10_000 });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits 90 s for the chain by default, and is not sent again', async () => {
+        const { fetch } = mockFetch('hang', json(201, { subscription: settled }));
+        const result = settle(confirm(mesub(fetch), action));
+
+        await vi.advanceTimersByTimeAsync(89_999);
+        expect(fetch).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect((await result).error).toMatchObject({ status: null, code: 'unavailable' });
+        await vi.runAllTimersAsync();
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes a timeout of the call', async () => {
+        const { fetch } = mockFetch('hang');
+        const result = settle(
+            confirm(mesub(fetch), action, 'sub_1', { signature: SIGNATURE }, { timeout: 2_000 }),
+        );
+
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        expect((await result).error).toMatchObject({ status: null, code: 'unavailable' });
+    });
+
+    it('stops on an abort', async () => {
+        const controller = new AbortController();
+        const { fetch } = mockFetch('hang');
+        const result = settle(
+            confirm(
+                mesub(fetch),
+                action,
+                'sub_1',
+                { signature: SIGNATURE },
+                { signal: controller.signal },
+            ),
+        );
+
+        controller.abort();
+        await vi.runAllTimersAsync();
+
+        expect((await result).error).toMatchObject({ name: 'AbortError' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['no subscription', {}, 'subscription is missing'],
+        ['a bare subscription', settled, 'subscription is missing'],
+        [
+            'a subscription without a wallet',
+            { subscription: { ...settled, wallet: undefined } },
+            'subscription.wallet is missing',
+        ],
+        [
+            'a reason that is not a string',
+            { subscription: settled, reason: 3 },
+            'reason is not a string',
+        ],
+    ])('throws unexpected on an answer with %s', async (_label, body, problem) => {
+        const { fetch } = mockFetch(json(201, body));
+
+        await expect(confirm(mesub(fetch), action)).rejects.toMatchObject({
+            status: 201,
+            code: 'unexpected',
+            message: `Mesub answered ${route} with an answer this SDK cannot read: ${problem}.`,
+        });
+        // Not read back, unlike a submit: the same confirm can be sent again.
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads a missing paused and end_reason as false and null', async () => {
+        const { paused: _paused, end_reason: _reason, ...older } = subscription();
+        const { fetch } = mockFetch(json(201, { subscription: older }));
+
+        const result = await confirm(mesub(fetch), action);
+
+        expect(result.subscription).toMatchObject({ paused: false, end_reason: null });
+    });
+});
+
 describe('subscriptions.retrieve', () => {
     it('gets one subscription by id', async () => {
         const expired = subscription({ status: 'expired', access: false, access_until: null });
@@ -1178,6 +1466,142 @@ describe('the access cache once a subscription lands', () => {
 
         await expect(client.subscriptions.submit('sub_1', signed)).resolves.toEqual({
             subscription: subscription(),
+        });
+    });
+
+    describe('after a confirm', () => {
+        const cancelled = subscription({ status: 'cancelled', next_charge_at: null });
+        const ended = subscription({
+            status: 'ended',
+            end_reason: 'closed',
+            access: false,
+            access_until: null,
+        });
+        const after = (over: Partial<AccessAnswer>) => access({ ...granted, ...over });
+
+        it.each([
+            ['cancel', cancelled, after({ status: 'cancelled' })],
+            ['resume', subscription(), after({ next_charge_at: '2026-11-01T12:00:00.000Z' })],
+            ['close', ended, access({ status: 'ended', end_reason: 'closed' })],
+        ] as const)('asks Mesub again after a %s that landed', async (action, settled, fresh) => {
+            const { fetch, calls } = mockFetch(
+                json(200, granted),
+                json(201, { subscription: settled }),
+                json(200, fresh),
+            );
+            const client = mesub(fetch);
+            await client.access(WALLET, 'pro');
+
+            await confirm(client, action);
+
+            // The cached yes is dropped too: its status and dates are outdated.
+            await expect(client.access(WALLET, 'pro')).resolves.toEqual(fresh);
+            expect(asked(calls)).toBe(2);
+        });
+
+        it('drops the answers by external id and email, and the list, too', async () => {
+            const list: AccessList = { plans: [granted], revalidate_after: 60 };
+            const { fetch, calls } = mockFetch(
+                json(200, granted),
+                json(200, granted),
+                json(200, list),
+                json(201, { subscription: cancelled }),
+                json(200, granted),
+                json(200, granted),
+                json(200, list),
+            );
+            const client = mesub(fetch);
+            await client.access({ external_id: 'cus_42' }, 'pro');
+            await client.access({ email: 'a@b.co' }, 'pro');
+            await client.accessList(WALLET);
+
+            await client.subscriptions.confirmCancel('sub_1', { signature: SIGNATURE });
+
+            await client.access({ external_id: 'cus_42' }, 'pro');
+            await client.access({ email: 'a@b.co' }, 'pro');
+            await client.accessList(WALLET);
+            expect(asked(calls)).toBe(6);
+        });
+
+        it('keeps the answers of other plans and other customers', async () => {
+            const other = 'OtherWallet1111111111111111111111111111111';
+            const { fetch, calls } = mockFetch(
+                json(200, access({ plan: 'team' })),
+                json(200, access({ wallet: other, access: true })),
+                json(201, { subscription: cancelled }),
+            );
+            const client = mesub(fetch);
+            await client.access(WALLET, 'team');
+            await client.access(other, 'pro');
+
+            await client.subscriptions.confirmCancel('sub_1', { signature: SIGNATURE });
+
+            await client.access(WALLET, 'team');
+            await client.access(other, 'pro');
+            expect(asked(calls)).toBe(2);
+        });
+
+        it('keeps a cached yes when Mesub answered a reason: nothing moved', async () => {
+            const { fetch, calls } = mockFetch(
+                json(200, granted),
+                json(201, {
+                    subscription: subscription(),
+                    reason: 'The cancellation did not land.',
+                }),
+            );
+            const client = mesub(fetch);
+            await client.access(WALLET, 'pro');
+
+            await client.subscriptions.confirmCancel('sub_1', { signature: SIGNATURE });
+
+            await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+            expect(asked(calls)).toBe(1);
+        });
+
+        it('drops nothing when only the transaction was built', async () => {
+            const { fetch, calls } = mockFetch(
+                json(200, granted),
+                json(201, { transaction: 'AQAAAA==', last_valid_block_height: '1' }),
+            );
+            const client = mesub(fetch);
+            await client.access(WALLET, 'pro');
+
+            await client.subscriptions.cancel('sub_1');
+
+            await client.access(WALLET, 'pro');
+            expect(asked(calls)).toBe(1);
+        });
+
+        it('makes it stale in a store without delete', async () => {
+            const memory = new MemoryStore<AccessAnswer | AccessList>();
+            const store: CacheStore<AccessAnswer | AccessList> = {
+                get: (key) => memory.get(key),
+                set: (key, entry, ttlMs) => memory.set(key, entry, ttlMs),
+            };
+            const { fetch, calls } = mockFetch(
+                json(200, granted),
+                json(201, { subscription: ended }),
+                json(200, access({ status: 'ended', end_reason: 'closed' })),
+            );
+            const client = withCache(fetch, store);
+            await client.hasAccess(WALLET, 'pro');
+
+            await client.subscriptions.confirmClose('sub_1', { signature: SIGNATURE });
+
+            await expect(client.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+            expect(asked(calls)).toBe(2);
+        });
+
+        it('still answers the confirm when the store fails', async () => {
+            const fail = () => {
+                throw new Error('ECONNREFUSED');
+            };
+            const { fetch } = mockFetch(json(201, { subscription: cancelled }));
+            const client = withCache(fetch, { get: fail, set: fail, delete: fail });
+
+            await expect(
+                client.subscriptions.confirmCancel('sub_1', { signature: SIGNATURE }),
+            ).resolves.toEqual({ subscription: cancelled });
         });
     });
 });

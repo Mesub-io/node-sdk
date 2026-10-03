@@ -17,6 +17,9 @@ export type {
 } from './answer.js';
 export type { Subscriptions } from './subscriptions.js';
 export type {
+    ConfirmOptions,
+    ConfirmParams,
+    ConfirmResult,
     ListParams,
     ServerSubscription,
     ServerSubscriptionList,
@@ -27,6 +30,7 @@ export type {
     SubscribeCosts,
     SubscribeParams,
     SubscribeTransaction,
+    WalletTransaction,
 } from './subscriptions.js';
 export type { RequestOptions } from './transport.js';
 export { verifyWebhook } from './webhooks.js';

@@ -489,6 +489,100 @@ them. `status`, `paused` and `end_reason` read as on `access` (see
 [What the answer says](#what-the-answer-says)): a `cancelled` subscription is
 `ended`, with `end_reason: 'cancelled'`, once its end date passed.
 
+## Cancel, resume and close from your server
+
+Stopping a subscription takes the same two calls from your server as starting
+one, with the wallet in between. Your server asks Mesub for a transaction,
+**the subscriber's wallet signs and sends it in your front**, and your server
+confirms it with the signature the wallet answered. No Mesub account, and
+nothing of `@mesub/react`. The API key alone moves nothing: only the
+subscription's own wallet can sign.
+
+| To                                            | Build, on your server | Confirm, on your server            | Settles as                      |
+| --------------------------------------------- | --------------------- | ---------------------------------- | ------------------------------- |
+| stop the renewals of a running one            | `cancel(id)`          | `confirmCancel(id, { signature })` | `cancelled`                     |
+| take a cancellation back before its end       | `resume(id)`          | `confirmResume(id, { signature })` | `active`                        |
+| close one that is over, and get its rent back | `close(id)`           | `confirmClose(id, { signature })`  | `ended`, `end_reason: 'closed'` |
+
+1. **Build**, on your server, for a subscription of the customer asking (find
+   it with `list`):
+
+    ```ts
+    const { transaction } = await mesub.subscriptions.cancel(subscriptionId);
+    // Send transaction to your front. Nothing is cancelled yet.
+    ```
+
+2. **Sign and send**, in your front. Unlike subscribing, the wallet sends this
+   one itself: Mesub signs nothing of it, and the wallet pays its network fee.
+
+    ```ts
+    import { VersionedTransaction } from '@solana/web3.js';
+
+    // wallet and connection: e.g. useWallet() and useConnection() of
+    // @solana/wallet-adapter-react, with the subscription's own wallet connected.
+    const bytes = Uint8Array.from(atob(transaction), (c) => c.charCodeAt(0));
+    const signature = await wallet.sendTransaction(
+        VersionedTransaction.deserialize(bytes),
+        connection,
+    );
+    // Send signature (base58) back to your server.
+    ```
+
+3. **Confirm**, on your server: Mesub waits for the chain, up to a minute or
+   so, and answers the subscription as it is now.
+
+    ```ts
+    const { subscription, reason } = await mesub.subscriptions.confirmCancel(subscriptionId, {
+        signature,
+    });
+
+    if (reason === undefined) {
+        // cancelled: subscription.access_until says when access ends
+    } else {
+        // Nothing changed (the transaction failed, or expired before it
+        // landed): reason says why. Build a new one to try again.
+    }
+    ```
+
+`resume` with `confirmResume`, and `close` with `confirmClose`, work the same
+way, steps 1 to 3.
+
+A cancellation is not an immediate stop: a subscription paid up keeps its
+`access` until the end of the period it paid for (`access_until`), and can be
+resumed until then. One cancelled while `unpaid` or `stopped` has no access,
+and its missed period is never collected. Once that end has passed it reads
+`ended` with `end_reason: 'cancelled'`, and `close` gives the wallet back the
+rent it paid when subscribing; the same wallet can then subscribe to the plan
+anew.
+
+Each of the six is sent once and never retried. `cancel`, `resume` and `close`
+take the client's `timeout`; a confirm waits 90 s by default. Both take
+`{ timeout, signal }` per call. A confirm that timed out or got a 5xx changed
+nothing by itself: send it again with the same signature, it is answered the
+same once the transaction has landed. A transaction built and never sent
+changes nothing either.
+
+A confirm that settled (no `reason`) drops every `/v1/access` answer this
+client cached for that customer on that plan, by wallet, external id and
+email, and in `accessList`: `access` right after says `cancelled`, or `active`
+again, rather than what it cached before.
+
+Refusals throw a `MesubError` (see [Errors](#errors)), told apart by `apiCode`:
+
+| `code`            | `apiCode`                    | When                                                      |
+| ----------------- | ---------------------------- | --------------------------------------------------------- |
+| `not_found`       | `subscription_not_found`     | no subscription of your project under that id             |
+| `conflict`        | `subscription_not_active`    | `cancel`: it is not `active`, `unpaid` or `stopped`       |
+| `conflict`        | `subscription_cancelled`     | `cancel`: it was cancelled already                        |
+| `conflict`        | `subscription_not_cancelled` | `resume` or `close`: nothing cancelled it                 |
+| `conflict`        | `subscription_ended`         | `resume`: the period it paid for is over, subscribe again |
+| `conflict`        | `plan_deleted`               | `resume`: its plan is gone                                |
+| `conflict`        | `close_too_early`            | `close`: its end has not passed yet                       |
+| `conflict`        | `subscription_not_on_chain`  | it is closed already, or gone from the chain              |
+| `invalid_request` | `nothing_to_confirm`         | a confirm before any transaction was built                |
+| `invalid_request` |                              | a `signature` that is not a base58 transaction signature  |
+| `rate_limited`    |                              | more than 60 of these calls in a minute for the key       |
+
 ## Webhooks
 
 Mesub posts an event to your endpoint when a subscription changes, signed
@@ -758,7 +852,11 @@ the next call while the outage fallback still has them; pass
 `revalidate_after` to test the cache. A customer is answered as named: a
 wallet granted is not found by its external id. `subscriptions.create` then
 `submit` land at once and grant the plan; `addSubscription` adds one for
-`retrieve` and `list`. Pass `fake.fetch` to your own `new Mesub()` with
+`retrieve` and `list`. `cancel`, `resume` and `close` answer a made-up
+transaction, and their confirms land at once with any `signature`: the
+subscription and its access answers move as Mesub's would, and a step its
+status does not allow is refused with Mesub's code (`close_too_early`,
+`nothing_to_confirm`, ...). Pass `fake.fetch` to your own `new Mesub()` with
 `fake.apiKey` and `fake.baseUrl` if you build the client yourself, and
 `fake.webhookSecret` as `webhookSecret`. `signWebhook(body, { secret })`
 signs a body of your own.
