@@ -424,6 +424,25 @@ describe.skipIf(!env.url)('contract with the back', () => {
         });
     });
 
+    describe('plans, through the SDK', () => {
+        it('lists both plans, each one the SDK can read', async () => {
+            const plans = await mesub().plans.list();
+
+            for (const plan of plans) expectShape(plan, PLAN_FIELDS);
+            expect(plans.map(({ slug }) => slug)).toEqual([env.plan, env.endedPlan].sort());
+        });
+
+        it('retrieves one, and throws plan_not_found for a slug the project lacks', async () => {
+            await expect(mesub().plans.retrieve(env.plan)).resolves.toMatchObject({
+                slug: env.plan,
+            });
+            await expect(mesub().plans.retrieve('no-such-plan-here')).rejects.toMatchObject({
+                status: 404,
+                code: 'plan_not_found',
+            });
+        });
+    });
+
     describe('errors', () => {
         it('answers unauthorized for a key never issued', async () => {
             const stranger = new Mesub({

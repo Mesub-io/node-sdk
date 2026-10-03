@@ -56,6 +56,12 @@ The first version published to npm. Requires Node 22 or later.
 - Every call sends `Mesub-Version`, the API version the release was written
   against, exported as `API_VERSION` (#64).
 
+### Plans
+
+- `plans.list()` and `plans.retrieve(slug)` read your project's plans for a
+  pricing page: price, period, token, and whether each takes new subscribers
+  (#84).
+
 ### Guards
 
 - `requirePlan` for Express, `withMesub` for Next route handlers, the
@@ -77,6 +83,8 @@ The first version published to npm. Requires Node 22 or later.
   for nobody): no Mesub token is read then, so a guard needs nothing of
   `@mesub/react`. Not with `token`. `mesub.customer` says who was asked
   about; `mesub.userId` and `mesub.wallet` may now be null (#79).
+- `RequirePlan<YourRequest>(...)` for NestJS: name your request type to read
+  `req.user` in `customer` and `onDenied` without a cast (#84).
 - An async `onDenied` is awaited: what it throws or rejects with goes where
   an integration error goes, `next(err)` under Express 4 as under 5, thrown
   in Next and Nest. In Nest, an exception it throws after an `await` is the
@@ -127,6 +135,9 @@ The first version published to npm. Requires Node 22 or later.
   (#77).
 - `@mesub/node/testing`: `fake.webhook(type)` makes a signed delivery the
   fake's client verifies; `signWebhook` signs a body of your own (#77).
+- A verified event drops every access answer cached for its customer, the
+  yes too: after `subscription.stopped` or `subscription.ended`, `hasAccess`
+  says no at once instead of the cached yes for up to five minutes (#84).
 
 ### Testing your integration
 

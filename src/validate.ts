@@ -1,5 +1,6 @@
 import type { AccessAnswer, AccessList, ServedAttempt } from './answer.js';
 import { MesubError } from './errors.js';
+import type { Plan } from './plans.js';
 import type {
     ConfirmResult,
     ServerSubscription,
@@ -186,6 +187,45 @@ const SUBSCRIBE_TRANSACTION = {
     costs: OBJECT,
     terms: OBJECT,
 } satisfies Record<keyof SubscribeTransaction, Field>;
+
+const PLAN = {
+    slug: STRING,
+    name: STRING,
+    description: STRING_OR_NULL,
+    project_name: STRING,
+    logo_url: STRING_OR_NULL,
+    amount: STRING,
+    amount_display: STRING,
+    decimals: COUNT,
+    symbol: STRING_OR_NULL,
+    mint: STRING,
+    period_hours: COUNT,
+    network: STRING,
+    // A string, not one of two: a status added later is handed back, not refused.
+    status: STRING,
+    available: BOOLEAN,
+    ends_at: DATE_OR_NULL,
+} satisfies Record<keyof Plan, Field>;
+
+/** One plan, from `plans.retrieve`. */
+export function planFrom(body: unknown): Plan {
+    const problem = problemWith(body, PLAN);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/plans/:slug');
+
+    return body as Plan;
+}
+
+/** `plans.list`: each plan checked like `retrieve`'s. */
+export function planListFrom(body: unknown): Plan[] {
+    const problem =
+        problemWith(body, { plans: LIST_OF }) ??
+        firstProblem((body as { plans: unknown[] }).plans, 'plans', PLAN);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/plans');
+
+    return (body as { plans: Plan[] }).plans;
+}
 
 /** One subscription, from `retrieve`, or read back after a submit. */
 export function serverSubscriptionFrom(body: unknown): ServerSubscription {

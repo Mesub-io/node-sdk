@@ -43,7 +43,12 @@ export interface MesubRequest {
     mesub?: MesubAccess;
 }
 
-export interface RequirePlanOptions {
+/**
+ * `Req` is your request as your own auth guard leaves it: name it to read
+ * `req.user` in `customer` without a cast,
+ * `RequirePlan<AuthedRequest>('pro', { customer: (req) => ... })`.
+ */
+export interface RequirePlanOptions<Req extends MesubRequest = MesubRequest> {
     /** Defaults to one client built from MESUB_API_KEY. */
     client?: Mesub;
     /**
@@ -51,21 +56,21 @@ export interface RequirePlanOptions {
      * `mesub-token` cookie: a header of your own, a session. Then the only
      * place looked at.
      */
-    token?: TokenOption<MesubRequest>;
+    token?: TokenOption<Req>;
     /**
      * Who is asking, from your own auth, instead of a Mesub token:
      * `(req) => ({ external_id: req.user.id })`, a wallet or an email. Null when
      * nobody is signed in. It must come from a session you verified, never
      * from the request itself. Not with `token`.
      */
-    customer?: CustomerOption<MesubRequest>;
+    customer?: CustomerOption<Req>;
     /**
      * Answer a refusal yourself by throwing your own exception, with your own
      * status and body. It may be async: what it returns is awaited, and a
      * rejection is thrown like a throw. If it returns, the default refusal
      * is thrown.
      */
-    onDenied?: (denial: Denial, request: MesubRequest) => unknown;
+    onDenied?: (denial: Denial, request: Req) => unknown;
 }
 
 /** Express has `setHeader`, a Fastify reply has `header`. */
@@ -93,9 +98,9 @@ function setHeader(response: HeaderSink, name: string, value: string) {
  * unreachable, with no answer known for that subscriber). Integration errors
  * are thrown as they are, for Nest to log and answer 500.
  */
-export function RequirePlan(
-    plan: PlanOption<MesubRequest>,
-    options: RequirePlanOptions = {},
+export function RequirePlan<Req extends MesubRequest = MesubRequest>(
+    plan: PlanOption<Req>,
+    options: RequirePlanOptions<Req> = {},
 ): Type<CanActivate> {
     checkPlan(plan);
     checkAsker(options);
@@ -103,7 +108,7 @@ export function RequirePlan(
     class MesubPlanGuard implements CanActivate {
         async canActivate(context: ExecutionContext): Promise<boolean> {
             const http = context.switchToHttp();
-            const request = http.getRequest<MesubRequest>();
+            const request = http.getRequest<Req>();
             const client = options.client ?? defaultClient();
             const outcome = await guard(client, await askerOf(client, request, options), () =>
                 plansOf(plan, request),

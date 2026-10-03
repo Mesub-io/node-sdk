@@ -15,6 +15,7 @@ export type {
     ServedAttempt,
     SubscriptionStatus,
 } from './answer.js';
+export type { Plan, Plans, PlanStatus } from './plans.js';
 export type { Subscriptions } from './subscriptions.js';
 export type {
     ConfirmOptions,

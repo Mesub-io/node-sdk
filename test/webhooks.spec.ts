@@ -568,6 +568,64 @@ describe('mesub.webhooks.verify', () => {
 
         await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
     });
+
+    // A cached yes must not outlive the event that takes access away.
+    it.each(['subscription.stopped', 'subscription.ended'] as const)(
+        'drops a cached yes once a %s event comes',
+        async (type) => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro', { revalidate_after: 300 });
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+            fake.deny(WALLET, 'pro');
+            // Still the cached answer.
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+
+            const { body: raw, headers } = await fake.webhook(type, {
+                subscription: { wallet: WALLET, plan: 'pro', access: false },
+            });
+            await mesub.webhooks.verify(raw, headers);
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        },
+    );
+
+    it('keeps the cached answer of another customer and of another plan', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const OTHER = 'SysvarC1ock11111111111111111111111111111111';
+        fake.grant(OTHER, 'pro', { revalidate_after: 300 });
+        fake.grant(WALLET, 'team', { revalidate_after: 300 });
+        await mesub.hasAccess(OTHER, 'pro');
+        await mesub.hasAccess(WALLET, 'team');
+        const asked = fake.requests.length;
+
+        const { body: raw, headers } = await fake.webhook('subscription.stopped', {
+            subscription: { wallet: WALLET, plan: 'pro', access: false },
+        });
+        await mesub.webhooks.verify(raw, headers);
+        await mesub.hasAccess(OTHER, 'pro');
+        await mesub.hasAccess(WALLET, 'team');
+
+        expect(fake.requests.length).toBe(asked);
+    });
+
+    it('drops nothing for an event whose signature does not hold', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        fake.grant(WALLET, 'pro', { revalidate_after: 300 });
+        await mesub.hasAccess(WALLET, 'pro');
+        fake.deny(WALLET, 'pro');
+
+        const { body: raw, headers } = await fake.webhook('subscription.stopped', {
+            subscription: { wallet: WALLET, plan: 'pro', access: false },
+        });
+        await expect(
+            mesub.webhooks.verify(raw, { ...headers, 'webhook-signature': 'v1,forged' }),
+        ).rejects.toThrow();
+
+        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+    });
 });
 
 describe('testing: signing webhooks', () => {

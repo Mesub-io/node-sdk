@@ -5,6 +5,7 @@ import type { CacheStore } from './cache/store.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
 import { apiKeyOf, baseUrlOf, headersOf, issuerOf, numberOf } from './options.js';
+import { Plans } from './plans.js';
 import { type ServerSubscription, Subscriptions } from './subscriptions.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
@@ -90,6 +91,8 @@ const DEFAULT_GUARD_TIMEOUT = 2_000;
 export class Mesub {
     /** Subscribing from your server: create, submit, retrieve and list. */
     readonly subscriptions: Subscriptions;
+    /** The plans of your project, for a pricing page: `list` and `retrieve`. */
+    readonly plans: Plans;
     /** Checking the webhooks Mesub sends: `verify`. */
     readonly webhooks: Webhooks;
     /** @internal */
@@ -147,7 +150,10 @@ export class Mesub {
             (subscription) => this.landed(subscription),
             (subscription) => this.landed(subscription, true),
         );
-        this.webhooks = new Webhooks(webhookSecret, (event) => this.landed(event.data));
+        this.plans = new Plans(this.transport);
+        // Every answer cached for its customer goes, the yes too: `stopped` and
+        // `ended` take access away, and `hasAccess` must say so at once.
+        this.webhooks = new Webhooks(webhookSecret, (event) => this.landed(event.data, true));
         const store = options.cache ?? new MemoryStore<AccessAnswer | AccessList>();
         const staleness =
             options.maxStaleMs === undefined
@@ -367,8 +373,7 @@ export class Mesub {
     }
 
     /**
-     * A subscription `submit`, `retrieve` or `list` answered (#33), or a
-     * verified webhook carried: once it
+     * A subscription `submit`, `retrieve` or `list` answered (#33): once it
      * grants access (`active`, or `cancelled` before its end), the answers
      * cached for its customer that say no are dropped, by wallet, external
      * id and email, for its plan and in the list of every plan. Without it, a
@@ -376,9 +381,10 @@ export class Mesub {
      * `revalidate_after` ran out. A store that fails costs nothing more than
      * that: it never throws.
      *
-     * With `moved`, one a confirm just cancelled, resumed or closed: every
-     * answer cached for its customer is dropped, the yes too, since its
-     * status and dates changed whatever its access.
+     * With `moved`, one a confirm just cancelled, resumed or closed, or one a
+     * verified webhook carried: every answer cached for its customer is
+     * dropped, the yes too, since its status and dates changed whatever its
+     * access. A `stopped` or `ended` event must not leave a yes behind.
      */
     private async landed(subscription: ServerSubscription, moved = false): Promise<void> {
         const { plan } = subscription;
