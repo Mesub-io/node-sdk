@@ -616,10 +616,44 @@ What they serve, under your mount point:
 | ------------------------------------------------------------ | ------------------------------------------- |
 | `GET /plans/:slug`                                           | The plan to show. Public.                   |
 | `GET /subscriptions`                                         | The customer's subscriptions.               |
+| `GET /subscriptions/:id`                                     | One of them, with its last payments.        |
 | `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
 | `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
+
+`GET /subscriptions/:id` answers the subscription and what Mesub serves of its
+pull attempts, newest first:
+
+```json
+{
+    "subscription": { "id": "cmg1...", "status": "active", "plan": "pro", "...": "..." },
+    "payments": [
+        {
+            "attempted_at": "2026-10-01T09:00:04.512Z",
+            "outcome": "PAID",
+            "amount": "9990000",
+            "reason": null,
+            "signature": "5wHu1qwD4kLD..."
+        }
+    ],
+    "listed_paid": { "count": 1, "amount": "9990000" },
+    "payments_error": null
+}
+```
+
+- `payments` is the last attempts only, five at most today: not a history.
+  `listed_paid` counts and sums the paid ones among those listed, in the
+  mint's smallest unit: it is not what was paid since the beginning.
+- `outcome` is `PAID`, `SKIPPED`, `REJECTED` or `BLOCKED`; one newer than this
+  release is handed on as is. `signature` is null when nothing was sent.
+- `payments` is null, with a `payments_error` of `{ code, message }`, when they
+  could not be read: the subscription is still answered, with a 200. Mesub
+  serves attempts for the current subscription of a wallet on a plan, so an
+  older one the wallet came back over answers `not_the_current_subscription`;
+  a refusal of Mesub's is named by its own code (`rate_limited`, ...).
+- A checkout that never started (`pending`, `expired`, `failed`) answers
+  `payments: []` without asking Mesub: nothing is pulled before it starts.
 
 ## Webhooks
 
@@ -881,7 +915,8 @@ the next call while the outage fallback still has them; pass
 `revalidate_after` to test the cache. A customer is answered as named: a
 wallet granted is not found by its external id. `subscriptions.create` then
 `submit` land at once and grant the plan; `addSubscription` adds one for
-`retrieve` and `list`. `cancel`, `resume` and `close` answer a made-up
+`retrieve` and `list`, and `setAttempts(id, [...])` gives it pull attempts,
+answered by `access` with `{ attempts: true }` and by the widget routes. `cancel`, `resume` and `close` answer a made-up
 transaction, and their confirms land at once with any `signature`: the
 subscription and its access answers move as Mesub's would, and a step its
 status does not allow is refused with Mesub's code (`close_too_early`,

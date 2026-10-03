@@ -1,4 +1,4 @@
-import type { Customer } from './answer.js';
+import type { Customer, ServedAttempt } from './answer.js';
 import type { Mesub } from './client.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
@@ -7,8 +7,8 @@ import type { ServerSubscription } from './subscriptions.js';
 /**
  * The routes `@mesub/react` calls on your own server, so the browser never
  * talks to Mesub nor holds a key: a plan to show, the customer's
- * subscriptions, and each step of subscribing, cancelling, resuming and
- * closing. One function, `handleWidget`; the Express and Next entries only
+ * subscriptions, one of them with its last payments, and each step of
+ * subscribing, cancelling, resuming and closing. One function, `handleWidget`; the Express and Next entries only
  * carry a request to it.
  *
  * Who is asking comes from `customer`, your own verified auth, as on the
@@ -115,6 +115,174 @@ function shown(subscription: ServerSubscription) {
     return rest;
 }
 
+/** One pull attempt as the browser gets it: the fields Mesub serves, and no other. */
+export interface WidgetPayment {
+    attempted_at: string;
+    /** `PAID`, `SKIPPED`, `REJECTED` or `BLOCKED` today; a newer one is handed on as is. */
+    outcome: string;
+    /** What was asked for, in the mint's smallest unit. */
+    amount: string;
+    /** Mesub's short reason, null on a paid one. */
+    reason: string | null;
+    /** Null when nothing was sent. */
+    signature: string | null;
+}
+
+/** What `GET /subscriptions/:id` answers. */
+export interface WidgetSubscriptionDetail {
+    subscription: Omit<ServerSubscription, 'email' | 'external_id'>;
+    /** What Mesub pulls next, soonest first: one entry at most, none when nothing is due. */
+    upcoming: WidgetUpcoming[];
+    /**
+     * The last pull attempts, newest first: as many as Mesub serves, five
+     * today, so never a full history. Null when they could not be read or
+     * are not this subscription's: `payments_error` says which.
+     */
+    payments: WidgetPayment[] | null;
+    /**
+     * The paid ones among `payments`, not a total since the subscription
+     * began. `amount` is their sum in the mint's smallest unit, null if one
+     * could not be read as a whole number.
+     */
+    listed_paid: { count: number; amount: string | null } | null;
+    /** Why `payments` is null; null otherwise. */
+    payments_error: { code: string; message: string } | null;
+}
+
+/** The one pull Mesub announces next for a subscription. */
+export interface WidgetUpcoming {
+    /** `charge` at the due date of a running one, `retry` of a missed one. */
+    kind: 'charge' | 'retry';
+    due_at: string;
+    /**
+     * The plan's price in the mint's smallest unit, and as a person counts
+     * it. Null when the plan could not be read, never guessed.
+     */
+    amount: string | null;
+    amount_display: string | null;
+}
+
+/**
+ * What Mesub will pull next: the next charge of a running subscription, the
+ * next retry of a late one, and nothing for any other, a parked seat
+ * included. One event at most: later periods are not served, so not computed.
+ * On Free a late one has no retry of Mesub's, only `retry_deadline`.
+ */
+async function upcomingOf(
+    client: Mesub,
+    subscription: ServerSubscription,
+): Promise<WidgetUpcoming[]> {
+    const { status, plan } = subscription;
+    const next =
+        status === 'active'
+            ? { kind: 'charge' as const, due_at: subscription.next_charge_at }
+            : status === 'unpaid'
+              ? { kind: 'retry' as const, due_at: subscription.next_retry_at }
+              : null;
+
+    // A date on any other status is no pull Mesub will run.
+    if (!next || next.due_at === null || subscription.paused) return [];
+
+    let price: { amount: string; amount_display: string } | null = null;
+
+    if (plan !== null && SLUG.test(plan)) {
+        try {
+            price = await client.plans.retrieve(plan);
+        } catch (error) {
+            if (!(error instanceof MesubError)) throw error;
+        }
+    }
+
+    return [
+        {
+            kind: next.kind,
+            due_at: next.due_at,
+            amount: price?.amount ?? null,
+            amount_display: price?.amount_display ?? null,
+        },
+    ];
+}
+
+/** The statuses nothing is ever pulled in: a checkout that never started. */
+const NEVER_STARTED = ['pending', 'expired', 'failed'];
+
+function payment(attempt: ServedAttempt): WidgetPayment {
+    return {
+        attempted_at: attempt.attempted_at,
+        outcome: attempt.outcome,
+        amount: attempt.amount,
+        reason: attempt.reason,
+        signature: attempt.signature,
+    };
+}
+
+type Payments = Omit<WidgetSubscriptionDetail, 'subscription' | 'upcoming'>;
+
+function listed(payments: WidgetPayment[]): Payments {
+    const paid = payments.filter((each) => each.outcome === 'PAID');
+    const whole = paid.every((each) => /^\d+$/.test(each.amount));
+
+    return {
+        payments,
+        listed_paid: {
+            count: paid.length,
+            amount: whole
+                ? paid.reduce((sum, each) => sum + BigInt(each.amount), 0n).toString()
+                : null,
+        },
+        payments_error: null,
+    };
+}
+
+function unlisted(code: string, message: string): Payments {
+    return {
+        payments: null,
+        listed_paid: null,
+        payments_error: { code, message },
+    };
+}
+
+/**
+ * A subscription's last pull attempts. Mesub serves them through `/v1/access`
+ * only, for the subscription in force on that wallet and plan, and names no
+ * id: they are this one's only when the answer started when this one did.
+ */
+async function paymentsOf(client: Mesub, subscription: ServerSubscription): Promise<Payments> {
+    const { plan, wallet, confirmed_at: confirmedAt } = subscription;
+
+    // Never started, so never pulled: nothing to ask.
+    if (confirmedAt === null && NEVER_STARTED.includes(subscription.status)) return listed([]);
+    if (plan === null || !SLUG.test(plan)) {
+        return unlisted('plan_without_slug', 'Its plan has no slug to read payments by.');
+    }
+
+    try {
+        const answer = await client.access({ wallet }, plan, { attempts: true });
+        const same =
+            confirmedAt !== null &&
+            answer.subscribed_since !== null &&
+            Date.parse(answer.subscribed_since) === Date.parse(confirmedAt);
+
+        if (!same) {
+            return unlisted(
+                'not_the_current_subscription',
+                'Payments are served for the current subscription of a wallet on a plan only.',
+            );
+        }
+
+        return listed(
+            (answer.attempts ?? [])
+                .map(payment)
+                .sort((a, b) => Date.parse(b.attempted_at) - Date.parse(a.attempted_at)),
+        );
+    } catch (error) {
+        if (!(error instanceof MesubError)) throw error;
+
+        // The subscription was read: it is answered without them, so the dialog still opens.
+        return unlisted(error.apiCode ?? error.code, error.message);
+    }
+}
+
 /**
  * Answers one request of the widget. `asked` is who your auth says is asking,
  * already normalised, or null for nobody; `email` their notices' address.
@@ -149,6 +317,28 @@ export async function handleWidget(
             return refusal(405, 'method_not_allowed', 'GET or POST.');
         }
         if (!asked) return refusal(401, 'unauthenticated', 'Sign in first.');
+
+        if (method === 'GET' && segments.length === 2) {
+            const id = segments[1]!;
+
+            if (!ID.test(id)) return NO_SUBSCRIPTION();
+
+            // Theirs first: another customer's is not read any further.
+            const subscription = await client.subscriptions.retrieve(id);
+            if (!isTheirs(subscription, asked)) return NO_SUBSCRIPTION();
+
+            const [upcoming, payments] = await Promise.all([
+                upcomingOf(client, subscription),
+                paymentsOf(client, subscription),
+            ]);
+            const detail: WidgetSubscriptionDetail = {
+                subscription: shown(subscription),
+                upcoming,
+                ...payments,
+            };
+
+            return { status: 200, body: detail };
+        }
 
         if (method === 'GET') {
             if (segments.length !== 1) return NOT_FOUND();
