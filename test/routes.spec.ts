@@ -106,6 +106,7 @@ describe('the widget routes: a plan', () => {
 describe('the widget routes: who is asking', () => {
     it.each([
         ['GET', '/subscriptions'],
+        ['GET', '/subscriptions/sub_1'],
         ['POST', '/subscriptions'],
         ...STEPS.map((step) => ['POST', `/subscriptions/sub_1/${step}`]),
     ])(
@@ -400,7 +401,8 @@ describe('the widget routes: managing', () => {
 
     it.each([
         ['GET', '/nope'],
-        ['GET', '/subscriptions/sub_1'],
+        ['GET', '/subscriptions/sub_1/cancel'],
+        ['GET', '/subscriptions/sub_1/payments'],
         ['POST', '/subscriptions/sub_1/refund'],
         ['POST', '/subscriptions/sub_1/cancel/confirm/again'],
         ['GET', '/'],
@@ -418,6 +420,408 @@ describe('the widget routes: managing', () => {
         await expect(call(ada, { method, path: '/subscriptions' })).resolves.toMatchObject({
             status: 405,
         });
+    });
+});
+
+describe('the widget routes: one subscription in full', () => {
+    const DAY = 24 * 3600 * 1000;
+    const at = (daysAgo: number) => new Date(Date.UTC(2026, 9, 1) - daysAgo * DAY).toISOString();
+    const calls = (fake: FakeMesub, from = 0) =>
+        fake.requests.slice(from).map((each) => `${each.method} ${each.path}`);
+
+    interface Detail {
+        subscription: Record<string, unknown>;
+        payments: Array<Record<string, unknown>> | null;
+        listed_paid: { count: number; amount: string | null } | null;
+        payments_error: { code: string; message: string } | null;
+    }
+
+    it('answers the subscription and its payments, newest first', async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [
+            { attempted_at: at(30), signature: 'sig_first' },
+            { attempted_at: at(0), signature: 'sig_last' },
+            {
+                attempted_at: at(1),
+                outcome: 'REJECTED',
+                reason: 'insufficient-balance',
+                signature: 'sig_rejected',
+            },
+            { attempted_at: at(2), outcome: 'SKIPPED', reason: 'wrong-delegate', signature: null },
+        ]);
+        const before = fake.requests.length;
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.status).toBe(200);
+        const body = answer.body as Detail;
+        expect(body.subscription).toMatchObject({ id, status: 'active', wallet: WALLET });
+        expect(body.payments).toEqual([
+            {
+                attempted_at: at(0),
+                outcome: 'PAID',
+                amount: '9990000',
+                reason: null,
+                signature: 'sig_last',
+            },
+            {
+                attempted_at: at(1),
+                outcome: 'REJECTED',
+                amount: '9990000',
+                reason: 'insufficient-balance',
+                signature: 'sig_rejected',
+            },
+            {
+                attempted_at: at(2),
+                outcome: 'SKIPPED',
+                amount: '9990000',
+                reason: 'wrong-delegate',
+                signature: null,
+            },
+            {
+                attempted_at: at(30),
+                outcome: 'PAID',
+                amount: '9990000',
+                reason: null,
+                signature: 'sig_first',
+            },
+        ]);
+        expect(body.listed_paid).toEqual({ count: 2, amount: '19980000' });
+        expect(body.payments_error).toBeNull();
+        // Its attempts are read by its own wallet and plan, whoever asks.
+        expect(calls(fake, before)).toEqual([`GET /v1/subscriptions/${id}`, 'GET /v1/access']);
+        expect(fake.requests.at(-1)?.query).toEqual({
+            wallet: WALLET,
+            plan: 'pro',
+            attempts: 'true',
+        });
+    });
+
+    it('never carries the email, the external id nor the API key', async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [{}]);
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        const text = JSON.stringify(answer);
+        expect(text).not.toContain('user_ada');
+        expect(text).not.toContain('ada@example.com');
+        expect(text).not.toContain(fake.apiKey);
+        expect(answer.body).not.toHaveProperty('subscription.email');
+        expect(answer.body).not.toHaveProperty('subscription.external_id');
+    });
+
+    it('answers an empty list for a subscription nothing was pulled for yet', async () => {
+        const { client, call } = setup();
+        const id = await subscribed(client);
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.body).toMatchObject({
+            payments: [],
+            listed_paid: { count: 0, amount: '0' },
+            payments_error: null,
+        });
+    });
+
+    it.each([
+        ['wallet', { kind: 'wallet', value: WALLET }],
+        ['external id', ada],
+        ['email', { kind: 'email', value: 'ada@example.com' }],
+    ] as const)('is read by its customer named by %s', async (_name, asked) => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [{ attempted_at: at(0) }]);
+
+        const answer = await call(asked, { path: `/subscriptions/${id}` });
+
+        expect(answer.status).toBe(200);
+        expect((answer.body as Detail).payments).toHaveLength(1);
+    });
+
+    it.each([
+        ['wallet', { kind: 'wallet', value: OTHER_WALLET }],
+        ['external id', bob],
+        ['email', { kind: 'email', value: 'eve@example.com' }],
+    ] as const)(
+        'answers 404 to another customer named by %s, without reading its payments',
+        async (_name, asked) => {
+            const { client, call, fake } = setup();
+            const id = await subscribed(client);
+            fake.setAttempts(id, [{ signature: 'sig_secret' }]);
+            const before = fake.requests.length;
+
+            const theirs = await call(asked, { path: `/subscriptions/${id}` });
+            const unknown = await call(asked, { path: '/subscriptions/sub_nope' });
+
+            expect(theirs).toMatchObject({
+                status: 404,
+                body: { error: { code: 'subscription_not_found' } },
+            });
+            // Identical to an id nobody holds.
+            expect(theirs).toEqual(unknown);
+            expect(JSON.stringify(theirs)).not.toContain('sig_secret');
+            expect(calls(fake, before)).toEqual([
+                `GET /v1/subscriptions/${id}`,
+                'GET /v1/subscriptions/sub_nope',
+            ]);
+        },
+    );
+
+    it.each(['..', '.', 'a b', 'a.b', 'x'.repeat(65)])(
+        'refuses the id %j before asking Mesub',
+        async (id) => {
+            const { call, fake } = setup();
+
+            const answer = await call(ada, { path: `/subscriptions/${encodeURIComponent(id)}` });
+
+            expect(answer).toMatchObject({
+                status: 404,
+                body: { error: { code: 'subscription_not_found' } },
+            });
+            expect(fake.requests).toEqual([]);
+        },
+    );
+
+    it('hands on an outcome newer than this release, and counts only the paid', async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [
+            { attempted_at: at(0), outcome: 'REFUNDED' as never, reason: 'made-up' },
+            { attempted_at: at(1), outcome: 'BLOCKED', signature: null },
+            { attempted_at: at(2), amount: '5000000' },
+        ]);
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.status).toBe(200);
+        const body = answer.body as Detail;
+        expect(body.payments?.map((each) => each['outcome'])).toEqual([
+            'REFUNDED',
+            'BLOCKED',
+            'PAID',
+        ]);
+        expect(body.listed_paid).toEqual({ count: 1, amount: '5000000' });
+    });
+
+    it('sums amounts past what a number holds, and none it cannot read', async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [
+            { attempted_at: at(0), amount: '18446744073709551615' },
+            { attempted_at: at(1), amount: '1' },
+        ]);
+
+        const exact = await call(ada, { path: `/subscriptions/${id}` });
+        expect((exact.body as Detail).listed_paid).toEqual({
+            count: 2,
+            amount: '18446744073709551616',
+        });
+
+        fake.setAttempts(id, [{ amount: '9.99' }, { amount: '1' }]);
+        const unread = await call(ada, { path: `/subscriptions/${id}` });
+        expect((unread.body as Detail).listed_paid).toEqual({ count: 2, amount: null });
+    });
+
+    it('hands the browser only the fields it knows of an attempt', async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [{ detail: 'Program log: internal' } as never]);
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(JSON.stringify(answer.body)).not.toContain('internal');
+        expect(Object.keys((answer.body as Detail).payments![0]!).sort()).toEqual([
+            'amount',
+            'attempted_at',
+            'outcome',
+            'reason',
+            'signature',
+        ]);
+    });
+
+    it('does not serve the payments of a newer subscription on the same wallet and plan', async () => {
+        const { client, call, fake } = setup();
+        const old = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'superseded',
+            access: false,
+            payment_status: 'none',
+            created_at: at(90),
+            confirmed_at: at(90),
+        });
+        const current = await subscribed(client);
+        fake.setAttempts(current, [{ signature: 'sig_current' }]);
+
+        const answer = await call(ada, { path: `/subscriptions/${old.id}` });
+
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({
+            subscription: { id: old.id, status: 'superseded' },
+            payments: null,
+            listed_paid: null,
+            payments_error: { code: 'not_the_current_subscription' },
+        });
+        expect(JSON.stringify(answer.body)).not.toContain('sig_current');
+        // The current one still gets its own.
+        const mine = await call(ada, { path: `/subscriptions/${current}` });
+        expect((mine.body as Detail).payments).toHaveLength(1);
+    });
+
+    it('does not serve payments when Mesub answers about nothing on that plan', async () => {
+        const { call, fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'ended',
+            access: false,
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.body).toMatchObject({
+            payments: null,
+            payments_error: { code: 'not_the_current_subscription' },
+        });
+    });
+
+    it.each(['pending', 'expired', 'failed'] as const)(
+        'answers no payment for a %s checkout, without asking for any',
+        async (status) => {
+            const { call, fake } = setup();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                external_id: 'user_ada',
+                status,
+                access: false,
+                confirmed_at: null,
+            });
+
+            const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+            expect(answer).toMatchObject({
+                status: 200,
+                body: { payments: [], listed_paid: { count: 0, amount: '0' } },
+            });
+            expect(calls(fake)).toEqual([`GET /v1/subscriptions/${id}`]);
+        },
+    );
+
+    it('answers without payments for a plan that has no slug', async () => {
+        const { call, fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: null as never,
+            external_id: 'user_ada',
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer).toMatchObject({
+            status: 200,
+            body: { payments: null, payments_error: { code: 'plan_without_slug' } },
+        });
+        expect(calls(fake)).toEqual([`GET /v1/subscriptions/${id}`]);
+    });
+
+    it("hands on Mesub's refusal of the subscription, never the API key", async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.fail({ status: 429, code: 'rate_limited', retryAfter: 30 });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer).toMatchObject({
+            status: 429,
+            body: { error: { code: 'rate_limited' } },
+            headers: { 'Retry-After': '30' },
+        });
+        expect(JSON.stringify(answer)).not.toContain(fake.apiKey);
+    });
+
+    it.each([
+        [{ status: 429, code: 'rate_limited' }, 'rate_limited'],
+        [{ status: 500, code: 'internal_error' }, 'internal_error'],
+        [{ status: 404, code: 'plan_not_found' }, 'plan_not_found'],
+        // Not the subscription's own 404: it was read.
+        [{ status: 404, code: 'subscription_not_found' }, 'subscription_not_found'],
+    ])(
+        'still answers the subscription when its payments are refused: %j',
+        async (failure, code) => {
+            const { client, fake } = setup();
+            const id = await subscribed(client);
+            fake.setAttempts(id, [{}]);
+            // The subscription is read, then Mesub fails.
+            const mesub = fake.client();
+            vi.spyOn(mesub.subscriptions, 'retrieve').mockImplementation(async (...args) => {
+                const read = await client.subscriptions.retrieve(...args);
+                fake.fail(failure);
+                return read;
+            });
+
+            const answer = await handleWidget(
+                mesub,
+                { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+                ada,
+            );
+
+            expect(answer.status).toBe(200);
+            expect(answer.body).toMatchObject({
+                subscription: { id },
+                payments: null,
+                listed_paid: null,
+                payments_error: { code, message: expect.any(String) },
+            });
+            expect(JSON.stringify(answer)).not.toContain(fake.apiKey);
+        },
+    );
+
+    it('still answers the subscription when Mesub cannot be reached for its payments', async () => {
+        const { client, fake } = setup();
+        const id = await subscribed(client);
+        const read = await client.subscriptions.retrieve(id);
+        const mesub = fake.client();
+        vi.spyOn(mesub.subscriptions, 'retrieve').mockResolvedValue(read);
+        fake.fail('outage');
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({ payments: null, payments_error: {} });
+    });
+
+    it('throws what is not a refusal of Mesub: a bug, never an answer', async () => {
+        const { client, fake } = setup();
+        const id = await subscribed(client);
+        const mesub = fake.client();
+        vi.spyOn(mesub, 'access').mockRejectedValue(new RangeError('boom'));
+
+        await expect(
+            handleWidget(
+                mesub,
+                { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+                ada,
+            ),
+        ).rejects.toThrow(RangeError);
+    });
+
+    it('answers 502 or 503 when Mesub cannot be reached at all', async () => {
+        const { call, fake } = setup();
+        fake.fail('outage');
+
+        const answer = await call(ada, { path: '/subscriptions/sub_1' });
+
+        expect([502, 503]).toContain(answer.status);
     });
 });
 
@@ -530,6 +934,43 @@ describe('mesubRoutes for Express', () => {
             .expect(413);
     });
 
+    it('serves one subscription with its payments, and 404 for one not theirs', async () => {
+        let user = 'user_ada';
+        const { server, fake } = app(() => ({ external_id: user }), true);
+        const id = await subscribed(fake.client());
+        fake.setAttempts(id, [{ signature: 'sig_1' }]);
+
+        const response = await request(server).get(`/api/mesub/subscriptions/${id}`);
+
+        expect(response.status).toBe(200);
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(response.body).toMatchObject({
+            subscription: { id },
+            payments: [{ outcome: 'PAID', signature: 'sig_1' }],
+            listed_paid: { count: 1, amount: '9990000' },
+            payments_error: null,
+        });
+        expect(response.text).not.toContain('user_ada');
+
+        user = 'user_bob';
+        const theirs = await request(server).get(`/api/mesub/subscriptions/${id}`);
+        expect(theirs.status).toBe(404);
+        expect(theirs.body).toEqual({
+            error: { code: 'subscription_not_found', message: expect.any(String) },
+        });
+    });
+
+    it('answers 401 to one subscription with nobody signed in, 404 to an id that is none', async () => {
+        const signedOut = app(() => null);
+        await request(signedOut.server).get('/api/mesub/subscriptions/sub_1').expect(401);
+        expect(signedOut.fake.requests).toEqual([]);
+
+        const { server, fake } = app(() => ({ external_id: 'user_ada' }));
+        await request(server).get('/api/mesub/subscriptions/a%20b').expect(404);
+        await request(server).get('/api/mesub/subscriptions/..%2Faccess').expect(404);
+        expect(fake.requests).toEqual([]);
+    });
+
     it('forwards a broken customer to next(err)', async () => {
         const { server } = app(() => ({ external_id: 'a', email: 'b@c.co' }));
 
@@ -597,6 +1038,45 @@ describe('mesubRouteHandlers for Next', () => {
             body: '{nope',
         });
         expect((await POST(broken, context('subscriptions'))).status).toBe(400);
+    });
+
+    it('serves one subscription with its payments, and 404 for one not theirs', async () => {
+        let user: string | null = 'user_ada';
+        const { GET, fake } = handlers(() => (user ? { external_id: user } : null));
+        const id = await subscribed(fake.client());
+        fake.setAttempts(id, [{ signature: 'sig_1' }, { outcome: 'BLOCKED', signature: null }]);
+        const get = () => GET(new Request('https://shop.test/x'), context('subscriptions', id));
+
+        const response = await get();
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        const text = await response.text();
+        expect(JSON.parse(text)).toMatchObject({
+            subscription: { id },
+            payments: [{ signature: 'sig_1' }, { outcome: 'BLOCKED' }],
+            listed_paid: { count: 1, amount: '9990000' },
+        });
+        expect(text).not.toContain('user_ada');
+
+        user = 'user_bob';
+        expect((await get()).status).toBe(404);
+        user = null;
+        const before = fake.requests.length;
+        expect((await get()).status).toBe(401);
+        expect(fake.requests).toHaveLength(before);
+    });
+
+    it('refuses an id that is none through the catch-all, asking Mesub nothing', async () => {
+        const { GET, fake } = handlers(() => ({ external_id: 'user_ada' }));
+
+        const response = await GET(
+            new Request('https://shop.test/x'),
+            context('subscriptions', '../access'),
+        );
+
+        expect(response.status).toBe(404);
+        expect(fake.requests).toEqual([]);
     });
 
     it('cannot be walked out of its mount by a segment', async () => {

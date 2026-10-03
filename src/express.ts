@@ -27,7 +27,7 @@ import {
 } from './routes.js';
 
 export { MesubError } from './errors.js';
-export type { WidgetRoutesOptions } from './routes.js';
+export type { WidgetPayment, WidgetRoutesOptions, WidgetSubscriptionDetail } from './routes.js';
 export type { CustomerOption, Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 export type { Asked } from './customer.js';
 export type { Customer } from './answer.js';

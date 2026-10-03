@@ -119,6 +119,14 @@ The first version published to npm. Requires Node 22 or later.
   customer's subscriptions, and each step of subscribing, cancelling, resuming
   and closing. Who is asking comes from your own auth through `customer`; a
   subscription that is not theirs answers 404 (#86).
+- `GET /subscriptions/:id` answers one subscription of the customer with its
+  last pull attempts, newest first, as `payments`: date, outcome, amount,
+  reason and transaction signature, five at most. `listed_paid` counts and
+  sums the paid ones among them: not a total since the subscription began.
+  When they cannot be read, or are those of a newer subscription on the same
+  wallet and plan, `payments` is null and `payments_error` says why; the
+  subscription is still answered. In `@mesub/node/testing`,
+  `fake.setAttempts(id, [...])` gives a subscription its attempts (#89).
 
 ### Webhooks
 
