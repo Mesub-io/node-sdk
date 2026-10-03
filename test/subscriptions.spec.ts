@@ -9,6 +9,7 @@ import {
     MesubError,
     MesubSubmitError,
     type ServerSubscription,
+    type SubscriptionAttempt,
     type WalletTransaction,
 } from '../src/index.js';
 import { type FetchCall, coded, json, mockFetch, nest } from './helpers.js';
@@ -33,6 +34,8 @@ function subscription(overrides: Partial<ServerSubscription> = {}): ServerSubscr
         next_charge_at: '2026-11-01T12:00:00.000Z',
         next_retry_at: null,
         retry_deadline: null,
+        next_retry_number: null,
+        retries_allowed: null,
         access_until: '2026-11-01T12:00:00.000Z',
         created_at: '2026-10-02T11:58:00.000Z',
         confirmed_at: '2026-10-02T12:00:03.000Z',
@@ -1117,6 +1120,27 @@ describe('subscriptions.retrieve', () => {
         },
     );
 
+    it('reads missing retry numbers as null, from a back that predates them', async () => {
+        const { next_retry_number: _, retries_allowed: __, ...older } = subscription();
+        const { fetch } = mockFetch(json(200, older));
+
+        await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(subscription());
+    });
+
+    it('takes the retry that comes next on a late one', async () => {
+        const late = subscription({
+            status: 'unpaid',
+            payment_status: 'late',
+            next_charge_at: null,
+            next_retry_at: '2026-11-02T12:00:00.000Z',
+            next_retry_number: 2,
+            retries_allowed: 3,
+        });
+        const { fetch } = mockFetch(json(200, late));
+
+        await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(late);
+    });
+
     it('takes a superseded subscription and its retry deadline', async () => {
         const superseded = subscription({
             status: 'superseded',
@@ -1136,6 +1160,16 @@ describe('subscriptions.retrieve', () => {
             'a retry_deadline that is not a date',
             subscription({ retry_deadline: 'soon' }),
             'retry_deadline is not a date or null',
+        ],
+        [
+            'a retry number that is not one',
+            subscription({ next_retry_number: '2' as never }),
+            'next_retry_number is not a whole number or null',
+        ],
+        [
+            'a fraction of a retry',
+            subscription({ retries_allowed: 1.5 }),
+            'retries_allowed is not a whole number or null',
         ],
         ['access as a string', subscription({ access: 'yes' as never }), 'access is not a boolean'],
         ['paused as a string', subscription({ paused: 'no' as never }), 'paused is not a boolean'],
@@ -1294,6 +1328,224 @@ describe('subscriptions.list', () => {
 });
 
 // Right after a submit lands, a cached no must not keep the subscriber out (#33).
+describe('subscriptions.attempts', () => {
+    function attempt(overrides: Partial<SubscriptionAttempt> = {}): SubscriptionAttempt {
+        return {
+            id: 'att_1',
+            attempted_at: '2026-10-02T12:00:03.000Z',
+            outcome: 'PAID',
+            reason: null,
+            amount: '9990000',
+            signature: SIGNATURE,
+            retry: false,
+            retry_number: null,
+            retries_allowed: null,
+            period_start: '2026-10-02T12:00:00.000Z',
+            ...overrides,
+        };
+    }
+
+    const page = (data: unknown[] = [attempt()], has_more = false) => ({
+        data,
+        has_more,
+        paid: { count: 3, amount: '29970000' },
+    });
+
+    it('asks for that subscription, with the limit and cursor given', async () => {
+        const { fetch, calls } = mockFetch(json(200, page()));
+
+        const answer = await mesub(fetch).subscriptions.attempts('sub_1', {
+            limit: 50,
+            starting_after: 'att_0',
+        });
+
+        expect(answer).toEqual(page());
+        expect(calls[0]!.init.method ?? 'GET').toBe('GET');
+        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/sub_1/attempts');
+        expect(calls[0]!.url.search).toBe('?limit=50&starting_after=att_0');
+    });
+
+    it('leaves out what was not given, and escapes the id', async () => {
+        const { fetch, calls } = mockFetch(json(200, page([])));
+
+        await mesub(fetch).subscriptions.attempts('a/b');
+
+        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/a%2Fb/attempts');
+        expect(calls[0]!.url.search).toBe('');
+    });
+
+    it('refuses an empty id before asking', async () => {
+        const { fetch } = mockFetch();
+
+        await expect(mesub(fetch).subscriptions.attempts('')).rejects.toMatchObject({
+            code: 'invalid_request',
+        });
+        expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('takes a retry with its number, and the second retry of three', async () => {
+        const retried = attempt({ retry: true, retry_number: 2, retries_allowed: 3 });
+        const { fetch } = mockFetch(json(200, page([retried])));
+
+        const { data } = await mesub(fetch).subscriptions.attempts('sub_1');
+
+        expect(data).toEqual([retried]);
+    });
+
+    it('reads missing retry numbers as null, from a back that does not serve them', async () => {
+        const { retry_number: _, retries_allowed: __, ...older } = attempt({ retry: true });
+        const { fetch } = mockFetch(json(200, page([older])));
+
+        const { data } = await mesub(fetch).subscriptions.attempts('sub_1');
+
+        expect(data).toEqual([attempt({ retry: true })]);
+    });
+
+    it('hands back an outcome and a field newer than this release', async () => {
+        const newer = { ...attempt({ outcome: 'REFUNDED' as never }), refunded_at: 'later' };
+        const body = { ...page([newer]), total_refunded: '1' };
+        const { fetch } = mockFetch(json(200, body));
+
+        await expect(mesub(fetch).subscriptions.attempts('sub_1')).resolves.toEqual(body);
+    });
+
+    it('takes an attempt with no period, no signature and a reason', async () => {
+        const blocked = attempt({
+            outcome: 'BLOCKED',
+            reason: 'fee-payer-empty',
+            signature: null,
+            period_start: null,
+        });
+        const { fetch } = mockFetch(json(200, page([blocked])));
+
+        await expect(mesub(fetch).subscriptions.attempts('sub_1')).resolves.toEqual(
+            page([blocked]),
+        );
+    });
+
+    it('keeps a total past what a number holds as the string it came as', async () => {
+        const body = {
+            data: [],
+            has_more: false,
+            paid: { count: 2, amount: '36893488147419103230' },
+        };
+        const { fetch } = mockFetch(json(200, body));
+
+        const { paid } = await mesub(fetch).subscriptions.attempts('sub_1');
+
+        expect(paid).toEqual({ count: 2, amount: '36893488147419103230' });
+    });
+
+    it.each([
+        ['no paid', { data: [], has_more: false }, 'paid is missing'],
+        ['no has_more', { data: [], paid: { count: 0, amount: '0' } }, 'has_more is missing'],
+        ['data that is no list', { ...page(), data: {} }, 'data is not a list'],
+        [
+            'a total as a number',
+            { ...page(), paid: { count: 1, amount: 9990000 } },
+            'paid.amount is not a whole number as a string',
+        ],
+        [
+            'a total with a fraction',
+            { ...page(), paid: { count: 1, amount: '9.99' } },
+            'paid.amount is not a whole number as a string',
+        ],
+        [
+            'a count that is not one',
+            { ...page(), paid: { count: '1', amount: '1' } },
+            'paid.count is not a whole number',
+        ],
+        ['an attempt with no id', page([{ ...attempt(), id: undefined }]), 'data[0].id is missing'],
+        [
+            'an attempt with no retry',
+            page([{ ...attempt(), retry: undefined }]),
+            'data[0].retry is missing',
+        ],
+        [
+            'a retry number that is not one',
+            page([attempt({ retry_number: 'two' as never })]),
+            'data[0].retry_number is not a whole number or null',
+        ],
+        [
+            'a date that is not one',
+            page([attempt({ attempted_at: 'yesterday' })]),
+            'data[0].attempted_at is not a date',
+        ],
+        [
+            'a period that is not a date',
+            page([attempt(), attempt({ period_start: 'soon' })]),
+            'data[1].period_start is not a date or null',
+        ],
+        ['a list', [attempt()], 'the body is not an object'],
+    ])('throws unexpected on an answer with %s', async (_label, body, problem) => {
+        const { fetch } = mockFetch(json(200, body));
+
+        await expect(mesub(fetch).subscriptions.attempts('sub_1')).rejects.toMatchObject({
+            status: 200,
+            code: 'unexpected',
+            message: expect.stringContaining(problem),
+        });
+    });
+
+    it('tells a Mesub without the route from a subscription it does not hold', async () => {
+        const { fetch } = mockFetch(
+            coded(404, 'not_found', 'Cannot GET /v1/subscriptions/sub_1/attempts'),
+            coded(404, 'subscription_not_found', 'No subscription of yours under that id.'),
+        );
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.attempts('sub_1')).rejects.toMatchObject({
+            status: 404,
+            code: 'not_found',
+            apiCode: null,
+            message: 'This Mesub does not serve GET /v1/subscriptions/:id/attempts yet.',
+        });
+        await expect(client.subscriptions.attempts('sub_1')).rejects.toMatchObject({
+            status: 404,
+            code: 'not_found',
+            apiCode: 'subscription_not_found',
+        });
+    });
+
+    it("leaves a 404 that is not Mesub's as the wrong baseUrl it is", async () => {
+        const { fetch } = mockFetch(new Response('<html>Not Found</html>', { status: 404 }));
+
+        await expect(mesub(fetch).subscriptions.attempts('sub_1')).rejects.toMatchObject({
+            status: 404,
+            code: 'unexpected',
+            message: expect.stringContaining('baseUrl'),
+        });
+    });
+
+    it('walks every page with allAttempts, from the last id of each', async () => {
+        const { fetch, calls } = mockFetch(
+            json(200, page([attempt({ id: 'a3' }), attempt({ id: 'a2' })], true)),
+            json(200, page([attempt({ id: 'a1' })])),
+        );
+
+        const ids: string[] = [];
+        for await (const each of mesub(fetch).subscriptions.allAttempts('sub_1', { limit: 2 })) {
+            ids.push(each.id);
+        }
+
+        expect(ids).toEqual(['a3', 'a2', 'a1']);
+        expect(calls.map((call) => call.url.search)).toEqual([
+            '?limit=2',
+            '?limit=2&starting_after=a2',
+        ]);
+    });
+
+    it('stops walking on a page that says more follows and holds nothing', async () => {
+        const { fetch } = mockFetch(json(200, page([], true)));
+
+        const ids: string[] = [];
+        for await (const each of mesub(fetch).subscriptions.allAttempts('sub_1')) ids.push(each.id);
+
+        expect(ids).toEqual([]);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
 describe('the access cache once a subscription lands', () => {
     const signed = { transaction: 'AQAAAA==', terms_signature: SIGNATURE };
 

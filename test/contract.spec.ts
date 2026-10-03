@@ -59,27 +59,32 @@ const FIELDS: Record<
 };
 
 /** Every field of ServerSubscription and its type. Kept in step with src/subscriptions.ts. */
-const SUBSCRIPTION_FIELDS: Record<keyof ServerSubscription, 'string' | 'boolean' | 'string|null'> =
-    {
-        id: 'string',
-        status: 'string',
-        paused: 'boolean',
-        end_reason: 'string|null',
-        access: 'boolean',
-        payment_status: 'string',
-        plan: 'string|null',
-        wallet: 'string',
-        email: 'string|null',
-        external_id: 'string|null',
-        current_period_start: 'string|null',
-        current_period_end: 'string|null',
-        next_charge_at: 'string|null',
-        next_retry_at: 'string|null',
-        retry_deadline: 'string|null',
-        access_until: 'string|null',
-        created_at: 'string',
-        confirmed_at: 'string|null',
-    };
+const SUBSCRIPTION_FIELDS: Record<
+    keyof ServerSubscription,
+    'string' | 'boolean' | 'string|null' | 'number|null'
+> = {
+    id: 'string',
+    status: 'string',
+    paused: 'boolean',
+    end_reason: 'string|null',
+    access: 'boolean',
+    payment_status: 'string',
+    plan: 'string|null',
+    wallet: 'string',
+    email: 'string|null',
+    external_id: 'string|null',
+    current_period_start: 'string|null',
+    current_period_end: 'string|null',
+    next_charge_at: 'string|null',
+    next_retry_at: 'string|null',
+    retry_deadline: 'string|null',
+    // Read as null from a back that predates them (Mesub-io/backend#289).
+    next_retry_number: 'number|null',
+    retries_allowed: 'number|null',
+    access_until: 'string|null',
+    created_at: 'string',
+    confirmed_at: 'string|null',
+};
 
 /**
  * A plan as `GET /v1/plans` serves it (Mesub-io/backend#184). The SDK has no
@@ -381,6 +386,52 @@ describe.skipIf(!env.url)('contract with the back', () => {
 
             expectShape(retrieved, SUBSCRIPTION_FIELDS);
             expect(retrieved).toEqual(listed);
+        });
+
+        // A back without the route (before Mesub-io/backend#289) answers a 404 with no code of a subscription: skipped.
+        it('serves a subscription its own attempts and paid total', async (context) => {
+            const mesubClient = mesub();
+            const [listed] = (await mesubClient.subscriptions.list({ wallet: env.activeWallet }))
+                .data;
+            const page = await mesubClient.subscriptions
+                .attempts(listed!.id, { limit: 1 })
+                .catch((caught: unknown) => caught as MesubError);
+
+            if (page instanceof MesubError && page.status === 404 && page.apiCode === null) {
+                return context.skip();
+            }
+            if (page instanceof Error) throw page;
+
+            expect(Object.keys(page).sort()).toEqual(['data', 'has_more', 'paid']);
+            expect(Object.keys(page.paid).sort()).toEqual(['amount', 'count']);
+            // The fixture's active subscription has one paid pull.
+            expect(page.paid.count).toBe(1);
+            expect(page.paid.amount).toMatch(/^\d+$/);
+            expect(page.data).toHaveLength(1);
+            expectShape(page.data[0], {
+                id: 'string',
+                attempted_at: 'string',
+                outcome: 'string',
+                reason: 'string|null',
+                amount: 'string',
+                signature: 'string|null',
+                retry: 'boolean',
+                retry_number: 'number|null',
+                retries_allowed: 'number|null',
+                period_start: 'string|null',
+            });
+            expect(OUTCOMES).toContain(page.data[0]!.outcome);
+            expect(page.data[0]!.amount).toBe(page.paid.amount);
+        });
+
+        it('answers subscription_not_found for the attempts of an id it never issued', async (context) => {
+            const error = await mesub()
+                .subscriptions.attempts('never-issued')
+                .catch((caught: unknown) => caught);
+
+            expect(error).toBeInstanceOf(MesubError);
+            if ((error as MesubError).apiCode === null) return context.skip();
+            expect(error).toMatchObject({ apiCode: 'subscription_not_found', status: 404 });
         });
 
         it('answers not_found, subscription_not_found, for an id it never issued', async () => {

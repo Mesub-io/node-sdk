@@ -7,6 +7,8 @@ import type {
     ServerSubscriptionList,
     SubmitResult,
     SubscribeTransaction,
+    SubscriptionAttempt,
+    SubscriptionAttemptList,
     WalletTransaction,
 } from './subscriptions.js';
 import type {
@@ -53,6 +55,15 @@ const RETRY_DEADLINE: Field = { ...DATE_OR_NULL, absent: null };
 /** `paused` and `end_reason`, served since Mesub-io/backend#236: false and null before it. */
 const PAUSED: Field = { ...BOOLEAN, absent: false };
 const END_REASON: Field = { ...STRING_OR_NULL, absent: null };
+/**
+ * `next_retry_number`, `retry_number` and `retries_allowed`, served since
+ * Mesub-io/backend#289: null when a back predates them.
+ */
+const RETRY_COUNT: Field = {
+    check: (value) => value === null || COUNT.check(value),
+    expected: 'a whole number or null',
+    absent: null,
+};
 /**
  * What the cache turns into its dates: NaN or Infinity would never go stale.
  * A negative one is read as 0 there, so it is let through.
@@ -169,6 +180,8 @@ const SUBSCRIPTION = {
     next_charge_at: DATE_OR_NULL,
     next_retry_at: DATE_OR_NULL,
     retry_deadline: RETRY_DEADLINE,
+    next_retry_number: RETRY_COUNT,
+    retries_allowed: RETRY_COUNT,
     access_until: DATE_OR_NULL,
     created_at: DATE,
     confirmed_at: DATE_OR_NULL,
@@ -178,6 +191,32 @@ const SUBSCRIPTION_LIST = {
     data: LIST_OF,
     has_more: BOOLEAN,
 } satisfies Record<keyof ServerSubscriptionList, Field>;
+
+/** An outcome is only checked to be a string: one the back adds later is handed on. */
+const SUBSCRIPTION_ATTEMPT = {
+    id: STRING,
+    attempted_at: DATE,
+    outcome: STRING,
+    reason: STRING_OR_NULL,
+    amount: STRING,
+    signature: STRING_OR_NULL,
+    retry: BOOLEAN,
+    retry_number: RETRY_COUNT,
+    retries_allowed: RETRY_COUNT,
+    period_start: DATE_OR_NULL,
+} satisfies Record<keyof SubscriptionAttempt, Field>;
+
+const SUBSCRIPTION_ATTEMPT_LIST = {
+    data: LIST_OF,
+    has_more: BOOLEAN,
+    paid: OBJECT,
+} satisfies Record<keyof SubscriptionAttemptList, Field>;
+
+/** A sum in base units: digits only, so it can be shown or added without a float. */
+const BASE_UNITS: Field = {
+    check: (value) => typeof value === 'string' && /^\d+$/.test(value),
+    expected: 'a whole number as a string',
+};
 
 /** What the front needs to have the wallet sign; the costs are only shown. */
 const SUBSCRIBE_TRANSACTION = {
@@ -245,6 +284,22 @@ export function serverSubscriptionListFrom(body: unknown): ServerSubscriptionLis
     if (problem !== null) throw unreadable(problem, body, 'GET /v1/subscriptions');
 
     return body as ServerSubscriptionList;
+}
+
+/** One page of `attempts`: each attempt checked, and the paid total. */
+export function subscriptionAttemptListFrom(body: unknown): SubscriptionAttemptList {
+    const problem =
+        problemWith(body, SUBSCRIPTION_ATTEMPT_LIST) ??
+        firstProblem((body as { data: unknown[] }).data, 'data', SUBSCRIPTION_ATTEMPT) ??
+        problemWith(
+            (body as SubscriptionAttemptList).paid,
+            { count: COUNT, amount: BASE_UNITS },
+            'paid',
+        );
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/subscriptions/:id/attempts');
+
+    return body as SubscriptionAttemptList;
 }
 
 /** What `create` answered: what the wallet signs, and the subscription's id. */

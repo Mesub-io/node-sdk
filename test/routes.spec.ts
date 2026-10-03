@@ -21,8 +21,8 @@ const SIGNATURE =
 const ada = { kind: 'external_id', value: 'user_ada' } as const;
 const bob = { kind: 'external_id', value: 'user_bob' } as const;
 
-function setup() {
-    const fake = new FakeMesub({ plans: ['pro', 'team'] });
+function setup(options: { attemptsRoute?: boolean } = {}) {
+    const fake = new FakeMesub({ plans: ['pro', 'team'], ...options });
     const client = fake.client();
     const call = (
         asked: Parameters<typeof handleWidget>[2],
@@ -432,7 +432,7 @@ describe('the widget routes: one subscription in full', () => {
     interface Detail {
         subscription: Record<string, unknown>;
         payments: Array<Record<string, unknown>> | null;
-        listed_paid: { count: number; amount: string | null } | null;
+        paid: { count: number; amount: string } | null;
         payments_error: { code: string; message: string } | null;
         upcoming: Array<Record<string, unknown>>;
     }
@@ -441,8 +441,11 @@ describe('the widget routes: one subscription in full', () => {
     const LATER = '2026-11-03T09:00:00.000Z';
 
     /** A subscription of Ada's in that state, and what its detail answers. */
-    async function detailOf(fields: Record<string, unknown>) {
-        const { call, fake } = setup();
+    async function detailOf(
+        fields: Record<string, unknown>,
+        options?: Parameters<typeof setup>[0],
+    ) {
+        const { call, fake } = setup(options);
         const { id } = fake.addSubscription({
             wallet: WALLET,
             plan: 'pro',
@@ -460,7 +463,14 @@ describe('the widget routes: one subscription in full', () => {
         const { body } = await detailOf({ status: 'active', next_charge_at: SOON });
 
         expect(body.upcoming).toEqual([
-            { kind: 'charge', due_at: SOON, amount: '9990000', amount_display: '9.99' },
+            {
+                kind: 'charge',
+                due_at: SOON,
+                amount: '9990000',
+                amount_display: '9.99',
+                retry_number: null,
+                retries_allowed: null,
+            },
         ]);
     });
 
@@ -469,12 +479,46 @@ describe('the widget routes: one subscription in full', () => {
             status: 'unpaid',
             payment_status: 'late',
             next_retry_at: SOON,
+            next_retry_number: 2,
+            retries_allowed: 3,
             // Not a pull: never read for a late one.
             next_charge_at: LATER,
         });
 
         expect(body.upcoming).toEqual([
-            { kind: 'retry', due_at: SOON, amount: '9990000', amount_display: '9.99' },
+            {
+                kind: 'retry',
+                due_at: SOON,
+                amount: '9990000',
+                amount_display: '9.99',
+                retry_number: 2,
+                retries_allowed: 3,
+            },
+        ]);
+    });
+
+    it('announces a retry without its number when Mesub does not say which', async () => {
+        const { body } = await detailOf({
+            status: 'unpaid',
+            payment_status: 'late',
+            next_retry_at: SOON,
+        });
+
+        expect(body.upcoming).toMatchObject([
+            { kind: 'retry', due_at: SOON, retry_number: null, retries_allowed: null },
+        ]);
+    });
+
+    it('never numbers a charge, whatever the subscription carries', async () => {
+        const { body } = await detailOf({
+            status: 'active',
+            next_charge_at: SOON,
+            next_retry_number: 1,
+            retries_allowed: 3,
+        });
+
+        expect(body.upcoming).toMatchObject([
+            { kind: 'charge', retry_number: null, retries_allowed: null },
         ]);
     });
 
@@ -490,7 +534,10 @@ describe('the widget routes: one subscription in full', () => {
         expect(body.upcoming).toEqual([]);
         expect(body.subscription).toMatchObject({ retry_deadline: SOON, next_retry_at: null });
         // No entry, so no price to read.
-        expect(calls(fake).sort()).toEqual(['GET /v1/access', `GET /v1/subscriptions/${id}`]);
+        expect(calls(fake).sort()).toEqual([
+            `GET /v1/subscriptions/${id}`,
+            `GET /v1/subscriptions/${id}/attempts`,
+        ]);
     });
 
     it('announces a retry on Free while one is due before the deadline', async () => {
@@ -541,7 +588,14 @@ describe('the widget routes: one subscription in full', () => {
         const { body } = await detailOf({ next_charge_at: SOON, ...fields });
 
         expect(body.upcoming).toEqual([
-            { kind: 'charge', due_at: SOON, amount: null, amount_display: null },
+            {
+                kind: 'charge',
+                due_at: SOON,
+                amount: null,
+                amount_display: null,
+                retry_number: null,
+                retries_allowed: null,
+            },
         ]);
     });
 
@@ -599,17 +653,27 @@ describe('the widget routes: one subscription in full', () => {
         expect((answer.body as Detail).upcoming).toMatchObject([{ amount: '9990000' }]);
     });
 
-    it('answers the subscription and its payments, newest first', async () => {
+    it('answers the subscription and its own payments, newest first, with what it paid', async () => {
         const { client, call, fake } = setup();
         const id = await subscribed(client);
         fake.setAttempts(id, [
-            { attempted_at: at(30), signature: 'sig_first' },
-            { attempted_at: at(0), signature: 'sig_last' },
+            { attempted_at: at(30), signature: 'sig_first', period_start: at(30) },
+            {
+                attempted_at: at(0),
+                signature: 'sig_last',
+                retry: true,
+                retry_number: 2,
+                retries_allowed: 3,
+                period_start: at(0),
+            },
             {
                 attempted_at: at(1),
                 outcome: 'REJECTED',
                 reason: 'insufficient-balance',
                 signature: 'sig_rejected',
+                retry: true,
+                retry_number: 1,
+                retries_allowed: 3,
             },
             { attempted_at: at(2), outcome: 'SKIPPED', reason: 'wrong-delegate', signature: null },
         ]);
@@ -627,6 +691,10 @@ describe('the widget routes: one subscription in full', () => {
                 amount: '9990000',
                 reason: null,
                 signature: 'sig_last',
+                retry: true,
+                retry_number: 2,
+                retries_allowed: 3,
+                period_start: at(0),
             },
             {
                 attempted_at: at(1),
@@ -634,6 +702,10 @@ describe('the widget routes: one subscription in full', () => {
                 amount: '9990000',
                 reason: 'insufficient-balance',
                 signature: 'sig_rejected',
+                retry: true,
+                retry_number: 1,
+                retries_allowed: 3,
+                period_start: null,
             },
             {
                 attempted_at: at(2),
@@ -641,6 +713,10 @@ describe('the widget routes: one subscription in full', () => {
                 amount: '9990000',
                 reason: 'wrong-delegate',
                 signature: null,
+                retry: false,
+                retry_number: null,
+                retries_allowed: null,
+                period_start: null,
             },
             {
                 attempted_at: at(30),
@@ -648,21 +724,21 @@ describe('the widget routes: one subscription in full', () => {
                 amount: '9990000',
                 reason: null,
                 signature: 'sig_first',
+                retry: false,
+                retry_number: null,
+                retries_allowed: null,
+                period_start: at(30),
             },
         ]);
-        expect(body.listed_paid).toEqual({ count: 2, amount: '19980000' });
+        expect(body.paid).toEqual({ count: 2, amount: '19980000' });
         expect(body.payments_error).toBeNull();
-        // Its attempts are read by its own wallet and plan, whoever asks.
+        // Read by its own id: /v1/access is not asked.
         expect(calls(fake, before).sort()).toEqual([
-            'GET /v1/access',
             'GET /v1/plans/pro',
             `GET /v1/subscriptions/${id}`,
+            `GET /v1/subscriptions/${id}/attempts`,
         ]);
-        expect(fake.requests.find((each) => each.path === '/v1/access')?.query).toEqual({
-            wallet: WALLET,
-            plan: 'pro',
-            attempts: 'true',
-        });
+        expect(fake.requests.at(-1)?.query ?? {}).not.toHaveProperty('wallet');
     });
 
     it('never carries the email, the external id nor the API key', async () => {
@@ -688,7 +764,7 @@ describe('the widget routes: one subscription in full', () => {
 
         expect(answer.body).toMatchObject({
             payments: [],
-            listed_paid: { count: 0, amount: '0' },
+            paid: { count: 0, amount: '0' },
             payments_error: null,
         });
     });
@@ -752,7 +828,7 @@ describe('the widget routes: one subscription in full', () => {
         },
     );
 
-    it('hands on an outcome newer than this release, and counts only the paid', async () => {
+    it('hands on an outcome newer than this release, and the total as Mesub counted it', async () => {
         const { client, call, fake } = setup();
         const id = await subscribed(client);
         fake.setAttempts(id, [
@@ -770,26 +846,43 @@ describe('the widget routes: one subscription in full', () => {
             'BLOCKED',
             'PAID',
         ]);
-        expect(body.listed_paid).toEqual({ count: 1, amount: '5000000' });
+        expect(body.paid).toEqual({ count: 1, amount: '5000000' });
     });
 
-    it('sums amounts past what a number holds, and none it cannot read', async () => {
+    it('serves the first page and the total of all, past the page and past a float', async () => {
         const { client, call, fake } = setup();
         const id = await subscribed(client);
         fake.setAttempts(id, [
             { attempted_at: at(0), amount: '18446744073709551615' },
-            { attempted_at: at(1), amount: '1' },
+            ...Array.from({ length: 24 }, (_, n) => ({ attempted_at: at(n + 1), amount: '1' })),
         ]);
 
-        const exact = await call(ada, { path: `/subscriptions/${id}` });
-        expect((exact.body as Detail).listed_paid).toEqual({
-            count: 2,
-            amount: '18446744073709551616',
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        const body = answer.body as Detail;
+        expect(body.payments).toHaveLength(20);
+        // Mesub's own count, not a sum of the twenty shown.
+        expect(body.paid).toEqual({ count: 25, amount: '18446744073709551639' });
+    });
+
+    it('hands on the total exactly as Mesub answered it', async () => {
+        const { client, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [{}]);
+        const mesub = fake.client();
+        vi.spyOn(mesub.subscriptions, 'attempts').mockResolvedValue({
+            data: [],
+            has_more: true,
+            paid: { count: 7, amount: '123' },
         });
 
-        fake.setAttempts(id, [{ amount: '9.99' }, { amount: '1' }]);
-        const unread = await call(ada, { path: `/subscriptions/${id}` });
-        expect((unread.body as Detail).listed_paid).toEqual({ count: 2, amount: null });
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.body).toMatchObject({ payments: [], paid: { count: 7, amount: '123' } });
     });
 
     it('hands the browser only the fields it knows of an attempt', async () => {
@@ -804,12 +897,16 @@ describe('the widget routes: one subscription in full', () => {
             'amount',
             'attempted_at',
             'outcome',
+            'period_start',
             'reason',
+            'retries_allowed',
+            'retry',
+            'retry_number',
             'signature',
         ]);
     });
 
-    it('does not serve the payments of a newer subscription on the same wallet and plan', async () => {
+    it('serves a superseded subscription its own payments, never those of the one that replaced it', async () => {
         const { client, call, fake } = setup();
         const old = fake.addSubscription({
             wallet: WALLET,
@@ -821,6 +918,10 @@ describe('the widget routes: one subscription in full', () => {
             created_at: at(90),
             confirmed_at: at(90),
         });
+        fake.setAttempts(old.id, [
+            { attempted_at: at(90), signature: 'sig_old_1' },
+            { attempted_at: at(60), signature: 'sig_old_2' },
+        ]);
         const current = await subscribed(client);
         fake.setAttempts(current, [{ signature: 'sig_current' }]);
 
@@ -829,17 +930,18 @@ describe('the widget routes: one subscription in full', () => {
         expect(answer.status).toBe(200);
         expect(answer.body).toMatchObject({
             subscription: { id: old.id, status: 'superseded' },
-            payments: null,
-            listed_paid: null,
-            payments_error: { code: 'not_the_current_subscription' },
+            payments: [{ signature: 'sig_old_2' }, { signature: 'sig_old_1' }],
+            paid: { count: 2, amount: '19980000' },
+            payments_error: null,
         });
         expect(JSON.stringify(answer.body)).not.toContain('sig_current');
-        // The current one still gets its own.
-        const mine = await call(ada, { path: `/subscriptions/${current}` });
-        expect((mine.body as Detail).payments).toHaveLength(1);
+        // The current one gets its own, and its own total.
+        const mine = (await call(ada, { path: `/subscriptions/${current}` })).body as Detail;
+        expect(mine.payments).toMatchObject([{ signature: 'sig_current' }]);
+        expect(mine.paid).toEqual({ count: 1, amount: '9990000' });
     });
 
-    it('does not serve payments when Mesub answers about nothing on that plan', async () => {
+    it('serves an ended subscription what it paid, with nothing in force on that plan', async () => {
         const { call, fake } = setup();
         const { id } = fake.addSubscription({
             wallet: WALLET,
@@ -848,17 +950,20 @@ describe('the widget routes: one subscription in full', () => {
             status: 'ended',
             access: false,
         });
+        fake.setAttempts(id, [{ attempted_at: at(40) }]);
+        fake.deny(WALLET, 'pro');
 
         const answer = await call(ada, { path: `/subscriptions/${id}` });
 
         expect(answer.body).toMatchObject({
-            payments: null,
-            payments_error: { code: 'not_the_current_subscription' },
+            payments: [{ attempted_at: at(40) }],
+            paid: { count: 1, amount: '9990000' },
+            payments_error: null,
         });
     });
 
     it.each(['pending', 'expired', 'failed'] as const)(
-        'answers no payment for a %s checkout, without asking for any',
+        'answers a %s checkout what Mesub holds for it: nothing, or a payment',
         async (status) => {
             const { call, fake } = setup();
             const { id } = fake.addSubscription({
@@ -870,17 +975,25 @@ describe('the widget routes: one subscription in full', () => {
                 confirmed_at: null,
             });
 
-            const answer = await call(ada, { path: `/subscriptions/${id}` });
+            const empty = await call(ada, { path: `/subscriptions/${id}` });
 
-            expect(answer).toMatchObject({
+            expect(empty).toMatchObject({
                 status: 200,
-                body: { payments: [], listed_paid: { count: 0, amount: '0' } },
+                body: { payments: [], paid: { count: 0, amount: '0' }, payments_error: null },
             });
-            expect(calls(fake)).toEqual([`GET /v1/subscriptions/${id}`]);
+            expect(calls(fake)).toEqual([
+                `GET /v1/subscriptions/${id}`,
+                `GET /v1/subscriptions/${id}/attempts`,
+            ]);
+
+            // A comeback left failed after it paid keeps that payment.
+            fake.setAttempts(id, [{}]);
+            const paid = await call(ada, { path: `/subscriptions/${id}` });
+            expect((paid.body as Detail).paid).toEqual({ count: 1, amount: '9990000' });
         },
     );
 
-    it('answers without payments for a plan that has no slug', async () => {
+    it('reads the payments of a plan that has no slug, by the subscription id', async () => {
         const { call, fake } = setup();
         const { id } = fake.addSubscription({
             wallet: WALLET,
@@ -892,9 +1005,12 @@ describe('the widget routes: one subscription in full', () => {
 
         expect(answer).toMatchObject({
             status: 200,
-            body: { payments: null, payments_error: { code: 'plan_without_slug' } },
+            body: { payments: [], paid: { count: 0, amount: '0' }, payments_error: null },
         });
-        expect(calls(fake)).toEqual([`GET /v1/subscriptions/${id}`]);
+        expect(calls(fake)).toEqual([
+            `GET /v1/subscriptions/${id}`,
+            `GET /v1/subscriptions/${id}/attempts`,
+        ]);
     });
 
     it("hands on Mesub's refusal of the subscription, never the API key", async () => {
@@ -942,12 +1058,14 @@ describe('the widget routes: one subscription in full', () => {
             expect(answer.body).toMatchObject({
                 subscription: { id },
                 payments: null,
-                listed_paid: null,
+                paid: null,
                 payments_error: { code, message: expect.any(String) },
                 // The date is the subscription's own; the price could not be read.
                 upcoming: [{ kind: 'charge', amount: null, amount_display: null }],
             });
             expect(JSON.stringify(answer)).not.toContain(fake.apiKey);
+            // A refusal is no missing route: the older way is not tried.
+            expect(calls(fake)).not.toContain('GET /v1/access');
         },
     );
 
@@ -966,14 +1084,14 @@ describe('the widget routes: one subscription in full', () => {
         );
 
         expect(answer.status).toBe(200);
-        expect(answer.body).toMatchObject({ payments: null, payments_error: {} });
+        expect(answer.body).toMatchObject({ payments: null, paid: null, payments_error: {} });
     });
 
     it('throws what is not a refusal of Mesub: a bug, never an answer', async () => {
         const { client, fake } = setup();
         const id = await subscribed(client);
         const mesub = fake.client();
-        vi.spyOn(mesub, 'access').mockRejectedValue(new RangeError('boom'));
+        vi.spyOn(mesub.subscriptions, 'attempts').mockRejectedValue(new RangeError('boom'));
 
         await expect(
             handleWidget(
@@ -991,6 +1109,219 @@ describe('the widget routes: one subscription in full', () => {
         const answer = await call(ada, { path: '/subscriptions/sub_1' });
 
         expect([502, 503]).toContain(answer.status);
+    });
+});
+
+/**
+ * A merchant who upgrades the SDK before Mesub serves
+ * `GET /v1/subscriptions/:id/attempts`: the route answers 404 `not_found`,
+ * and payments are read as before, through `/v1/access`, without a total.
+ */
+describe('the widget routes: one subscription, from a Mesub without the attempts route', () => {
+    const DAY = 24 * 3600 * 1000;
+    const at = (daysAgo: number) => new Date(Date.UTC(2026, 9, 1) - daysAgo * DAY).toISOString();
+    const calls = (fake: FakeMesub, from = 0) =>
+        fake.requests.slice(from).map((each) => `${each.method} ${each.path}`);
+    const older = () => setup({ attemptsRoute: false });
+
+    it('still answers its last payments, newest first, with no total and no retry told', async () => {
+        const { client, call, fake } = older();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [
+            { attempted_at: at(30), signature: 'sig_first' },
+            { attempted_at: at(0), signature: 'sig_last', retry: true, retry_number: 1 },
+            { attempted_at: at(1), outcome: 'SKIPPED', reason: 'wrong-delegate', signature: null },
+        ]);
+        const before = fake.requests.length;
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({
+            subscription: { id },
+            payments: [
+                {
+                    attempted_at: at(0),
+                    outcome: 'PAID',
+                    amount: '9990000',
+                    reason: null,
+                    signature: 'sig_last',
+                    retry: null,
+                    retry_number: null,
+                    retries_allowed: null,
+                    period_start: null,
+                },
+                { attempted_at: at(1), outcome: 'SKIPPED', retry: null },
+                { attempted_at: at(30), signature: 'sig_first', retry: null },
+            ],
+            // Five attempts at most are no total: none is made up.
+            paid: null,
+            payments_error: null,
+        });
+        expect(calls(fake, before).sort()).toEqual([
+            'GET /v1/access',
+            'GET /v1/plans/pro',
+            `GET /v1/subscriptions/${id}`,
+            `GET /v1/subscriptions/${id}/attempts`,
+        ]);
+        expect(fake.requests.find((each) => each.path === '/v1/access')?.query).toEqual({
+            wallet: WALLET,
+            plan: 'pro',
+            attempts: 'true',
+        });
+    });
+
+    it('answers an empty list for one nothing was pulled for yet', async () => {
+        const { client, call } = older();
+        const id = await subscribed(client);
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.body).toMatchObject({ payments: [], paid: null, payments_error: null });
+    });
+
+    it('does not serve the payments of a newer subscription on the same wallet and plan', async () => {
+        const { client, call, fake } = older();
+        const old = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'superseded',
+            access: false,
+            payment_status: 'none',
+            created_at: at(90),
+            confirmed_at: at(90),
+        });
+        const current = await subscribed(client);
+        fake.setAttempts(current, [{ signature: 'sig_current' }]);
+
+        const answer = await call(ada, { path: `/subscriptions/${old.id}` });
+
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({
+            subscription: { id: old.id, status: 'superseded' },
+            payments: null,
+            paid: null,
+            payments_error: { code: 'not_the_current_subscription' },
+        });
+        expect(JSON.stringify(answer.body)).not.toContain('sig_current');
+        const mine = await call(ada, { path: `/subscriptions/${current}` });
+        expect((mine.body as { payments: unknown[] }).payments).toHaveLength(1);
+    });
+
+    it('does not serve payments when Mesub answers about nothing on that plan', async () => {
+        const { call, fake } = older();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'ended',
+            access: false,
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.body).toMatchObject({
+            payments: null,
+            paid: null,
+            payments_error: { code: 'not_the_current_subscription' },
+        });
+    });
+
+    it.each(['pending', 'expired', 'failed'] as const)(
+        'answers no payment for a %s checkout, without asking /v1/access',
+        async (status) => {
+            const { call, fake } = older();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                external_id: 'user_ada',
+                status,
+                access: false,
+                confirmed_at: null,
+            });
+
+            const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+            expect(answer).toMatchObject({ status: 200, body: { payments: [], paid: null } });
+            expect(calls(fake)).not.toContain('GET /v1/access');
+        },
+    );
+
+    it('answers without payments for a plan that has no slug', async () => {
+        const { call, fake } = older();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: null as never,
+            external_id: 'user_ada',
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer).toMatchObject({
+            status: 200,
+            body: { payments: null, paid: null, payments_error: { code: 'plan_without_slug' } },
+        });
+        expect(calls(fake)).not.toContain('GET /v1/access');
+    });
+
+    it('still answers the subscription when /v1/access is refused too', async () => {
+        const { client, fake } = older();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [{}]);
+        const mesub = fake.client();
+        vi.spyOn(mesub, 'access').mockImplementation(async () => {
+            fake.fail({ status: 429, code: 'rate_limited' });
+            return client.access(WALLET, 'pro', { attempts: true });
+        });
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({
+            subscription: { id },
+            payments: null,
+            paid: null,
+            payments_error: { code: 'rate_limited' },
+        });
+    });
+
+    it('answers 404 to another customer without reading anything more', async () => {
+        const { client, call, fake } = older();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [{ signature: 'sig_secret' }]);
+        const before = fake.requests.length;
+
+        const theirs = await call(bob, { path: `/subscriptions/${id}` });
+
+        expect(theirs).toMatchObject({
+            status: 404,
+            body: { error: { code: 'subscription_not_found' } },
+        });
+        expect(JSON.stringify(theirs)).not.toContain('sig_secret');
+        expect(calls(fake, before)).toEqual([`GET /v1/subscriptions/${id}`]);
+    });
+
+    it('announces a retry without its number: an older Mesub does not say which', async () => {
+        const { call, fake } = older();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'unpaid',
+            payment_status: 'late',
+            next_retry_at: '2026-11-01T09:00:00.000Z',
+        });
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect(answer.body).toMatchObject({
+            upcoming: [{ kind: 'retry', retry_number: null, retries_allowed: null }],
+        });
     });
 });
 
@@ -1117,7 +1448,7 @@ describe('mesubRoutes for Express', () => {
             subscription: { id },
             payments: [{ outcome: 'PAID', signature: 'sig_1' }],
             upcoming: [{ kind: 'charge', amount: '9990000', amount_display: '9.99' }],
-            listed_paid: { count: 1, amount: '9990000' },
+            paid: { count: 1, amount: '9990000' },
             payments_error: null,
         });
         expect(response.text).not.toContain('user_ada');
@@ -1226,7 +1557,7 @@ describe('mesubRouteHandlers for Next', () => {
             subscription: { id },
             payments: [{ signature: 'sig_1' }, { outcome: 'BLOCKED' }],
             upcoming: [{ kind: 'charge', due_at: expect.any(String), amount: '9990000' }],
-            listed_paid: { count: 1, amount: '9990000' },
+            paid: { count: 1, amount: '9990000' },
         });
         expect(text).not.toContain('user_ada');
 

@@ -1,7 +1,7 @@
 /**
  * `@mesub/node/testing`: a fake Mesub, for a merchant's own tests. It answers
- * what the SDK calls (`/v1/access`, `/v1/plans`, `/v1/subscriptions` and its
- * cancel, resume and close) from what the test sets, through a `fetch` handed
+ * what the SDK calls (`/v1/access`, `/v1/plans`, `/v1/subscriptions`, its
+ * attempts and its cancel, resume and close) from what the test sets, through a `fetch` handed
  * to the client: no network, no backend, no test framework of its own.
  *
  * ```ts
@@ -24,6 +24,8 @@ import type {
     ServerSubscription,
     ServerSubscriptionList,
     SubscribeTransaction,
+    SubscriptionAttempt,
+    SubscriptionAttemptList,
     WalletTransaction,
 } from './subscriptions.js';
 import { signedHeaders, type WebhookEventType } from './webhooks.js';
@@ -41,7 +43,16 @@ export interface FakeMesubOptions {
     plans?: Array<string | (Partial<Plan> & { slug: string })>;
     /** What `webhook()` signs with, and `client()` verifies with. Defaults to a fixed `whsec_` secret. */
     webhookSecret?: string;
+    /**
+     * False to act as a Mesub that predates
+     * `GET /v1/subscriptions/:id/attempts`: it answers Nest's 404 for a route
+     * it does not have, and attempts are only served through `/v1/access`.
+     */
+    attemptsRoute?: boolean;
 }
+
+/** How many attempts `/v1/access` serves at most. */
+const ACCESS_ATTEMPTS = 5;
 
 /** A webhook as Mesub posts it: the exact body, and the three headers that sign it. */
 export interface SignedWebhook {
@@ -158,6 +169,10 @@ export class FakeMesub {
     #subscriptions: ServerSubscription[] = [];
     /** The subscriptions a cancel, resume or close transaction was built for, by id. */
     readonly #built = new Map<string, Set<FakeAction>>();
+    /** The attempts `setAttempts` gave each subscription, newest first, by id. */
+    readonly #attempts = new Map<string, SubscriptionAttempt[]>();
+    readonly #attemptsRoute: boolean;
+    #attemptIds = 0;
     #failure: FakeFailure | null = null;
     #ids = 0;
 
@@ -170,6 +185,7 @@ export class FakeMesub {
         this.#plans = plans ? new Set(plans.map((plan) => plan.slug)) : null;
         this.#planList = (plans ?? []).sort((a, b) => a.slug.localeCompare(b.slug));
         this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
+        this.#attemptsRoute = options.attemptsRoute ?? true;
         this.fetch = (input, init) => this.#handle(input, init);
     }
 
@@ -236,28 +252,47 @@ export class FakeMesub {
     }
 
     /**
-     * The pull attempts of that subscription, as `/v1/access` answers them to
-     * its customer with `attempts`: the answer becomes about that subscription.
-     * Each is a paid one of 9.99 USDC now unless told otherwise; hand them
-     * newest first, as Mesub serves them. Throws for an id the fake does not hold.
+     * The pull attempts of that subscription, every one it ever had: what
+     * `subscriptions.attempts` answers for it, with their `paid` total, and
+     * the five newest through `/v1/access` with `attempts`, whose answer
+     * becomes about that subscription. Each is a paid one of 9.99 USDC now,
+     * not a retry, unless told otherwise; they are served newest first.
+     * Throws for an id the fake does not hold.
      */
-    setAttempts(id: string, attempts: Array<Partial<ServedAttempt>>): ServedAttempt[] {
+    setAttempts(id: string, attempts: Array<Partial<SubscriptionAttempt>>): SubscriptionAttempt[] {
         const subscription = this.#subscriptions.find((each) => each.id === id);
         if (!subscription) throw new Error(`The fake holds no subscription ${id}.`);
 
         const now = new Date().toISOString();
-        const filled = attempts.map((attempt): ServedAttempt => ({
-            outcome: 'PAID',
-            reason: null,
-            amount: '9990000',
-            attempted_at: now,
-            signature: 'fake_signature',
-            ...attempt,
-        }));
+        const filled = attempts
+            .map((attempt): SubscriptionAttempt => ({
+                id: `att_fake_${(this.#attemptIds += 1)}`,
+                attempted_at: now,
+                outcome: 'PAID',
+                reason: null,
+                amount: '9990000',
+                signature: 'fake_signature',
+                retry: false,
+                retry_number: null,
+                retries_allowed: null,
+                period_start: null,
+                ...attempt,
+            }))
+            // Newest first, as Mesub serves them; as handed within one instant.
+            .sort((a, b) => Date.parse(b.attempted_at) - Date.parse(a.attempted_at));
 
+        this.#attempts.set(id, filled);
         this.#answer(subscription, {
             subscribed_since: subscription.confirmed_at,
-            attempts: filled,
+            attempts: filled
+                .slice(0, ACCESS_ATTEMPTS)
+                .map(({ outcome, reason, amount, attempted_at, signature }): ServedAttempt => ({
+                    outcome,
+                    reason,
+                    amount,
+                    attempted_at,
+                    signature,
+                })),
         });
         return filled;
     }
@@ -299,6 +334,7 @@ export class FakeMesub {
         this.#answers.clear();
         this.#subscriptions = [];
         this.#built.clear();
+        this.#attempts.clear();
         this.#failure = null;
         this.requests.length = 0;
     }
@@ -322,6 +358,8 @@ export class FakeMesub {
             next_charge_at: null,
             next_retry_at: null,
             retry_deadline: null,
+            next_retry_number: null,
+            retries_allowed: null,
             access_until: null,
             created_at: now,
             confirmed_at: now,
@@ -383,15 +421,24 @@ export class FakeMesub {
         if (method === 'POST' && path === '/v1/subscriptions') return this.#create(body);
 
         const [, id, step, confirm] =
-            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|cancel|resume|close)(\/confirm)?)?$/.exec(
+            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|cancel|resume|close|attempts)(\/confirm)?)?$/.exec(
                 path,
             ) ?? [];
+        // A Mesub without the route knows no such path, whatever the id.
+        if (step === 'attempts' && (confirm || !this.#attemptsRoute)) {
+            return error(404, 'not_found', `Cannot ${method} ${path}`);
+        }
         if (id !== undefined) {
             const subscription = this.#subscriptions.find((s) => s.id === decodeURIComponent(id));
             if (!subscription) {
                 return error(404, 'subscription_not_found', 'No subscription under that id.');
             }
             if (method === 'GET' && !step) return Response.json(subscription);
+            if (step === 'attempts') {
+                return method === 'GET'
+                    ? this.#attemptsOf(subscription, query)
+                    : error(404, 'not_found', `Cannot ${method} ${path}`);
+            }
             if (method === 'POST' && step === 'submit' && !confirm) {
                 return this.#submit(subscription);
             }
@@ -445,6 +492,41 @@ export class FakeMesub {
         const page: ServerSubscriptionList = {
             data: data.slice(0, limit),
             has_more: data.length > limit,
+        };
+        return Response.json(page);
+    }
+
+    #attemptsOf(subscription: ServerSubscription, query: Record<string, string>): Response {
+        const all = this.#attempts.get(subscription.id) ?? [];
+        const limit = Number(query['limit'] ?? 20);
+        const after = query['starting_after'];
+        const from = after === undefined ? 0 : all.findIndex((each) => each.id === after) + 1;
+
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+            return error(400, 'invalid_request', 'limit must be a whole number from 1 to 100');
+        }
+        if (after !== undefined && from === 0) {
+            return error(
+                400,
+                'invalid_request',
+                'starting_after is not an attempt of this subscription.',
+            );
+        }
+
+        const paid = all.filter((each) => each.outcome === 'PAID');
+        const page: SubscriptionAttemptList = {
+            data: all.slice(from, from + limit),
+            has_more: all.length > from + limit,
+            // Over every attempt, not the page; an amount that is no whole number counts for 0.
+            paid: {
+                count: paid.length,
+                amount: paid
+                    .reduce(
+                        (sum, each) => sum + (/^\d+$/.test(each.amount) ? BigInt(each.amount) : 0n),
+                        0n,
+                    )
+                    .toString(),
+            },
         };
         return Response.json(page);
     }
@@ -569,6 +651,8 @@ export class FakeMesub {
                 next_charge_at: null,
                 next_retry_at: null,
                 retry_deadline: null,
+                next_retry_number: null,
+                retries_allowed: null,
                 access_until: subscription.access ? (subscription.access_until ?? end) : null,
             } satisfies Partial<ServerSubscription>);
             this.#answer(subscription, {
@@ -598,6 +682,8 @@ export class FakeMesub {
                 next_charge_at: null,
                 next_retry_at: null,
                 retry_deadline: null,
+                next_retry_number: null,
+                retries_allowed: null,
             } satisfies Partial<ServerSubscription>);
             this.#answer(subscription, {
                 access: false,
