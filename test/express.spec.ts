@@ -98,6 +98,8 @@ function mesub(mesh: Mesh = {}, options: MesubOptions = {}) {
         baseUrl: BASE,
         fetch: fetch as unknown as typeof globalThis.fetch,
         maxRetries: 0,
+        // The default budget is 2 s: on a busy machine it would decide a test that is not about it.
+        guardTimeout: 30_000,
         ...options,
     });
 
@@ -741,30 +743,34 @@ describe('requirePlan', () => {
                 { access: perPlan({ pro: yes('pro'), team: hang }) },
                 { guardTimeout: 5_000 },
             );
+            const bearer = `Bearer ${await token()}`;
             const started = Date.now();
 
             await request(app(client, {}, ['pro', 'team']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set('Authorization', bearer)
                 .expect(200);
 
-            expect(Date.now() - started).toBeLessThan(1_000);
+            // Waiting for `team` would take the whole guardTimeout: bound by that, not by a busy machine.
+            expect(Date.now() - started).toBeLessThan(4_000);
         });
 
         // A guard holds a request for guardTimeout at most, whatever the number of plans.
         it('asks every plan within one guardTimeout', async () => {
             const { client } = mesub(
                 { access: perPlan({ a: hang, b: hang, c: hang }) },
-                { guardTimeout: 100 },
+                { guardTimeout: 500 },
             );
+            const bearer = `Bearer ${await token()}`;
             const started = Date.now();
 
             await request(app(client, {}, ['a', 'b', 'c']))
                 .get('/pro')
-                .set('Authorization', `Bearer ${await token()}`)
+                .set('Authorization', bearer)
                 .expect(503);
 
-            expect(Date.now() - started).toBeLessThan(250);
+            // One after the other would take three of them, 1500 ms.
+            expect(Date.now() - started).toBeLessThan(1_250);
         });
 
         it("answers 402 with the first plan's status when none grants", async () => {
