@@ -1,7 +1,7 @@
 /**
  * `@mesub/node/testing`: a fake Mesub, for a merchant's own tests. It answers
- * what the SDK calls (`/v1/access`, `/v1/project`, `/v1/subscriptions`, the
- * public keys) from what the test sets, through a `fetch` handed to the
+ * what the SDK calls (`/v1/access`, `/v1/project`, `/v1/subscriptions` and
+ * its cancel, resume and close, the public keys) from what the test sets, through a `fetch` handed to the
  * client: no network, no backend, no test framework of its own.
  *
  * ```ts
@@ -25,6 +25,7 @@ import type {
     ServerSubscription,
     ServerSubscriptionList,
     SubscribeTransaction,
+    WalletTransaction,
 } from './subscriptions.js';
 import { signedHeaders, type WebhookEventType } from './webhooks.js';
 
@@ -165,6 +166,8 @@ export class FakeMesub {
     readonly #plans: Set<string> | null;
     readonly #answers = new Map<string, AccessAnswer>();
     #subscriptions: ServerSubscription[] = [];
+    /** The subscriptions a cancel, resume or close transaction was built for, by id. */
+    readonly #built = new Map<string, Set<FakeAction>>();
     #failure: FakeFailure | null = null;
     #keys: Promise<{ privateKey: CryptoKey; jwk: JWK }> | undefined;
     #ids = 0;
@@ -295,6 +298,7 @@ export class FakeMesub {
     reset(): void {
         this.#answers.clear();
         this.#subscriptions = [];
+        this.#built.clear();
         this.#failure = null;
         this.requests.length = 0;
     }
@@ -377,14 +381,24 @@ export class FakeMesub {
         if (method === 'GET' && path === '/v1/subscriptions') return this.#list(query);
         if (method === 'POST' && path === '/v1/subscriptions') return this.#create(body);
 
-        const [, id, submit] = /^\/v1\/subscriptions\/([^/]+)(\/submit)?$/.exec(path) ?? [];
+        const [, id, step, confirm] =
+            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|cancel|resume|close)(\/confirm)?)?$/.exec(
+                path,
+            ) ?? [];
         if (id !== undefined) {
             const subscription = this.#subscriptions.find((s) => s.id === decodeURIComponent(id));
             if (!subscription) {
                 return error(404, 'subscription_not_found', 'No subscription under that id.');
             }
-            if (method === 'GET' && !submit) return Response.json(subscription);
-            if (method === 'POST' && submit) return this.#submit(subscription);
+            if (method === 'GET' && !step) return Response.json(subscription);
+            if (method === 'POST' && step === 'submit' && !confirm) {
+                return this.#submit(subscription);
+            }
+            if (method === 'POST' && step && step !== 'submit') {
+                return confirm
+                    ? this.#confirm(step as FakeAction, subscription, body)
+                    : this.#build(step as FakeAction, subscription);
+            }
         }
 
         return error(404, 'not_found', `Cannot ${method} ${path}`);
@@ -510,6 +524,169 @@ export class FakeMesub {
 
         return Response.json({ subscription }, { status: 201 });
     }
+
+    /** The transaction of a cancel, resume or close, or Mesub's refusal of it. */
+    #build(action: FakeAction, subscription: ServerSubscription): Response {
+        const refusal = refusalOf(action, subscription);
+        if (refusal) return refusal;
+
+        const built = this.#built.get(subscription.id) ?? new Set();
+        this.#built.set(subscription.id, built.add(action));
+
+        const answer: WalletTransaction = {
+            transaction: btoa(`fake ${action} transaction`),
+            last_valid_block_height: '0',
+        };
+        return Response.json(answer, { status: 201 });
+    }
+
+    /** Lands at once: the subscription moves, and so do its customer's access answers. */
+    #confirm(action: FakeAction, subscription: ServerSubscription, body: unknown): Response {
+        const { signature } = (body ?? {}) as Record<string, unknown>;
+
+        if (typeof signature !== 'string' || signature === '') {
+            return error(400, 'invalid_request', 'signature must be a transaction signature.');
+        }
+        const done = subscription.status === DONE[action];
+        const refusal = done ? null : refusalOf(action, subscription);
+        if (refusal) return refusal;
+        if (!this.#built.get(subscription.id)?.has(action)) {
+            return error(400, 'nothing_to_confirm', 'There is no transaction to confirm yet.');
+        }
+        // Confirmed already: answered with the row, as Mesub does.
+        if (done) return Response.json({ subscription }, { status: 201 });
+        // What was built for another action is spent.
+        this.#built.set(subscription.id, new Set([action]));
+
+        const now = new Date().toISOString();
+        const end = subscription.current_period_end;
+
+        if (action === 'cancel') {
+            // Paid up, it keeps its access to the end of the period.
+            Object.assign(subscription, {
+                status: 'cancelled',
+                next_charge_at: null,
+                next_retry_at: null,
+                retry_deadline: null,
+                access_until: subscription.access ? (subscription.access_until ?? end) : null,
+            } satisfies Partial<ServerSubscription>);
+            this.#answer(subscription, {
+                status: 'cancelled',
+                cancelled_at: now,
+                next_charge_at: null,
+                next_retry_at: null,
+                retry_deadline: null,
+            });
+        } else if (action === 'resume') {
+            Object.assign(subscription, {
+                status: 'active',
+                next_charge_at: end,
+            } satisfies Partial<ServerSubscription>);
+            this.#answer(subscription, {
+                status: 'active',
+                cancelled_at: null,
+                next_charge_at: end,
+            });
+        } else {
+            Object.assign(subscription, {
+                status: 'ended',
+                end_reason: 'closed',
+                access: false,
+                payment_status: 'none',
+                access_until: null,
+                next_charge_at: null,
+                next_retry_at: null,
+                retry_deadline: null,
+            } satisfies Partial<ServerSubscription>);
+            this.#answer(subscription, {
+                access: false,
+                status: 'ended',
+                end_reason: 'closed',
+                payment_status: 'none',
+                access_until: null,
+                next_charge_at: null,
+                next_retry_at: null,
+                retry_deadline: null,
+            });
+        }
+
+        return Response.json({ subscription }, { status: 201 });
+    }
+
+    /**
+     * Changes what `/v1/access` answers a subscription's customer, by wallet,
+     * external id and email, on top of what each was answered before.
+     */
+    #answer(subscription: ServerSubscription, fields: FakeAccess): void {
+        const plan = subscription.plan ?? '';
+        const customers: Customer[] = [{ wallet: subscription.wallet }];
+        if (subscription.external_id) customers.push({ external_id: subscription.external_id });
+        if (subscription.email) customers.push({ email: subscription.email });
+
+        for (const customer of customers) {
+            const before = this.#answers.get(keyOf(customerOf(customer), plan));
+
+            this.setAccess(customer, plan, {
+                wallet: subscription.wallet,
+                access: subscription.access,
+                payment_status: subscription.payment_status,
+                ...before,
+                ...fields,
+            });
+        }
+    }
+}
+
+/** What stops, takes back or closes a subscription in the fake. */
+type FakeAction = 'cancel' | 'resume' | 'close';
+
+/** The status each action leaves a subscription in. */
+const DONE: Record<FakeAction, ServerSubscription['status']> = {
+    cancel: 'cancelled',
+    resume: 'active',
+    close: 'ended',
+};
+
+/** Mesub's 409 for an action a subscription's status does not allow, or null. */
+function refusalOf(action: FakeAction, subscription: ServerSubscription): Response | null {
+    const { status, access_until } = subscription;
+    const over = access_until === null || Date.parse(access_until) <= Date.now();
+    const cancelled =
+        status === 'cancelled' || (status === 'ended' && subscription.end_reason === 'cancelled');
+
+    if (action === 'cancel') {
+        if (status === 'cancelled') {
+            return error(409, 'subscription_cancelled', 'This subscription is cancelled already.');
+        }
+        return ['active', 'unpaid', 'stopped'].includes(status)
+            ? null
+            : error(409, 'subscription_not_active', 'This subscription is not running.');
+    }
+    if (action === 'resume') {
+        if (status !== 'cancelled') {
+            return error(409, 'subscription_not_cancelled', 'This subscription is not cancelled.');
+        }
+        return over
+            ? error(409, 'subscription_ended', 'The period paid for is over: subscribe again.')
+            : null;
+    }
+    if (isClosed(subscription)) {
+        return error(409, 'subscription_not_on_chain', 'This subscription is closed already.');
+    }
+    if (!cancelled && status !== 'stopped') {
+        return error(
+            409,
+            'subscription_not_cancelled',
+            'Cancel this subscription before closing it.',
+        );
+    }
+    return over
+        ? null
+        : error(409, 'close_too_early', `This subscription runs until ${access_until}.`);
+}
+
+function isClosed(subscription: ServerSubscription): boolean {
+    return subscription.status === 'ended' && subscription.end_reason === 'closed';
 }
 
 function keyOf(asked: Asked, plan: string): string {

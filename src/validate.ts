@@ -1,10 +1,12 @@
 import type { AccessAnswer, AccessList, ServedAttempt } from './answer.js';
 import { MesubError } from './errors.js';
 import type {
+    ConfirmResult,
     ServerSubscription,
     ServerSubscriptionList,
     SubmitResult,
     SubscribeTransaction,
+    WalletTransaction,
 } from './subscriptions.js';
 import type {
     CreatedDetail,
@@ -227,16 +229,33 @@ export function subscribeTransactionFrom(body: unknown): SubscribeTransaction {
 
 /** What `submit` answered: the subscription as it settled, and a reason when one came. */
 export function submitResultFrom(body: unknown): SubmitResult {
+    return confirmResultFrom(body, 'POST /v1/subscriptions/:id/submit');
+}
+
+/** What a confirm of `route` answered: the same shape as `submit`'s. */
+export function confirmResultFrom(body: unknown, route: string): ConfirmResult {
     const problem =
         problemWith(body, { subscription: OBJECT }) ??
-        problemWith((body as SubmitResult).subscription, SUBSCRIPTION, 'subscription') ??
-        reasonProblem((body as SubmitResult).reason);
+        problemWith((body as ConfirmResult).subscription, SUBSCRIPTION, 'subscription') ??
+        reasonProblem((body as ConfirmResult).reason);
 
-    if (problem !== null) {
-        throw unreadable(problem, body, 'POST /v1/subscriptions/:id/submit', 201);
-    }
+    if (problem !== null) throw unreadable(problem, body, route, 201);
 
-    return body as SubmitResult;
+    return body as ConfirmResult;
+}
+
+const WALLET_TRANSACTION = {
+    transaction: STRING,
+    last_valid_block_height: STRING,
+} satisfies Record<keyof WalletTransaction, Field>;
+
+/** What `cancel`, `resume` or `close` answered: the transaction the wallet signs and sends. */
+export function walletTransactionFrom(body: unknown, route: string): WalletTransaction {
+    const problem = problemWith(body, WALLET_TRANSACTION);
+
+    if (problem !== null) throw unreadable(problem, body, route, 201);
+
+    return body as WalletTransaction;
 }
 
 function reasonProblem(reason: unknown): string | null {

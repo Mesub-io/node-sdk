@@ -245,6 +245,242 @@ describe('FakeMesub', () => {
         );
     });
 
+    describe('cancel, resume and close', () => {
+        const PAST = '2020-01-01T00:00:00.000Z';
+        const signed = { signature: 'fake_signature' };
+
+        async function subscribed(fake: FakeMesub) {
+            const mesub = fake.client();
+            const created = await mesub.subscriptions.create({
+                plan: 'pro',
+                wallet: WALLET,
+                external_id: 'user_42',
+                email: 'a@b.co',
+            });
+            const { subscription } = await mesub.subscriptions.submit(created.subscription.id, {
+                transaction: created.transaction,
+                terms_signature: 'signed',
+            });
+
+            return { mesub, id: subscription.id };
+        }
+
+        it('cancels: access to the end of the period, by every name', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+
+            const unsigned = await mesub.subscriptions.cancel(id);
+            expect(unsigned).toEqual({
+                transaction: expect.any(String),
+                last_valid_block_height: expect.any(String),
+            });
+            // Nothing moves until the wallet's signature is confirmed.
+            await expect(mesub.subscriptions.retrieve(id)).resolves.toMatchObject({
+                status: 'active',
+            });
+
+            const { subscription, reason } = await mesub.subscriptions.confirmCancel(id, signed);
+
+            expect(reason).toBeUndefined();
+            expect(subscription).toMatchObject({
+                status: 'cancelled',
+                access: true,
+                next_charge_at: null,
+            });
+            expect(subscription.access_until).toBe(subscription.current_period_end);
+            for (const customer of [WALLET, { external_id: 'user_42' }, { email: 'a@b.co' }]) {
+                await expect(mesub.access(customer, 'pro')).resolves.toMatchObject({
+                    access: true,
+                    status: 'cancelled',
+                    cancelled_at: expect.any(String),
+                    next_charge_at: null,
+                });
+            }
+            await expect(mesub.subscriptions.retrieve(id)).resolves.toEqual(subscription);
+            // Confirmed twice, it is answered the same.
+            await expect(mesub.subscriptions.confirmCancel(id, signed)).resolves.toEqual({
+                subscription,
+            });
+        });
+
+        it('resumes a cancelled one', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+            await mesub.subscriptions.cancel(id);
+            await mesub.subscriptions.confirmCancel(id, signed);
+
+            await mesub.subscriptions.resume(id);
+            const { subscription } = await mesub.subscriptions.confirmResume(id, signed);
+
+            expect(subscription).toMatchObject({ status: 'active', access: true });
+            expect(subscription.next_charge_at).toBe(subscription.current_period_end);
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                status: 'active',
+                cancelled_at: null,
+                next_charge_at: subscription.current_period_end,
+            });
+            // The cancel built before is spent: a new one is needed.
+            expect(await codeOf(mesub.subscriptions.confirmCancel(id, signed))).toBe(
+                'nothing_to_confirm',
+            );
+        });
+
+        it('closes one that is over, and ends its access', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'cancelled',
+                access: false,
+                access_until: PAST,
+            });
+            fake.grant(WALLET, 'pro');
+            const mesub = fake.client();
+
+            await mesub.subscriptions.close(id);
+            const { subscription } = await mesub.subscriptions.confirmClose(id, signed);
+
+            expect(subscription).toMatchObject({
+                status: 'ended',
+                end_reason: 'closed',
+                access: false,
+                access_until: null,
+            });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: false,
+                status: 'ended',
+                end_reason: 'closed',
+            });
+            expect(await codeOf(mesub.subscriptions.close(id))).toBe('subscription_not_on_chain');
+        });
+
+        it('cancels a stopped one with no access, then closes it', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'stopped',
+                access: false,
+                payment_status: 'late',
+            });
+            const mesub = fake.client();
+
+            await mesub.subscriptions.cancel(id);
+            const { subscription } = await mesub.subscriptions.confirmCancel(id, signed);
+
+            expect(subscription).toMatchObject({
+                status: 'cancelled',
+                access: false,
+                access_until: null,
+            });
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+            await mesub.subscriptions.close(id);
+            await expect(mesub.subscriptions.confirmClose(id, signed)).resolves.toMatchObject({
+                subscription: { status: 'ended', end_reason: 'closed' },
+            });
+        });
+
+        it('refuses what the status does not allow, as Mesub does', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+            const { subscriptions } = mesub;
+            const pending = await subscriptions.create({ plan: 'team', wallet: WALLET });
+            const over = fake.addSubscription({
+                wallet: OTHER,
+                plan: 'pro',
+                status: 'cancelled',
+                access: false,
+                access_until: PAST,
+            });
+
+            // Active: nothing to resume or close, and nothing built to confirm.
+            expect(await codeOf(subscriptions.resume(id))).toBe('subscription_not_cancelled');
+            expect(await codeOf(subscriptions.close(id))).toBe('subscription_not_cancelled');
+            expect(await codeOf(subscriptions.confirmCancel(id, signed))).toBe(
+                'nothing_to_confirm',
+            );
+            expect(await codeOf(subscriptions.confirmResume(id, signed))).toBe(
+                'nothing_to_confirm',
+            );
+            expect(await codeOf(subscriptions.confirmClose(id, signed))).toBe(
+                'subscription_not_cancelled',
+            );
+            expect(await codeOf(subscriptions.cancel(pending.subscription.id))).toBe(
+                'subscription_not_active',
+            );
+
+            await subscriptions.cancel(id);
+            await subscriptions.confirmCancel(id, signed);
+
+            // Cancelled, and still running.
+            expect(await codeOf(subscriptions.cancel(id))).toBe('subscription_cancelled');
+            expect(await codeOf(subscriptions.close(id))).toBe('close_too_early');
+            // Cancelled, and past its end.
+            expect(await codeOf(subscriptions.resume(over.id))).toBe('subscription_ended');
+
+            for (const call of [
+                subscriptions.cancel('sub_nope'),
+                subscriptions.resume('sub_nope'),
+                subscriptions.close('sub_nope'),
+                subscriptions.confirmCancel('sub_nope', signed),
+                subscriptions.confirmResume('sub_nope', signed),
+                subscriptions.confirmClose('sub_nope', signed),
+            ]) {
+                expect(await codeOf(call)).toBe('subscription_not_found');
+            }
+        });
+
+        it('refuses a confirm without a signature', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+            await mesub.subscriptions.cancel(id);
+
+            const error = await mesub.subscriptions
+                .confirmCancel(id, { signature: '' })
+                .catch((caught: unknown) => caught);
+
+            expect(error).toMatchObject({ status: 400, code: 'invalid_request' });
+        });
+
+        it('fails them like any other call, and records them', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+
+            fake.fail('outage');
+            await expect(mesub.subscriptions.cancel(id)).rejects.toMatchObject({ status: 503 });
+            fake.fail(null);
+            await mesub.subscriptions.cancel(id);
+            await mesub.subscriptions.confirmCancel(id, signed);
+
+            expect(fake.requests.slice(-2)).toMatchObject([
+                { method: 'POST', path: `/v1/subscriptions/${id}/cancel`, body: undefined },
+                { method: 'POST', path: `/v1/subscriptions/${id}/cancel/confirm`, body: signed },
+            ]);
+
+            fake.reset();
+            expect(await codeOf(mesub.subscriptions.confirmCancel(id, signed))).toBe(
+                'subscription_not_found',
+            );
+        });
+
+        it('drops the cached access of a real client once a confirm lands', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+            fake.setAccess(WALLET, 'pro', {
+                ...(await mesub.access(WALLET, 'pro')),
+                revalidate_after: 3600,
+            });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({ status: 'active' });
+
+            await mesub.subscriptions.cancel(id);
+            await mesub.subscriptions.confirmCancel(id, signed);
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                status: 'cancelled',
+            });
+        });
+    });
+
     it('pages subscriptions newest first', async () => {
         const fake = new FakeMesub();
         const first = fake.addSubscription({ wallet: WALLET, plan: 'pro' });

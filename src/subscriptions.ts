@@ -3,15 +3,18 @@ import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
 import { type QueryValue, type RequestOptions, type Transport, sleep } from './transport.js';
 import {
+    confirmResultFrom,
     serverSubscriptionFrom,
     serverSubscriptionListFrom,
     submitResultFrom,
     subscribeTransactionFrom,
+    walletTransactionFrom,
 } from './validate.js';
 
 /**
  * Subscribing from your own server, with the API key (Mesub-io/backend#143):
- * `POST /v1/subscriptions`, its submit, and the reads. The types copy the
+ * `POST /v1/subscriptions`, its submit, the reads, and what stops one
+ * (Mesub-io/backend#276): cancel, resume and close. The types copy the
  * back's `server-subscriptions.service.ts`, which stays the source of truth.
  * Snake case, as the API serves it.
  */
@@ -106,6 +109,34 @@ export interface SubmitResult {
     reason?: string;
 }
 
+/**
+ * What `cancel`, `resume` and `close` answer: a transaction only the wallet
+ * signs, and sends itself. Mesub signs nothing of it.
+ */
+export interface WalletTransaction {
+    /** Base64, signed by nobody: the wallet signs and sends it, then names its signature. */
+    transaction: string;
+    /** The block height past which it can no longer land. */
+    last_valid_block_height: string;
+}
+
+/** What the wallet answered when it sent the transaction of `cancel`, `resume` or `close`. */
+export interface ConfirmParams {
+    /** The transaction's signature, base58. */
+    signature: string;
+}
+
+/** What `confirmCancel`, `confirmResume` and `confirmClose` settled on. */
+export interface ConfirmResult {
+    /** The subscription as it is now: moved, or as it was with a `reason`. */
+    subscription: ServerSubscription;
+    /**
+     * Mesub's own, set when nothing changed: the transaction failed, expired
+     * before it landed, or the subscription moved on meanwhile.
+     */
+    reason?: string;
+}
+
 /** One page of a customer's subscriptions, newest first. */
 export interface ServerSubscriptionList {
     data: ServerSubscription[];
@@ -149,6 +180,15 @@ export interface SubmitOptions extends RequestOptions {
     budget?: number;
 }
 
+export interface ConfirmOptions extends RequestOptions {
+    /**
+     * In milliseconds: 90 s by default. Mesub waits for the transaction to
+     * land or its blockhash to expire, about a minute. A confirm cut short
+     * changed nothing: send it again with the same signature.
+     */
+    timeout?: number;
+}
+
 /**
  * Whose subscriptions to list: a `Customer`, named exactly one way and
  * normalised as `access` names them, and what narrows the page.
@@ -184,6 +224,12 @@ const REPLAY_WAIT = 10_000;
  */
 const READ_BACK_TIME = 10_000;
 
+/** How long a confirm waits by default: as one send of `submit`, for the same chain. */
+const CONFIRM_TIMEOUT = SUBMIT_TIMEOUT;
+
+/** What stops, takes back or closes a subscription: each a route, and its `/confirm`. */
+type Action = 'cancel' | 'resume' | 'close';
+
 /** How a submit whose outcome is unknown is settled from the subscription read back. */
 interface Unsettled {
     sends: number;
@@ -205,13 +251,21 @@ export class Subscriptions {
      */
     readonly #seen: (subscription: ServerSubscription) => Promise<void>;
 
+    /**
+     * Told of the subscription a confirm moved, so the client drops every
+     * access answer cached for its customer, the yes as well as the no.
+     */
+    readonly #changed: (subscription: ServerSubscription) => Promise<void>;
+
     /** @internal */
     constructor(
         transport: Transport,
         seen: (subscription: ServerSubscription) => Promise<void> = async () => {},
+        changed: (subscription: ServerSubscription) => Promise<void> = seen,
     ) {
         this.#transport = transport;
         this.#seen = seen;
+        this.#changed = changed;
     }
 
     /**
@@ -415,6 +469,107 @@ export class Subscriptions {
             if (signal?.aborted) throw error;
             return null;
         }
+    }
+
+    /**
+     * Builds the transaction that cancels an `active`, `unpaid` or `stopped`
+     * subscription. Hand it to your front: the subscription's wallet signs
+     * and sends it, then `confirmCancel` takes the signature. Nothing is
+     * cancelled until then. Sent once, never retried.
+     *
+     * One paid up keeps its access to the end of its period; a late or
+     * stopped one has none, and its missed period is never collected.
+     */
+    async cancel(id: string, options: RequestOptions = {}): Promise<WalletTransaction> {
+        return this.#build('cancel', id, options);
+    }
+
+    /**
+     * Settles a cancellation the wallet sent, by the signature it answered:
+     * `cancelled`, or the subscription as it was with a `reason` when nothing
+     * landed. Mesub waits for the chain, so up to a minute or so: 90 s unless
+     * `options.timeout` says otherwise. Sent once, never retried; the same
+     * confirm sent again is answered the same.
+     *
+     * Settled without a `reason`, it drops every `/v1/access` answer cached
+     * for that customer on that plan: `access` right after asks Mesub again.
+     */
+    async confirmCancel(
+        id: string,
+        params: ConfirmParams,
+        options: ConfirmOptions = {},
+    ): Promise<ConfirmResult> {
+        return this.#confirm('cancel', id, params, options);
+    }
+
+    /**
+     * Builds the transaction that takes a `cancelled` subscription back,
+     * before the period it paid for is over. Hand it to your front: the
+     * wallet signs and sends it, then `confirmResume` takes the signature.
+     * Sent once, never retried.
+     */
+    async resume(id: string, options: RequestOptions = {}): Promise<WalletTransaction> {
+        return this.#build('resume', id, options);
+    }
+
+    /** As `confirmCancel`, for a resume: `active` again, or a `reason`. */
+    async confirmResume(
+        id: string,
+        params: ConfirmParams,
+        options: ConfirmOptions = {},
+    ): Promise<ConfirmResult> {
+        return this.#confirm('resume', id, params, options);
+    }
+
+    /**
+     * Builds the transaction that closes the wallet's authorisation on a
+     * subscription that is over, a cancelled or stopped one past its end:
+     * its rent goes back to the wallet. Hand it to your front: the wallet
+     * signs and sends it, then `confirmClose` takes the signature. Sent once,
+     * never retried.
+     */
+    async close(id: string, options: RequestOptions = {}): Promise<WalletTransaction> {
+        return this.#build('close', id, options);
+    }
+
+    /** As `confirmCancel`, for a close: `ended` with `end_reason` `closed`, or a `reason`. */
+    async confirmClose(
+        id: string,
+        params: ConfirmParams,
+        options: ConfirmOptions = {},
+    ): Promise<ConfirmResult> {
+        return this.#confirm('close', id, params, options);
+    }
+
+    async #build(action: Action, id: string, options: RequestOptions): Promise<WalletTransaction> {
+        const path = `${pathOf(id)}/${action}`;
+
+        // No body: the wallet is the subscription's own.
+        return walletTransactionFrom(
+            await this.#transport.post(path, undefined, options),
+            `POST /v1/subscriptions/:id/${action}`,
+        );
+    }
+
+    async #confirm(
+        action: Action,
+        id: string,
+        params: ConfirmParams,
+        options: ConfirmOptions,
+    ): Promise<ConfirmResult> {
+        const path = `${pathOf(id)}/${action}/confirm`;
+        const result = confirmResultFrom(
+            await this.#transport.post(
+                path,
+                { signature: params.signature },
+                { ...options, timeout: options.timeout ?? CONFIRM_TIMEOUT },
+            ),
+            `POST /v1/subscriptions/:id/${action}/confirm`,
+        );
+
+        // A reason says nothing moved: only a cached no may be outdated then.
+        await (result.reason === undefined ? this.#changed : this.#seen)(result.subscription);
+        return result;
     }
 
     /**

@@ -105,6 +105,14 @@ The first version published to npm. Requires Node 22 or later.
   the same defaults from an API that predates them (#78).
 - POST requests are never retried blindly, and take a per-call `timeout` and
   `signal` (#58).
+- `subscriptions.cancel`, `resume` and `close` build the transaction the
+  subscription's wallet signs and sends in your front, and `confirmCancel`,
+  `confirmResume` and `confirmClose` settle it by its signature, over
+  `/v1/subscriptions/:id` with the API key (Mesub-io/backend#276): no Mesub
+  account and nothing of `@mesub/react`. Each is sent once; a confirm waits
+  90 s by default and answers the subscription, with Mesub's `reason` when
+  nothing changed. A confirm that settled drops every cached access answer
+  for that customer on that plan, the yes too (#50).
 
 ### Webhooks
 
@@ -127,6 +135,9 @@ The first version published to npm. Requires Node 22 or later.
   `Mesub` wired to it, `token()` a token the guards accept, `fail()` an
   outage or any error, `requests` what it received. Nothing of it reaches
   the other entries (#65).
+- `FakeMesub` answers cancel, resume and close and their confirms, which
+  land at once: the subscription and its access answers move, and a step the
+  status does not allow is refused with Mesub's code (#50).
 
 ### Errors
 
