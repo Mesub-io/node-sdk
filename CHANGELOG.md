@@ -88,6 +88,20 @@ The first version published to npm. Requires Node 22 or later.
 - POST requests are never retried blindly, and take a per-call `timeout` and
   `signal` (#58).
 
+### Webhooks
+
+- `mesub.webhooks.verify(body, headers)`, or `verifyWebhook` without a
+  client, checks a webhook Mesub sent (Standard Webhooks): the HMAC-SHA256
+  signature over the raw body in constant time, any one of several
+  signatures, a timestamp within 5 minutes (`tolerance`). It hands back the
+  event, typed by `type`, its subscription and detail checked, and `id`, the
+  `webhook-id` to drop duplicates by. The secret is `webhookSecret`,
+  `MESUB_WEBHOOK_SECRET` by default, or `secret` per call. A failure throws
+  `invalid_webhook`; a verified event that grants access drops the cached no
+  (#77).
+- `@mesub/node/testing`: `fake.webhook(type)` makes a signed delivery the
+  fake's client verifies; `signWebhook` signs a body of your own (#77).
+
 ### Testing your integration
 
 - `@mesub/node/testing` exports `FakeMesub`, a fake Mesub behind a `fetch`:

@@ -42,7 +42,8 @@ Three walkthroughs, in the order you need them:
 1. [Gate a route](#gate-a-route): serve only customers with access to a plan.
 2. [Subscribe from your server](#subscribe-from-your-server): create, have the
    wallet sign in your front, submit.
-3. [Webhooks](#webhooks): coming.
+3. [Webhooks](#webhooks): hear from Mesub when a subscription renews, misses a
+   payment or stops.
 
 The [`@mesub/react`](https://github.com/Mesub-io/react-sdk) widget is
 optional: a ready-made sign-in and checkout. Today it still subscribes
@@ -55,6 +56,7 @@ One key on your server, from your Mesub dashboard:
 | Where                | What                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------ |
 | Your server's `.env` | `MESUB_API_KEY=SUB_...`, the API key. Read by this package.                                |
+| Your server's `.env` | With webhooks: `MESUB_WEBHOOK_SECRET=whsec_...`, the endpoint's signing secret.            |
 | Your frontend        | Only with the widget: `PUB_...`, the publishable key, given to `@mesub/react`. Not secret. |
 
 ## Gate a route
@@ -407,8 +409,64 @@ them.
 
 ## Webhooks
 
-Coming, so that Mesub tells your server when a subscription changes; until
-then, ask with `access` or `subscriptions.retrieve`.
+Mesub posts an event to your endpoint when a subscription changes, signed
+the [Standard Webhooks](https://www.standardwebhooks.com) way. Register the
+endpoint and pick its events in the dashboard; its signing secret goes in
+`MESUB_WEBHOOK_SECRET` (or `new Mesub({ webhookSecret })`, or `{ secret }`
+per call when you have several endpoints).
+
+The signature is over the exact bytes Mesub sent: verify the raw body, never
+one a JSON parser read and wrote again. With Express, mount `express.raw` on
+the route, before any `app.use(express.json())` reaches it:
+
+```ts
+app.post('/webhooks/mesub', express.raw({ type: 'application/json' }), async (req, res) => {
+    let event;
+    try {
+        event = await mesub.webhooks.verify(req.body, req.headers);
+    } catch (error) {
+        if (error instanceof MesubError) return res.status(400).end();
+        throw error;
+    }
+
+    if (await alreadyHandled(event.id)) return res.status(200).end();
+
+    switch (event.type) {
+        case 'subscription.renewed':
+            // event.data is the subscription; event.data.detail what was paid
+            break;
+        case 'subscription.payment_failed':
+            // event.data.detail.reason, retries_left, next_retry_at
+            break;
+        // ...
+    }
+    res.status(200).end();
+});
+```
+
+In a Next route handler, `verifyWebhook` is the same check without a
+client: `await verifyWebhook(await request.text(), request.headers)`.
+
+- **Events**: `subscription.created` (first payment landed),
+  `subscription.renewed`, `subscription.payment_failed`,
+  `subscription.stopped` (no more pulls), `subscription.cancelled`,
+  `subscription.resumed`, `subscription.ended` (the plan ended or was
+  deleted, or the wallet closed its delegation), `subscription.expired` (a
+  checkout nobody signed), and `test`, sent from the dashboard with a
+  made-up subscription. Keep a default branch: a newer type is handed back
+  too.
+- **`data`** is the subscription as `subscriptions.retrieve` answers it, plus
+  `detail`, the event's own. It is taken at the first attempt, so it may be
+  newer than the event: `created_at` is when the event happened.
+- **Duplicates**: a delivery without a 2xx in 10 s is sent again for about 3
+  days, under the same `event.id` (the `webhook-id` header): drop one you
+  have already handled. A redirect is a failure.
+- **Order** is not guaranteed: a retry can land after a later event. Before
+  granting or revoking, ask `hasAccess`; `webhooks.verify` already dropped
+  the cached no of a subscription that grants access.
+- **Failures**: `invalid_webhook` when the signature, a header or the
+  timestamp (5 minutes either way, see `tolerance`) is wrong; answer 400.
+  `unexpected` for a body Mesub signed that this release cannot read.
 
 ## When Mesub does not answer
 
@@ -463,6 +521,7 @@ new Mesub({
     cache, // where answers are kept, default: 10,000 entries in memory
     maxStaleMs, // how long a stale answer serves the outage fallback, default 24 h
     guardTimeout, // the guards' budget for the access check, ms, default 2000
+    webhookSecret, // the endpoint's whsec_ secret, default: process.env.MESUB_WEBHOOK_SECRET
 });
 ```
 
@@ -554,6 +613,7 @@ and a stable `code` to branch on:
 | `rate_limited`    | 429, after the retries                                                  |
 | `unavailable`     | 5xx, a timeout or a network error, after the retries                    |
 | `invalid_token`   | an access token that fails verification                                 |
+| `invalid_webhook` | a webhook that fails verification: signature, headers or timestamp      |
 | `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
 
 It also carries what Mesub answered:
@@ -602,6 +662,12 @@ fake.fail('outage'); // every access and subscriptions call answers 503, until f
 fake.fail({ status: 429, code: 'rate_limited', retryAfter: 2 });
 fake.requests; // every call received: method, path, query, headers, body
 fake.reset(); // between tests
+
+// A webhook, signed with fake.webhookSecret, which fake.client() verifies with.
+const { body, headers } = await fake.webhook('subscription.renewed', {
+    subscription: { external_id: 'user_42' },
+});
+await request(app).post('/webhooks/mesub').set(headers).type('json').send(body);
 ```
 
 Its answers are stale at once (`revalidate_after: 0`), so a change shows on
@@ -610,7 +676,9 @@ the next call while the outage fallback still has them; pass
 wallet granted is not found by its external id. `subscriptions.create` then
 `submit` land at once and grant the plan; `addSubscription` adds one for
 `retrieve` and `list`. Pass `fake.fetch` to your own `new Mesub()` with
-`fake.apiKey` and `fake.baseUrl` if you build the client yourself.
+`fake.apiKey` and `fake.baseUrl` if you build the client yourself, and
+`fake.webhookSecret` as `webhookSecret`. `signWebhook(body, { secret })`
+signs a body of your own.
 
 ## Requirements
 

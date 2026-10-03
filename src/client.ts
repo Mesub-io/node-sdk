@@ -9,6 +9,7 @@ import { type ServerSubscription, Subscriptions } from './subscriptions.js';
 import { TokenVerifier, type VerifiedToken } from './tokens.js';
 import { type CallOptions, Transport } from './transport.js';
 import { accessAnswerFrom, accessListFrom } from './validate.js';
+import { webhookSecretOf, Webhooks } from './webhooks.js';
 
 /** What a guard decided, and on which answer. */
 export interface Decision {
@@ -75,6 +76,12 @@ export interface MesubOptions {
      * `hasAccess`, called directly, are not bound by it.
      */
     guardTimeout?: number;
+    /**
+     * The webhook endpoint's signing secret, `whsec_...`, for
+     * `webhooks.verify`. Defaults to `process.env.MESUB_WEBHOOK_SECRET`; none
+     * is needed until a webhook is verified.
+     */
+    webhookSecret?: string;
 }
 
 const DEFAULT_BASE_URL = 'https://api.mesub.io';
@@ -83,6 +90,8 @@ const DEFAULT_GUARD_TIMEOUT = 2_000;
 export class Mesub {
     /** Subscribing from your server: create, submit, retrieve and list. */
     readonly subscriptions: Subscriptions;
+    /** Checking the webhooks Mesub sends: `verify`. */
+    readonly webhooks: Webhooks;
     /** @internal */
     protected readonly transport: Transport;
     /** @internal */
@@ -111,6 +120,7 @@ export class Mesub {
         const baseUrl = baseUrlOf(options.baseUrl, DEFAULT_BASE_URL);
         const issuer = issuerOf(options.issuer, baseUrl);
         const headers = headersOf(options.headers);
+        const webhookSecret = webhookSecretOf(options.webhookSecret);
         if (options.fetch !== undefined && typeof options.fetch !== 'function') {
             throw new TypeError('fetch must be a function.');
         }
@@ -135,6 +145,7 @@ export class Mesub {
         this.subscriptions = new Subscriptions(this.transport, (subscription) =>
             this.landed(subscription),
         );
+        this.webhooks = new Webhooks(webhookSecret, (event) => this.landed(event.data));
         const store = options.cache ?? new MemoryStore<AccessAnswer | AccessList>();
         const staleness =
             options.maxStaleMs === undefined
@@ -354,7 +365,8 @@ export class Mesub {
     }
 
     /**
-     * A subscription `submit`, `retrieve` or `list` answered (#33): once it
+     * A subscription `submit`, `retrieve` or `list` answered (#33), or a
+     * verified webhook carried: once it
      * grants access (`active`, or `cancelled` before its end), the answers
      * cached for its customer that say no are dropped, by wallet, external
      * id and email, for its plan and in the list of every plan. Without it, a

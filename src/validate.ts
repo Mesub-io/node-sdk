@@ -6,6 +6,13 @@ import type {
     SubmitResult,
     SubscribeTransaction,
 } from './subscriptions.js';
+import type {
+    CreatedDetail,
+    PaymentFailedDetail,
+    RenewedDetail,
+    StoppedDetail,
+    WebhookEvent,
+} from './webhooks.js';
 
 /** One field of an answer: how to tell it is right, and what it should have been. */
 interface Field {
@@ -16,12 +23,19 @@ interface Field {
      * value rather than refused, so the answer still holds its type.
      */
     absent?: null;
+    /** A field the back leaves out when it has nothing to say: absent is fine, as is. */
+    optional?: true;
 }
 
 const STRING: Field = { check: (value) => typeof value === 'string', expected: 'a string' };
 const STRING_OR_NULL: Field = {
     check: (value) => value === null || typeof value === 'string',
     expected: 'a string or null',
+};
+const OPTIONAL_STRING: Field = { ...STRING, optional: true };
+const COUNT: Field = {
+    check: (value) => typeof value === 'number' && Number.isInteger(value) && value >= 0,
+    expected: 'a whole number',
 };
 const BOOLEAN: Field = { check: (value) => typeof value === 'boolean', expected: 'a boolean' };
 const OBJECT: Field = { check: isObject, expected: 'an object' };
@@ -222,6 +236,71 @@ function reasonProblem(reason: unknown): string | null {
     return reason === undefined || typeof reason === 'string' ? null : 'reason is not a string';
 }
 
+/**
+ * A webhook's body (Mesub-io/backend#144): its type, its date, the
+ * subscription as `retrieve` answers it, and the event's detail, checked
+ * field by field for the types this release knows. A type it does not know
+ * is only checked to be a string, like a status: one the back adds later
+ * must not turn every delivery into an error.
+ */
+const WEBHOOK = {
+    type: STRING,
+    created_at: DATE,
+    data: OBJECT,
+} satisfies Record<Exclude<keyof WebhookEvent, 'id'>, Field>;
+
+const DETAILS: Partial<Record<string, Record<string, Field>>> = {
+    'subscription.created': {
+        previous_id: OPTIONAL_STRING,
+    } satisfies Record<keyof CreatedDetail, Field>,
+    'subscription.renewed': {
+        amount: STRING,
+        mint: STRING,
+        period_start: DATE,
+        period_end: DATE,
+        signature: STRING,
+    } satisfies Record<keyof RenewedDetail, Field>,
+    'subscription.payment_failed': {
+        reason: STRING,
+        amount: STRING,
+        mint: STRING,
+        period_start: DATE_OR_NULL,
+        period_end: DATE_OR_NULL,
+        next_retry_at: DATE_OR_NULL,
+        retry_deadline: DATE_OR_NULL,
+        retries_left: COUNT,
+        retry_mode: STRING_OR_NULL,
+    } satisfies Record<keyof PaymentFailedDetail, Field>,
+    'subscription.stopped': {
+        reason: STRING,
+    } satisfies Record<keyof StoppedDetail, Field>,
+};
+
+/**
+ * A webhook whose signature verified, and `id`, its `webhook-id` header.
+ * Throws a MesubError `unexpected` on a body of another shape: Mesub signed
+ * it, so it is a back this release no longer agrees with.
+ */
+export function webhookEventFrom(body: unknown, id: string): WebhookEvent {
+    const { type, data } = (isObject(body) ? body : {}) as { type: string; data: unknown };
+    const { detail } = (isObject(data) ? data : {}) as { detail?: unknown };
+    const fields = DETAILS[type];
+    const problem =
+        problemWith(body, WEBHOOK) ??
+        problemWith(data, { ...SUBSCRIPTION, detail: OBJECT }, 'data') ??
+        (fields ? problemWith(detail, fields, 'data.detail') : null);
+
+    if (problem !== null) {
+        throw new MesubError(`Mesub sent a webhook this SDK cannot read: ${problem}.`, {
+            status: null,
+            code: 'unexpected',
+            body,
+        });
+    }
+
+    return { ...(body as Omit<WebhookEvent, 'id'>), id } as WebhookEvent;
+}
+
 /** The first item of a list that is not of those fields, or null when all are. */
 function firstProblem(
     items: unknown[],
@@ -268,6 +347,7 @@ function problemWith(body: unknown, fields: Record<string, Field>, label?: strin
     for (const [name, field] of Object.entries(fields)) {
         const value = (body as Record<string, unknown>)[name];
 
+        if (value === undefined && field.optional) continue;
         if (value === undefined && 'absent' in field) {
             (body as Record<string, unknown>)[name] = field.absent;
             continue;
