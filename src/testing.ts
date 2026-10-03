@@ -11,6 +11,9 @@
  * fake.grant(wallet, 'pro');
  * const mesub = fake.client();
  * await mesub.hasAccess(wallet, 'pro'); // true
+ *
+ * const { body, headers } = await fake.webhook('subscription.renewed');
+ * await mesub.webhooks.verify(body, headers); // the event
  * ```
  */
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from 'jose';
@@ -23,6 +26,7 @@ import type {
     ServerSubscriptionList,
     SubscribeTransaction,
 } from './subscriptions.js';
+import { signedHeaders, type WebhookEventType } from './webhooks.js';
 
 export interface FakeMesubOptions {
     /** Where the fake answers. Defaults to `https://api.mesub.test`. */
@@ -36,6 +40,35 @@ export interface FakeMesubOptions {
      * By default every slug exists.
      */
     plans?: string[];
+    /** What `webhook()` signs with, and `client()` verifies with. Defaults to a fixed `whsec_` secret. */
+    webhookSecret?: string;
+}
+
+/** A webhook as Mesub posts it: the exact body, and the three headers that sign it. */
+export interface SignedWebhook {
+    body: string;
+    headers: Record<string, string>;
+}
+
+export interface SignWebhookOptions {
+    /** The endpoint's secret, `whsec_...`. */
+    secret: string;
+    /** `webhook-id`. Defaults to a new `msg_fake_...` each time. */
+    id?: string;
+    /** `webhook-timestamp`, Unix seconds. Defaults to now. */
+    timestamp?: number;
+}
+
+/** What `FakeMesub.webhook` sends, on top of a made-up event of that type. */
+export interface FakeWebhookFields {
+    /** Fields of the subscription it carries. Defaults to an active, paid one on `pro`. */
+    subscription?: Partial<ServerSubscription>;
+    /** The event's detail. Defaults to a plausible one for the type. */
+    detail?: Record<string, unknown>;
+    /** When the event happened. Defaults to now. */
+    created_at?: string;
+    id?: string;
+    timestamp?: number;
 }
 
 /** One call the fake received. */
@@ -96,6 +129,10 @@ const OUTAGE: FakeFailure = {
 };
 
 const KID = 'fake-key-1';
+/** 24 bytes, as Mesub's secrets are. Only ever a test's. */
+const FAKE_WEBHOOK_SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
+const FAKE_WALLET = '11111111111111111111111111111111';
+const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const PERIOD_MS = 30 * 24 * 3600 * 1000;
 const REASONS: Record<number, string> = {
     400: 'Bad Request',
@@ -117,6 +154,7 @@ export class FakeMesub {
     readonly baseUrl: string;
     readonly apiKey: string;
     readonly projectId: string;
+    readonly webhookSecret: string;
     /** Every call received, oldest first. */
     readonly requests: FakeRequest[] = [];
     /** Hand it to `new Mesub({ fetch })`, or use `client()`. */
@@ -134,6 +172,7 @@ export class FakeMesub {
         this.apiKey = options.apiKey ?? 'SUB_test_fake';
         this.projectId = options.projectId ?? 'proj_test';
         this.#plans = options.plans ? new Set(options.plans) : null;
+        this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
         this.fetch = (input, init) => this.#handle(input, init);
     }
 
@@ -141,13 +180,16 @@ export class FakeMesub {
      * A client wired to this fake: its key, base URL and fetch, and no retry
      * unless asked, so a failure shows at once. Any other option is passed on.
      */
-    client(options: Omit<MesubOptions, 'apiKey' | 'baseUrl' | 'fetch'> = {}): Mesub {
+    client(
+        options: Omit<MesubOptions, 'apiKey' | 'baseUrl' | 'fetch' | 'webhookSecret'> = {},
+    ): Mesub {
         return new Mesub({
             maxRetries: 0,
             ...options,
             apiKey: this.apiKey,
             baseUrl: this.baseUrl,
             fetch: this.fetch,
+            webhookSecret: this.webhookSecret,
         });
     }
 
@@ -190,27 +232,34 @@ export class FakeMesub {
     addSubscription(
         fields: Partial<ServerSubscription> & { wallet: string; plan: string },
     ): ServerSubscription {
-        const now = new Date().toISOString();
-        const subscription: ServerSubscription = {
-            id: this.#nextId(),
-            status: 'active',
-            access: true,
-            payment_status: 'paid',
-            email: null,
-            external_id: null,
-            current_period_start: now,
-            current_period_end: null,
-            next_charge_at: null,
-            next_retry_at: null,
-            retry_deadline: null,
-            access_until: null,
-            created_at: now,
-            confirmed_at: now,
-            ...fields,
-        };
+        const subscription = this.#subscription(fields);
 
         this.#subscriptions.push(subscription);
         return subscription;
+    }
+
+    /**
+     * A webhook of that type, as Mesub posts it to an endpoint: a made-up
+     * subscription and detail, unless `fields` say otherwise, signed with
+     * `webhookSecret`. Post it to your own handler, or hand it to
+     * `webhooks.verify` of a `client()`. Nothing is added to the fake.
+     */
+    async webhook(type: WebhookEventType, fields: FakeWebhookFields = {}): Promise<SignedWebhook> {
+        const now = new Date();
+        const payload = {
+            type,
+            created_at: fields.created_at ?? now.toISOString(),
+            data: {
+                ...this.#subscription({ wallet: FAKE_WALLET, plan: 'pro', ...fields.subscription }),
+                detail: fields.detail ?? detailOf(type, now),
+            },
+        };
+
+        return signWebhook(payload, {
+            secret: this.webhookSecret,
+            ...(fields.id !== undefined && { id: fields.id }),
+            ...(fields.timestamp !== undefined && { timestamp: fields.timestamp }),
+        });
     }
 
     /**
@@ -254,6 +303,30 @@ export class FakeMesub {
             jwk: { ...(await exportJWK(publicKey)), kid: KID, alg: 'ES256', use: 'sig' },
         }));
         return this.#keys;
+    }
+
+    #subscription(
+        fields: Partial<ServerSubscription> & Pick<ServerSubscription, 'wallet' | 'plan'>,
+    ): ServerSubscription {
+        const now = new Date().toISOString();
+
+        return {
+            id: this.#nextId(),
+            status: 'active',
+            access: true,
+            payment_status: 'paid',
+            email: null,
+            external_id: null,
+            current_period_start: now,
+            current_period_end: null,
+            next_charge_at: null,
+            next_retry_at: null,
+            retry_deadline: null,
+            access_until: null,
+            created_at: now,
+            confirmed_at: now,
+            ...fields,
+        };
     }
 
     #nextId(): string {
@@ -437,6 +510,49 @@ export class FakeMesub {
 
 function keyOf(asked: Asked, plan: string): string {
     return `${asked.kind}:${asked.value}\n${plan}`;
+}
+
+let webhookIds = 0;
+
+/**
+ * Signs a body as Mesub does (Standard Webhooks, HMAC-SHA256 of
+ * `id.timestamp.body`), for a webhook of your own making: an object is sent
+ * as its JSON, a string as is. `FakeMesub.webhook` builds the body for you.
+ */
+export async function signWebhook(
+    payload: unknown,
+    options: SignWebhookOptions,
+): Promise<SignedWebhook> {
+    const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const id = options.id ?? `msg_fake_${(webhookIds += 1)}`;
+    const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000);
+
+    return { body, headers: await signedHeaders(options.secret, id, timestamp, body) };
+}
+
+/** A plausible detail for each type that carries one, as the back writes it. */
+function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
+    const start = now.toISOString();
+    const end = new Date(now.getTime() + PERIOD_MS).toISOString();
+    const paid = { amount: '9990000', mint: USDC, period_start: start, period_end: end };
+
+    switch (type) {
+        case 'subscription.renewed':
+            return { ...paid, signature: 'fake_signature' };
+        case 'subscription.payment_failed':
+            return {
+                ...paid,
+                reason: 'insufficient-balance',
+                next_retry_at: new Date(now.getTime() + 24 * 3600 * 1000).toISOString(),
+                retry_deadline: null,
+                retries_left: 1,
+                retry_mode: 'scheduled',
+            };
+        case 'subscription.stopped':
+            return { reason: 'insufficient-balance' };
+        default:
+            return {};
+    }
 }
 
 function nothing(asked: Asked, plan: string): AccessAnswer {
