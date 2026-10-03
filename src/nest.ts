@@ -11,7 +11,10 @@ import {
 import type { Mesub } from './client.js';
 import {
     accessOf,
+    askerOf,
+    checkAsker,
     checkPlan,
+    type CustomerOption,
     type Denial,
     defaultClient,
     denialBody,
@@ -21,13 +24,14 @@ import {
     type PlanOption,
     plansOf,
     type TokenOption,
-    tokensOf,
     UNAVAILABLE_RETRY_AFTER_S,
 } from './guard.js';
 import type { HeaderSource } from './tokens.js';
 
 export { MesubError } from './errors.js';
-export type { Denial, DenialReason, PlanOption } from './guard.js';
+export type { CustomerOption, Denial, DenialReason, PlanOption } from './guard.js';
+export type { Asked } from './customer.js';
+export type { Customer } from './answer.js';
 
 /** Who is asking and what Mesub answered, as `@MesubAccess()` gives it. */
 export type MesubAccess = Access;
@@ -48,6 +52,13 @@ export interface RequirePlanOptions {
      * place looked at.
      */
     token?: TokenOption<MesubRequest>;
+    /**
+     * Who is asking, from your own auth, instead of a Mesub token:
+     * `(req) => ({ external_id: req.user.id })`, a wallet or an email. Null when
+     * nobody is signed in. It must come from a session you verified, never
+     * from the request itself. Not with `token`.
+     */
+    customer?: CustomerOption<MesubRequest>;
     /**
      * Answer a refusal yourself by throwing your own exception, with your own
      * status and body. It may be async: what it returns is awaited, and a
@@ -74,10 +85,11 @@ function setHeader(response: HeaderSink, name: string, value: string) {
  * is a slug, a list of which any one will do (`['pro', 'team']`), or either
  * worked out per request. `@MesubAccess()` says which one let it through.
  *
- * The subscriber is who the Mesub access token says, from the Authorization
+ * With `customer`, who is asking is who your own auth says, and no Mesub
+ * token is read. Otherwise the subscriber is who the Mesub access token says, from the Authorization
  * header or the `mesub-token` cookie (tried too when the bearer is not a Mesub
  * token), or where `token` says. Refusals throw an `HttpException` of 401
- * (no valid token), 402 (Mesub said no) or 503 with Retry-After (Mesub
+ * (nobody signed in), 402 (Mesub said no) or 503 with Retry-After (Mesub
  * unreachable, with no answer known for that subscriber). Integration errors
  * are thrown as they are, for Nest to log and answer 500.
  */
@@ -86,15 +98,15 @@ export function RequirePlan(
     options: RequirePlanOptions = {},
 ): Type<CanActivate> {
     checkPlan(plan);
+    checkAsker(options);
 
     class MesubPlanGuard implements CanActivate {
         async canActivate(context: ExecutionContext): Promise<boolean> {
             const http = context.switchToHttp();
             const request = http.getRequest<MesubRequest>();
-            const outcome = await guard(
-                options.client ?? defaultClient(),
-                tokensOf(request, options.token),
-                () => plansOf(plan, request),
+            const client = options.client ?? defaultClient();
+            const outcome = await guard(client, await askerOf(client, request, options), () =>
+                plansOf(plan, request),
             );
 
             if (outcome.allowed) {

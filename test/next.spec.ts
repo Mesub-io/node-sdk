@@ -140,6 +140,7 @@ describe('withMesub', () => {
                 mesub: {
                     userId: 'user_1',
                     wallet: WALLET,
+                    customer: { kind: 'wallet', value: WALLET },
                     plan: 'pro',
                     answer: answer(),
                     stale: false,
@@ -309,6 +310,95 @@ describe('withMesub', () => {
 
             expect(found.status).toBe(200);
             expect(ignored.status).toBe(401);
+        });
+    });
+
+    describe('customer option: who is asking, from the merchant own auth', () => {
+        it('lets a customer through by external id, with no Mesub token at all', async () => {
+            const queries: Record<string, string>[] = [];
+            const { client, calls } = mesub({
+                access: (_init, url) => {
+                    queries.push(Object.fromEntries(url!.searchParams));
+                    return Response.json(answer());
+                },
+            });
+
+            const response = await route(client, {
+                customer: () => ({ external_id: 'user_42' }),
+            })(get(), context);
+
+            expect(response.status).toBe(200);
+            expect(queries).toEqual([{ external_id: 'user_42', plan: 'pro' }]);
+            expect(calls).toEqual(['/v1/access']);
+            expect(((await response.json()) as { mesub: MesubAccess }).mesub).toEqual({
+                userId: null,
+                wallet: WALLET,
+                customer: { kind: 'external_id', value: 'user_42' },
+                plan: 'pro',
+                answer: answer(),
+                stale: false,
+            });
+        });
+
+        it('hands the request to an async resolver', async () => {
+            const { client } = mesub();
+            const customer = vi.fn(async (request: Request) => ({
+                email: request.headers.get('x-session-email')!,
+            }));
+
+            const request = get({ 'x-session-email': 'ada@example.com' });
+            const response = await route(client, { customer })(request, context);
+
+            expect(response.status).toBe(200);
+            expect(customer).toHaveBeenCalledWith(request);
+        });
+
+        it.each([null, undefined])(
+            'answers 401 when it returns %s, a Mesub token or not',
+            async (none) => {
+                const { client, calls } = mesub();
+
+                const response = await route(client, { customer: () => none })(
+                    get(await bearer()),
+                    context,
+                );
+
+                expect(response.status).toBe(401);
+                expect(calls).toEqual([]);
+            },
+        );
+
+        it('answers 402 when Mesub says no for that customer', async () => {
+            const { client } = mesub({
+                access: () =>
+                    Response.json(answer({ access: false, status: 'none', wallet: null })),
+            });
+
+            const response = await route(client, { customer: () => WALLET })(get(), context);
+
+            expect(response.status).toBe(402);
+        });
+
+        it('throws what cannot be asked about: a broken integration, not a refusal', async () => {
+            const { client } = mesub();
+
+            await expect(
+                route(client, { customer: () => ({ external_id: 'u', email: 'a@b.co' }) as never })(
+                    get(),
+                    context,
+                ),
+            ).rejects.toThrow(TypeError);
+            await expect(route(client, { customer: () => '' })(get(), context)).rejects.toThrow(
+                TypeError,
+            );
+        });
+
+        it('refuses to be built with a token too', () => {
+            const { client } = mesub();
+
+            expect(() => route(client, { customer: () => null, token: () => null })).toThrow(
+                TypeError,
+            );
         });
     });
 

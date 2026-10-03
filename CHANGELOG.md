@@ -62,6 +62,11 @@ The first version published to npm. Requires Node 22 or later.
 - The guards try the bearer, then the `mesub-token` cookie: a bearer of your
   own (your session JWT) no longer hides the cookie. The `token` option says
   where else the token travels, and is then the only place looked at (#72).
+- The guards take `customer`, a function of the request returning who your
+  own login says is asking (`{ external_id }`, a wallet or `{ email }`, null
+  for nobody): no Mesub token is read then, so a guard needs nothing of
+  `@mesub/react`. Not with `token`. `mesub.customer` says who was asked
+  about; `mesub.userId` and `mesub.wallet` may now be null (#79).
 - An async `onDenied` is awaited: what it throws or rejects with goes where
   an integration error goes, `next(err)` under Express 4 as under 5, thrown
   in Next and Nest. In Nest, an exception it throws after an `await` is the
