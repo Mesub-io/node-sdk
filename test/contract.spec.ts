@@ -45,6 +45,8 @@ const FIELDS: Record<
     plan: 'string',
     access: 'boolean',
     status: 'string',
+    paused: 'boolean',
+    end_reason: 'string|null',
     payment_status: 'string',
     subscribed_since: 'string|null',
     first_subscribed_at: 'string|null',
@@ -62,6 +64,8 @@ const SUBSCRIPTION_FIELDS: Record<keyof ServerSubscription, 'string' | 'boolean'
     {
         id: 'string',
         status: 'string',
+        paused: 'boolean',
+        end_reason: 'string|null',
         access: 'boolean',
         payment_status: 'string',
         plan: 'string|null',
@@ -113,7 +117,15 @@ const STATUSES = [
     'none',
 ];
 const PAYMENT_STATUSES = ['paid', 'late', 'none'];
-const OUTCOMES = ['PAID', 'SKIPPED', 'REJECTED'];
+const OUTCOMES = ['PAID', 'SKIPPED', 'REJECTED', 'BLOCKED'];
+const END_REASONS = [
+    'cancelled',
+    'plan_removed',
+    'plan_replaced',
+    'plan_ended',
+    'authority_closed',
+    'closed',
+];
 
 /** A wallet nobody subscribed with: valid base58, never used by the fixture. */
 const STRANGER = 'SysvarC1ock11111111111111111111111111111111';
@@ -165,6 +177,20 @@ describe.skipIf(!env.url)('contract with the back', () => {
 
             expect(STATUSES).toContain(answer.status);
             expect(PAYMENT_STATUSES).toContain(answer.payment_status);
+        });
+
+        it('answers an end reason the SDK knows, only on an ended status', async () => {
+            const answer = await mesub().access(env.wallet, env.plan);
+
+            expect([...END_REASONS, null]).toContain(answer.end_reason);
+            if (answer.status !== 'ended') expect(answer.end_reason).toBeNull();
+        });
+
+        it('answers a stranger as neither paused nor ended for a reason', async () => {
+            await expect(mesub().access(STRANGER, env.plan)).resolves.toMatchObject({
+                paused: false,
+                end_reason: null,
+            });
         });
 
         it('answers a wallet that never subscribed as none, without access', async () => {
@@ -284,7 +310,10 @@ describe.skipIf(!env.url)('contract with the back', () => {
 
             expect(Object.keys(page).sort()).toEqual(['data', 'has_more']);
             expect(page.has_more).toBe(false);
-            for (const subscription of page.data) expectShape(subscription, SUBSCRIPTION_FIELDS);
+            for (const subscription of page.data) {
+                expectShape(subscription, SUBSCRIPTION_FIELDS);
+                expect([...END_REASONS, null]).toContain(subscription.end_reason);
+            }
             expect(
                 page.data.map(({ plan, wallet, status, access }) => ({
                     plan,

@@ -9,6 +9,7 @@ export type {
     AccessList,
     AccessOptions,
     Customer,
+    EndReason,
     PaymentStatus,
     PullOutcome,
     ServedAttempt,

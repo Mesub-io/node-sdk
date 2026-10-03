@@ -95,6 +95,35 @@ await mesub.access({ external_id: user.id }, 'pro'); // status, dates, next char
 await mesub.access({ external_id: user.id }, 'pro', { attempts: true }); // plus the last pull attempts
 ```
 
+#### What the answer says
+
+`access` is the only field a guard needs. `status` says where the
+subscription stands: `none` (never subscribed), `pending`, `active`, `unpaid`
+(a pull missed), `cancelled`, `stopped` (no more pulls), `ended`, `failed` or
+`superseded`. Three things the status alone does not say:
+
+- **`cancelled`** is only read while the cancellation runs: access, if any,
+  holds until `access_until`. Once that end date passed, the same
+  subscription reads `ended`, with `end_reason: 'cancelled'`.
+- **`end_reason`** says why an `ended` one ended, and is null on every other
+  status: `cancelled`, `plan_removed` (the plan was deleted), `plan_replaced`
+  (another plan stands at its address), `plan_ended` (past the plan's own end
+  date), `authority_closed` (the wallet's authorisation was closed outside
+  Mesub) or `closed` (the subscriber closed it through Mesub). Null too on
+  one that ended before Mesub recorded reasons.
+- **`paused`** is true on a seat parked over your project's cap: its `status`
+  stays as it was, nothing is charged (`payment_status` is `none`), and
+  `access` runs to the end of the period already paid, in `access_until`.
+
+With `{ attempts: true }`, each attempt has an `outcome`: `PAID`, `SKIPPED`
+(nothing was sent, the chain said it could not work), `REJECTED` (sent, and
+refused for a reason that is the subscriber's) or `BLOCKED` (nothing was
+tried, and none of it the subscriber's doing: it never counts against them).
+
+Mesub may add a status, an end reason or an outcome: the SDK hands back one
+it does not know rather than throw, so keep a default branch. `paused` and
+`end_reason` are read as `false` and `null` from an API that predates them.
+
 #### The guards, with your own login
 
 The guards do the same in one line, and answer the refusals themselves: give
@@ -445,7 +474,7 @@ again for fresh terms, and sign those), `conflict` / `transaction_expired` (crea
 Reading back:
 
 ```ts
-await mesub.subscriptions.retrieve(id); // status, access, dates, wallet, email, external_id
+await mesub.subscriptions.retrieve(id); // status, paused, end_reason, access, dates, wallet, email, external_id
 await mesub.subscriptions.list({ external_id: user.id }); // { data, has_more }, newest first
 for await (const sub of mesub.subscriptions.listAll({ email: 'a@b.co', plan: 'pro' })) {
     // every page, one call per page
@@ -456,7 +485,9 @@ for await (const sub of mesub.subscriptions.listAll({ email: 'a@b.co', plan: 'pr
 [Who to ask about](#who-to-ask-about)): exactly one of `wallet`, `external_id`
 and `email`, trimmed and lowercased the same way, a `TypeError` otherwise. It
 also answers `expired` checkouts, which nobody signed: `access` is false on
-them.
+them. `status`, `paused` and `end_reason` read as on `access` (see
+[What the answer says](#what-the-answer-says)): a `cancelled` subscription is
+`ended`, with `end_reason: 'cancelled'`, once its end date passed.
 
 ## Webhooks
 
@@ -502,7 +533,8 @@ client: `await verifyWebhook(await request.text(), request.headers)`.
   `subscription.renewed`, `subscription.payment_failed`,
   `subscription.stopped` (no more pulls), `subscription.cancelled`,
   `subscription.resumed`, `subscription.ended` (the plan ended or was
-  deleted, or the wallet closed its delegation), `subscription.expired` (a
+  deleted, or the wallet closed its delegation: `data.end_reason` says
+  which), `subscription.expired` (a
   checkout nobody signed), and `test`, sent from the dashboard with a
   made-up subscription. Keep a default branch: a newer type is handed back
   too.

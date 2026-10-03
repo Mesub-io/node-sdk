@@ -30,6 +30,35 @@ describe('FakeMesub', () => {
         });
     });
 
+    it('answers paused and end_reason, false and null unless a test sets them', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+
+        fake.grant(WALLET, 'pro');
+        fake.deny(WALLET, 'team', { status: 'ended', end_reason: 'plan_removed' });
+        fake.grant(WALLET, 'solo', { paused: true, payment_status: 'none' });
+        const added = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+
+        await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+            paused: false,
+            end_reason: null,
+        });
+        await expect(mesub.access(WALLET, 'never')).resolves.toMatchObject({
+            paused: false,
+            end_reason: null,
+        });
+        await expect(mesub.access(WALLET, 'team')).resolves.toMatchObject({
+            access: false,
+            status: 'ended',
+            end_reason: 'plan_removed',
+        });
+        await expect(mesub.access(WALLET, 'solo')).resolves.toMatchObject({
+            access: true,
+            paused: true,
+        });
+        expect(added).toMatchObject({ paused: false, end_reason: null });
+    });
+
     it('builds clients of the core Mesub', () => {
         expect(new FakeMesub().client()).toBeInstanceOf(Mesub);
     });

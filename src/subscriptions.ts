@@ -1,4 +1,4 @@
-import type { Customer, PaymentStatus } from './answer.js';
+import type { Customer, EndReason, PaymentStatus } from './answer.js';
 import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
 import { type QueryValue, type RequestOptions, type Transport, sleep } from './transport.js';
@@ -20,7 +20,8 @@ import {
  * A subscription's status. Unlike `/v1/access`, may be `expired`: a checkout
  * nobody signed (Mesub-io/backend#139). `superseded` is a stopped one the
  * wallet came back over (Mesub-io/backend#213): a newer row holds the
- * subscription. Never `none`: a row exists.
+ * subscription. Never `none`: a row exists. `cancelled` reads `ended` once
+ * its end date passed, as on `/v1/access` (Mesub-io/backend#236).
  */
 export type ServerSubscriptionStatus =
     | 'pending'
@@ -37,6 +38,10 @@ export type ServerSubscriptionStatus =
 export interface ServerSubscription {
     id: string;
     status: ServerSubscriptionStatus;
+    /** A seat parked over the project's cap, status unchanged, as `/v1/access` answers it. */
+    paused: boolean;
+    /** Why it ended, only on `ended`, as `/v1/access` answers it. */
+    end_reason: EndReason | null;
     /** Whether it grants access now, as `/v1/access` answers it. */
     access: boolean;
     /** `paid`, `late` or `none`, as `/v1/access` answers it. */
@@ -89,7 +94,10 @@ export interface SubscribeTransaction {
  * and the subscription read back is `active` or `cancelled`, that one.
  */
 export interface SubmitResult {
-    /** `active`, or `cancelled` if the wallet set an end; `pending` or `failed` with a `reason`. */
+    /**
+     * `active`, or `cancelled` if the wallet set an end (`ended` once that
+     * end passed); `pending` or `failed` with a `reason`.
+     */
     subscription: ServerSubscription;
     /**
      * Mesub's own, set when nothing landed (`pending`) or what landed is not
