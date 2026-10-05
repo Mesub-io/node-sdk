@@ -177,7 +177,7 @@ export class Mesub {
         const slug = planOf(plan);
 
         // Attempts skip the cache both ways: no key to compute.
-        if (options.attempts === true) return this.ask(asked, slug, null);
+        if (options.attempts === true) return this.ask(asked, slug, null, boundOf(options));
 
         return this.ask(asked, slug, await this.slotOf(asked));
     }
@@ -441,6 +441,19 @@ export class Mesub {
 }
 
 type HmacKey = Awaited<ReturnType<typeof crypto.subtle.importKey>>;
+
+/**
+ * The deadline and the 429 rule the widget routes pass with `attempts`, as a
+ * guard's call: read here, never named by `AccessOptions`.
+ */
+function boundOf(options: AccessOptions): CallOptions {
+    const { deadline, retryRateLimited } = options as CallOptions;
+
+    return {
+        ...(deadline !== undefined && { deadline }),
+        ...(retryRateLimited !== undefined && { retryRateLimited }),
+    };
+}
 
 /** Where a customer's answers are cached: see `slotOf`. */
 interface Slot {

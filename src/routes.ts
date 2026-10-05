@@ -4,6 +4,7 @@ import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
 import type { Plan } from './plans.js';
 import type { ServerSubscription, SubscriptionAttempt } from './subscriptions.js';
+import type { CallOptions } from './transport.js';
 
 /**
  * The routes `@mesub/react` calls on your own server, so the browser never
@@ -70,6 +71,21 @@ type Action = (typeof ACTIONS)[number];
 /** An id as Mesub writes them: nothing that could rewrite the path. */
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * How long one widget request gives Mesub for all its reads, in milliseconds:
+ * a browser is waiting, and a detail or a list makes several calls.
+ */
+const WIDGET_READ_TIME = 10_000;
+
+/**
+ * How every read of one request is made, as a guard's: cut at one deadline,
+ * and a 429 handed on at once, never waited out. The client's methods pass
+ * their options to the transport whole, which is how these reach it.
+ */
+function bounded(): CallOptions {
+    return { deadline: Date.now() + WIDGET_READ_TIME, retryRateLimited: false };
+}
 
 function refusal(status: number, code: string, message: string): WidgetResponse {
     return { status, body: { error: { code, message } } };
@@ -223,20 +239,21 @@ const planLists = new WeakMap<Mesub, PlanList>();
  * and null with no call for a slug that is not in it. A failed read is
  * forgotten at once.
  */
-async function planOf(client: Mesub, slug: string): Promise<Plan | null> {
+async function planOf(client: Mesub, slug: string, read: CallOptions): Promise<Plan | null> {
     let list = planLists.get(client);
 
     if (!list || list.until <= Date.now()) {
-        const read: PlanList = { plans: client.plans.list(), until: Infinity };
+        // Shared while in flight: bound by the first asker's deadline, as a guard's flight.
+        const fresh: PlanList = { plans: client.plans.list(read), until: Infinity };
 
-        list = read;
-        planLists.set(client, read);
-        read.plans.then(
+        list = fresh;
+        planLists.set(client, fresh);
+        fresh.plans.then(
             () => {
-                read.until = Date.now() + PLAN_TTL_MS;
+                fresh.until = Date.now() + PLAN_TTL_MS;
             },
             () => {
-                if (planLists.get(client) === read) planLists.delete(client);
+                if (planLists.get(client) === fresh) planLists.delete(client);
             },
         );
     }
@@ -253,6 +270,7 @@ async function planOf(client: Mesub, slug: string): Promise<Plan | null> {
 async function upcomingOf(
     client: Mesub,
     subscription: ServerSubscription,
+    read: CallOptions,
 ): Promise<WidgetUpcoming[]> {
     const { status, plan } = subscription;
     const next =
@@ -269,7 +287,7 @@ async function upcomingOf(
 
     if (plan !== null && SLUG.test(plan)) {
         try {
-            price = await planOf(client, plan);
+            price = await planOf(client, plan, read);
         } catch (error) {
             if (!(error instanceof MesubError)) throw error;
         }
@@ -334,16 +352,20 @@ function unlisted(code: string, message: string): Payments {
  * (Mesub-io/backend#289) answers a 404 that names no code for it: its payments are then
  * read the older way, without a total.
  */
-async function paymentsOf(client: Mesub, subscription: ServerSubscription): Promise<Payments> {
+async function paymentsOf(
+    client: Mesub,
+    subscription: ServerSubscription,
+    read: CallOptions,
+): Promise<Payments> {
     try {
-        const page = await client.subscriptions.attempts(subscription.id);
+        const page = await client.subscriptions.attempts(subscription.id, {}, read);
 
         return { payments: page.data.map(payment), paid: page.paid, payments_error: null };
     } catch (error) {
         if (!(error instanceof MesubError)) throw error;
         // No such route, not no such subscription: that one names its code.
         if (error.status === 404 && error.apiCode === null) {
-            return olderPaymentsOf(client, subscription);
+            return olderPaymentsOf(client, subscription, read);
         }
 
         // The subscription was read: it is answered without them, so the dialog still opens.
@@ -357,7 +379,11 @@ async function paymentsOf(client: Mesub, subscription: ServerSubscription): Prom
  * that wallet and plan, naming no id. They are this one's only when the
  * answer started when this one did. No total: five attempts are not one.
  */
-async function olderPaymentsOf(client: Mesub, subscription: ServerSubscription): Promise<Payments> {
+async function olderPaymentsOf(
+    client: Mesub,
+    subscription: ServerSubscription,
+    read: CallOptions,
+): Promise<Payments> {
     const { plan, wallet, confirmed_at: confirmedAt } = subscription;
     const listed = (payments: WidgetPayment[]): Payments => ({
         payments,
@@ -372,7 +398,7 @@ async function olderPaymentsOf(client: Mesub, subscription: ServerSubscription):
     }
 
     try {
-        const answer = await client.access({ wallet }, plan, { attempts: true });
+        const answer = await client.access({ wallet }, plan, { attempts: true, ...read });
         const same =
             confirmedAt !== null &&
             answer.subscribed_since !== null &&
@@ -413,6 +439,7 @@ export async function handleWidget(
 ): Promise<WidgetResponse> {
     const segments = request.path.split('?')[0]!.split('/').filter(Boolean);
     const method = request.method.toUpperCase();
+    const read = bounded();
 
     try {
         // A plan is public: the page shows its price before anybody signs in.
@@ -423,7 +450,7 @@ export async function handleWidget(
                 return refusal(404, 'plan_not_found', 'No such plan.');
             }
 
-            const plan = await planOf(client, slug);
+            const plan = await planOf(client, slug, read);
 
             return plan
                 ? { status: 200, body: plan }
@@ -442,12 +469,12 @@ export async function handleWidget(
             if (!ID.test(id)) return NO_SUBSCRIPTION();
 
             // Theirs first: another customer's is not read any further.
-            const subscription = await client.subscriptions.retrieve(id);
+            const subscription = await client.subscriptions.retrieve(id, read);
             if (!isTheirs(subscription, asked)) return NO_SUBSCRIPTION();
 
             const [upcoming, payments] = await Promise.all([
-                upcomingOf(client, subscription),
-                paymentsOf(client, subscription),
+                upcomingOf(client, subscription, read),
+                paymentsOf(client, subscription, read),
             ]);
             const detail: WidgetSubscriptionDetail = {
                 subscription: shown(subscription),
@@ -462,17 +489,17 @@ export async function handleWidget(
             if (segments.length !== 1) return NOT_FOUND();
 
             const params = { ...customerParam(asked), limit: LIST_PAGE };
-            let page = await client.subscriptions.list(params);
+            let page = await client.subscriptions.list(params, read);
             const subscriptions = [...page.data];
 
             const more = () => page.has_more && page.data.length > 0;
 
             // One browser request is LIST_MAX_PAGES calls to Mesub at most.
-            for (let read = 1; more() && read < LIST_MAX_PAGES; read++) {
-                page = await client.subscriptions.list({
-                    ...params,
-                    starting_after: page.data.at(-1)!.id,
-                });
+            for (let pages = 1; more() && pages < LIST_MAX_PAGES; pages++) {
+                page = await client.subscriptions.list(
+                    { ...params, starting_after: page.data.at(-1)!.id },
+                    read,
+                );
                 subscriptions.push(...page.data);
             }
 
@@ -525,7 +552,7 @@ export async function handleWidget(
         if (!known.includes(step)) return NOT_FOUND();
 
         // Before anything is built or confirmed: is it theirs at all.
-        const subscription = await client.subscriptions.retrieve(id);
+        const subscription = await client.subscriptions.retrieve(id, read);
         if (!isTheirs(subscription, asked)) return NO_SUBSCRIPTION();
 
         if (step === 'submit') {

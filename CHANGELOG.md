@@ -168,6 +168,13 @@ answer this request.`: never the SDK's own message, which may name your
 - `mesubRouteHandlers` counts the 64 kB a body may weigh in bytes, as
   `mesubRoutes` does: it answers 413 on a `Content-Length` over it without
   reading, and stops reading at the limit otherwise (#101).
+- The routes never hold a browser for Mesub: every read of one request (the
+  plan list, a subscription, its attempts, a list, and the read before a
+  submit, a cancel, a resume or a close) shares one deadline of 10 s, and a
+  429 is handed on at once with its `Retry-After`, never waited out and
+  retried. `submit` and the confirms keep their own timeouts, and the same
+  methods called from your code keep the client's `timeout` and `maxRetries`
+  (#99).
 
 ### Webhooks
 
