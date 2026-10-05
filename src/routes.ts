@@ -179,7 +179,7 @@ export interface WidgetPayment {
     amount: string;
     /** Mesub's short reason, null on a paid one. */
     reason: string | null;
-    /** Null when nothing was sent. */
+    /** The transaction that paid. Null on every outcome but `paid`. */
     signature: string | null;
     /** A retry of a missed charge. Null from a Mesub that does not say. */
     retry: boolean | null;
