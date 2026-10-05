@@ -121,12 +121,12 @@ describe('FakeMesub', () => {
 
         const set = fake.setAttempts(id, [
             {},
-            { outcome: 'REJECTED', reason: 'insufficient-balance' },
+            { outcome: 'rejected', reason: 'insufficient-balance' },
         ]);
 
         expect(set[0]).toMatchObject({
             id: expect.stringMatching(/^att_fake_/),
-            outcome: 'PAID',
+            outcome: 'paid',
             reason: null,
             amount: '9990000',
             retry: false,
@@ -161,7 +161,7 @@ describe('FakeMesub', () => {
         const set = fake.setAttempts(id, [
             { attempted_at: day(1) },
             { attempted_at: day(3), retry: true, retry_number: 2, retries_allowed: 3 },
-            { attempted_at: day(2), outcome: 'SKIPPED', reason: 'insufficient-balance' },
+            { attempted_at: day(2), outcome: 'skipped', reason: 'insufficient-balance' },
             ...[4, 5, 6, 7].map((n) => ({ attempted_at: day(n) })),
         ]);
 
@@ -238,7 +238,7 @@ describe('FakeMesub', () => {
     it('answers attempts when asked', async () => {
         const fake = new FakeMesub();
         const attempt = {
-            outcome: 'PAID' as const,
+            outcome: 'paid' as const,
             reason: null,
             amount: '1000000',
             attempted_at: '2026-10-01T00:00:00.000Z',

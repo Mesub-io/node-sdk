@@ -274,7 +274,7 @@ describe('access', () => {
                 'an attempt without an amount',
                 without('attempts', [
                     {
-                        outcome: 'PAID',
+                        outcome: 'paid',
                         reason: null,
                         attempted_at: START.toISOString(),
                         signature: null,
@@ -284,7 +284,7 @@ describe('access', () => {
             ],
             [
                 'an attempt that is not an object',
-                without('attempts', ['PAID']),
+                without('attempts', ['paid']),
                 'attempts[0] is not an object',
             ],
             ['a list', [answer()], 'the body is not an object'],
@@ -460,14 +460,14 @@ describe('access', () => {
             },
         );
 
-        it.each(['PAID', 'SKIPPED', 'REJECTED', 'BLOCKED'] as const)(
+        it.each(['paid', 'skipped', 'rejected', 'blocked'] as const)(
             'takes a %s attempt',
             async (outcome) => {
                 const body = answer({
                     attempts: [
                         {
                             outcome,
-                            reason: outcome === 'PAID' ? null : 'fee-payer-empty',
+                            reason: outcome === 'paid' ? null : 'fee-payer-empty',
                             amount: '1000000',
                             attempted_at: START.toISOString(),
                             signature: null,
@@ -564,7 +564,7 @@ describe('access', () => {
                 revalidate_after: 0,
                 attempts: [
                     {
-                        outcome: 'REJECTED',
+                        outcome: 'rejected',
                         reason: 'insufficient_funds',
                         amount: '1000000',
                         attempted_at: START.toISOString(),

@@ -43,10 +43,10 @@ export type EndReason =
 export type LateReason = 'insufficient_balance' | 'approval_revoked' | 'authority_closed';
 
 /**
- * `BLOCKED` is a pull nothing was tried for, none of it the subscriber's
+ * `blocked` is a pull nothing was tried for, none of it the subscriber's
  * doing (Mesub's fee payer, the network): it never counts against them.
  */
-export type PullOutcome = 'PAID' | 'SKIPPED' | 'REJECTED' | 'BLOCKED';
+export type PullOutcome = 'paid' | 'skipped' | 'rejected' | 'blocked';
 
 /** One pull attempt, newest first, as the subscriber it concerns may see it. */
 export interface ServedAttempt {

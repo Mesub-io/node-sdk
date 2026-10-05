@@ -123,7 +123,7 @@ const STATUSES = [
     'none',
 ];
 const PAYMENT_STATUSES = ['paid', 'late', 'none'];
-const OUTCOMES = ['PAID', 'SKIPPED', 'REJECTED', 'BLOCKED'];
+const OUTCOMES = ['paid', 'skipped', 'rejected', 'blocked'];
 const END_REASONS = [
     'cancelled',
     'plan_removed',

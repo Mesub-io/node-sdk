@@ -988,7 +988,7 @@ describe('the widget routes: one subscription in full', () => {
         expect(answer.body).toMatchObject({
             upcoming: [{ kind: 'charge', due_at: SOON, amount: null, amount_display: null }],
             // The payments were read all the same.
-            payments: [{ outcome: 'PAID' }],
+            payments: [{ outcome: 'paid' }],
             payments_error: null,
         });
     });
@@ -1022,14 +1022,14 @@ describe('the widget routes: one subscription in full', () => {
             },
             {
                 attempted_at: at(1),
-                outcome: 'REJECTED',
+                outcome: 'rejected',
                 reason: 'insufficient-balance',
                 signature: 'sig_rejected',
                 retry: true,
                 retry_number: 1,
                 retries_allowed: 3,
             },
-            { attempted_at: at(2), outcome: 'SKIPPED', reason: 'wrong-delegate', signature: null },
+            { attempted_at: at(2), outcome: 'skipped', reason: 'wrong-delegate', signature: null },
         ]);
         const before = fake.requests.length;
 
@@ -1041,7 +1041,7 @@ describe('the widget routes: one subscription in full', () => {
         expect(body.payments).toEqual([
             {
                 attempted_at: at(0),
-                outcome: 'PAID',
+                outcome: 'paid',
                 amount: '9990000',
                 reason: null,
                 signature: 'sig_last',
@@ -1052,7 +1052,7 @@ describe('the widget routes: one subscription in full', () => {
             },
             {
                 attempted_at: at(1),
-                outcome: 'REJECTED',
+                outcome: 'rejected',
                 amount: '9990000',
                 reason: 'insufficient-balance',
                 signature: 'sig_rejected',
@@ -1063,7 +1063,7 @@ describe('the widget routes: one subscription in full', () => {
             },
             {
                 attempted_at: at(2),
-                outcome: 'SKIPPED',
+                outcome: 'skipped',
                 amount: '9990000',
                 reason: 'wrong-delegate',
                 signature: null,
@@ -1074,7 +1074,7 @@ describe('the widget routes: one subscription in full', () => {
             },
             {
                 attempted_at: at(30),
-                outcome: 'PAID',
+                outcome: 'paid',
                 amount: '9990000',
                 reason: null,
                 signature: 'sig_first',
@@ -1187,7 +1187,7 @@ describe('the widget routes: one subscription in full', () => {
         const id = await subscribed(client);
         fake.setAttempts(id, [
             { attempted_at: at(0), outcome: 'REFUNDED' as never, reason: 'made-up' },
-            { attempted_at: at(1), outcome: 'BLOCKED', signature: null },
+            { attempted_at: at(1), outcome: 'blocked', signature: null },
             { attempted_at: at(2), amount: '5000000' },
         ]);
 
@@ -1197,8 +1197,8 @@ describe('the widget routes: one subscription in full', () => {
         const body = answer.body as Detail;
         expect(body.payments?.map((each) => each['outcome'])).toEqual([
             'REFUNDED',
-            'BLOCKED',
-            'PAID',
+            'blocked',
+            'paid',
         ]);
         expect(body.paid).toEqual({ count: 1, amount: '5000000' });
     });
@@ -1511,7 +1511,7 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
         fake.setAttempts(id, [
             { attempted_at: at(30), signature: 'sig_first' },
             { attempted_at: at(0), signature: 'sig_last', retry: true, retry_number: 1 },
-            { attempted_at: at(1), outcome: 'SKIPPED', reason: 'wrong-delegate', signature: null },
+            { attempted_at: at(1), outcome: 'skipped', reason: 'wrong-delegate', signature: null },
         ]);
         const before = fake.requests.length;
 
@@ -1523,7 +1523,7 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
             payments: [
                 {
                     attempted_at: at(0),
-                    outcome: 'PAID',
+                    outcome: 'paid',
                     amount: '9990000',
                     reason: null,
                     signature: 'sig_last',
@@ -1532,7 +1532,7 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
                     retries_allowed: null,
                     period_start: null,
                 },
-                { attempted_at: at(1), outcome: 'SKIPPED', retry: null },
+                { attempted_at: at(1), outcome: 'skipped', retry: null },
                 { attempted_at: at(30), signature: 'sig_first', retry: null },
             ],
             // Five attempts at most are no total: none is made up.
@@ -1840,7 +1840,7 @@ describe('mesubRoutes for Express', () => {
         expect(response.headers['cache-control']).toBe('no-store');
         expect(response.body).toMatchObject({
             subscription: { id },
-            payments: [{ outcome: 'PAID', signature: 'sig_1' }],
+            payments: [{ outcome: 'paid', signature: 'sig_1' }],
             upcoming: [{ kind: 'charge', amount: '9990000', amount_display: '9.99' }],
             paid: { count: 1, amount: '9990000' },
             payments_error: null,
@@ -2024,7 +2024,7 @@ describe('mesubRouteHandlers for Next', () => {
         let user: string | null = 'user_ada';
         const { GET, fake } = handlers(() => (user ? { external_id: user } : null));
         const id = await subscribed(fake.client());
-        fake.setAttempts(id, [{ signature: 'sig_1' }, { outcome: 'BLOCKED', signature: null }]);
+        fake.setAttempts(id, [{ signature: 'sig_1' }, { outcome: 'blocked', signature: null }]);
         const get = () => GET(new Request('https://shop.test/x'), context('subscriptions', id));
 
         const response = await get();
@@ -2034,7 +2034,7 @@ describe('mesubRouteHandlers for Next', () => {
         const text = await response.text();
         expect(JSON.parse(text)).toMatchObject({
             subscription: { id },
-            payments: [{ signature: 'sig_1' }, { outcome: 'BLOCKED' }],
+            payments: [{ signature: 'sig_1' }, { outcome: 'blocked' }],
             upcoming: [{ kind: 'charge', due_at: expect.any(String), amount: '9990000' }],
             paid: { count: 1, amount: '9990000' },
         });
