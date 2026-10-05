@@ -183,6 +183,11 @@ answer this request.`: never the SDK's own message, which may name your
   retried. `submit` and the confirms keep their own timeouts, and the same
   methods called from your code keep the client's `timeout` and `maxRetries`
   (#99).
+- Mesub refusing your API key (401 `missing_api_key` or `invalid_api_key`),
+  or a 403 from something in front of Mesub, is thrown to your framework,
+  which logs it and answers 500. It was handed to the browser as a 401, which
+  `@mesub/react` reads as "nobody is signed in": every visitor got the
+  sign-in screen. The routes' own 401, nobody signed in, is unchanged.
 
 ### Webhooks
 

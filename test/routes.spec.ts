@@ -2,7 +2,7 @@ import express from 'express';
 import request from 'supertest';
 
 import { mesubRoutes } from '../src/express.js';
-import { Mesub } from '../src/index.js';
+import { Mesub, MesubError } from '../src/index.js';
 import { mesubRouteHandlers } from '../src/next.js';
 import {
     checkWidgetOptions,
@@ -190,7 +190,6 @@ describe('the widget routes: plans kept in memory', () => {
     it.each([
         ['an outage', 'outage' as const, 503, 'unavailable'],
         ['a rate limit', { status: 429, code: 'rate_limited' }, 429, 'rate_limited'],
-        ['a refused key', { status: 401, code: 'invalid_api_key' }, 401, 'invalid_api_key'],
     ])('never keeps %s', async (_name, failure, status, code) => {
         const { call, fake } = setup();
 
@@ -204,6 +203,20 @@ describe('the widget routes: plans kept in memory', () => {
         fake.fail(null);
         expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
         expect(paths(fake)).toEqual(['/v1/plans', '/v1/plans', '/v1/plans']);
+    });
+
+    it('never keeps a refused key, thrown rather than answered', async () => {
+        const { call, fake } = setup();
+
+        fake.fail({ status: 401, code: 'invalid_api_key' });
+        await expect(call(null, { path: '/plans/pro' })).rejects.toMatchObject({
+            status: 401,
+            apiCode: 'invalid_api_key',
+        });
+
+        fake.fail(null);
+        expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
+        expect(paths(fake)).toEqual(['/v1/plans', '/v1/plans']);
     });
 
     it('keeps the plans of two clients apart', async () => {
@@ -348,6 +361,141 @@ describe('the widget routes: who is asking', () => {
         await expect(
             post({ kind: 'wallet', value: WALLET }, `/subscriptions/${id}/cancel`),
         ).resolves.toMatchObject({ status: 201 });
+    });
+});
+
+/**
+ * Mesub refusing the merchant's server, not the customer: a 401 handed on
+ * reads to `@mesub/react` as "nobody is signed in", and every visitor would
+ * get the sign-in screen. Thrown instead, for the framework to log and
+ * answer 500.
+ */
+describe('the widget routes: a broken integration', () => {
+    const KEY_REFUSALS = ['missing_api_key', 'invalid_api_key'] as const;
+    const ROUTES = [
+        ['GET', '/plans/pro'],
+        ['GET', '/subscriptions'],
+        ['GET', '/subscriptions/sub_1'],
+        ['POST', '/subscriptions'],
+        ...STEPS.map((step) => ['POST', `/subscriptions/sub_1/${step}`]),
+    ] as const;
+
+    it.each(KEY_REFUSALS.flatMap((code) => ROUTES.map(([method, path]) => [code, method, path])))(
+        "throws Mesub's 401 %s on %s %s, never answers it 401",
+        async (code, method, path) => {
+            const { call, fake } = setup();
+            fake.fail({ status: 401, code });
+
+            const answer = call(ada, {
+                method,
+                path,
+                contentType: JSON_TYPE,
+                body: { plan: 'pro', wallet: WALLET, transaction: 'tx', terms_signature: 'sig' },
+            });
+
+            await expect(answer).rejects.toBeInstanceOf(MesubError);
+            await expect(answer).rejects.toMatchObject({ status: 401, apiCode: code });
+        },
+    );
+
+    it('throws a key Mesub never issued or rotated since, and nothing of it reaches an answer', async () => {
+        const fake = new FakeMesub({ plans: ['pro'] });
+        const rotated = new Mesub({
+            apiKey: 'SUB_rotated',
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: (input, init) => fake.fetch(input, init),
+        });
+
+        await expect(
+            handleWidget(
+                rotated,
+                { method: 'GET', path: '/subscriptions', body: undefined, contentType: null },
+                ada,
+            ),
+        ).rejects.toMatchObject({ status: 401, apiCode: 'invalid_api_key' });
+    });
+
+    it("throws a refused key on a subscription's payments, never answers it as their error", async () => {
+        const { client, fake } = setup();
+        const id = await subscribed(client);
+        const mesub = fake.client();
+        vi.spyOn(mesub.subscriptions, 'retrieve').mockImplementation(async (...args) => {
+            const read = await client.subscriptions.retrieve(...args);
+            fake.fail({ status: 401, code: 'invalid_api_key' });
+            return read;
+        });
+
+        await expect(
+            handleWidget(
+                mesub,
+                { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+                ada,
+            ),
+        ).rejects.toMatchObject({ status: 401, apiCode: 'invalid_api_key' });
+    });
+
+    it('throws a 403 that names no code of Mesub: something in front of it turned you away', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => new Response('<h1>Forbidden</h1>', { status: 403 }),
+        });
+
+        await expect(
+            handleWidget(
+                mesub,
+                { method: 'GET', path: '/subscriptions', body: undefined, contentType: null },
+                ada,
+            ),
+        ).rejects.toMatchObject({ status: 403, apiCode: null });
+    });
+
+    it("still hands on Mesub's 403 on what the customer signed", async () => {
+        const { client, fake } = setup();
+        const id = await subscribed(client);
+        const mesub = fake.client();
+        vi.spyOn(mesub.subscriptions, 'submit').mockRejectedValue(
+            new MesubError('These terms expired. Ask for them again.', {
+                status: 403,
+                code: 'forbidden',
+                apiCode: 'terms_expired',
+            }),
+        );
+
+        const answer = await handleWidget(
+            mesub,
+            {
+                method: 'POST',
+                path: `/subscriptions/${id}/submit`,
+                body: { transaction: 'tx', terms_signature: 'sig' },
+                contentType: JSON_TYPE,
+            },
+            ada,
+        );
+
+        expect(answer).toEqual({
+            status: 403,
+            body: {
+                error: {
+                    code: 'terms_expired',
+                    message: 'These terms expired. Ask for them again.',
+                },
+            },
+        });
+    });
+
+    it('still answers its own 401 to nobody signed in, asking Mesub nothing', async () => {
+        const { call, fake } = setup();
+        fake.fail({ status: 401, code: 'invalid_api_key' });
+
+        const answer = await call(null, { path: '/subscriptions' });
+
+        expect(answer).toEqual({
+            status: 401,
+            body: { error: { code: 'unauthenticated', message: 'Sign in first.' } },
+        });
+        expect(fake.requests).toEqual([]);
     });
 });
 
@@ -1753,7 +1901,14 @@ describe('mesubRoutes for Express', () => {
                 res: express.Response,
                 _next: express.NextFunction,
             ) => {
-                res.status(500).json({ thrown: error instanceof TypeError ? 'type' : 'other' });
+                const thrown =
+                    error instanceof TypeError
+                        ? 'type'
+                        : error instanceof MesubError
+                          ? error.apiCode
+                          : 'other';
+
+                res.status(500).json({ thrown });
             },
         );
 
@@ -1789,6 +1944,19 @@ describe('mesubRoutes for Express', () => {
 
         await request(server).get('/api/mesub/subscriptions').expect(401);
     });
+
+    it.each(['missing_api_key', 'invalid_api_key'])(
+        "hands Mesub's 401 %s to next(err), never to the browser as a 401",
+        async (code) => {
+            const { server, fake } = app(() => ({ external_id: 'user_ada' }));
+            fake.fail({ status: 401, code });
+
+            const response = await request(server).get('/api/mesub/subscriptions');
+
+            expect(response.status).toBe(500);
+            expect(response.body).toEqual({ thrown: code });
+        },
+    );
 
     it('answers 404 itself to a path it does not serve, never through next()', async () => {
         const { server } = app(() => ({ external_id: 'user_ada' }));
@@ -2071,6 +2239,21 @@ describe('mesubRouteHandlers for Next', () => {
         expect(response.status).toBe(404);
         expect(fake.requests).toEqual([]);
     });
+
+    it.each(['missing_api_key', 'invalid_api_key'])(
+        "throws Mesub's 401 %s, for Next to log and answer 500, never a 401",
+        async (code) => {
+            const { GET, POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+            fake.fail({ status: 401, code });
+
+            await expect(
+                GET(new Request('https://shop.test/x'), context('subscriptions')),
+            ).rejects.toMatchObject({ status: 401, apiCode: code });
+            await expect(
+                POST(json({ plan: 'pro', wallet: WALLET }), context('subscriptions')),
+            ).rejects.toMatchObject({ status: 401, apiCode: code });
+        },
+    );
 
     it('throws a broken customer, for Next to log', async () => {
         const { GET } = handlers(() => '');
