@@ -12,6 +12,28 @@ function store(maxEntries?: number, now = () => NOW) {
 }
 
 describe('MemoryStore', () => {
+    it.each([Number.NaN, 0, -1, 1.5, Infinity, '100', null])(
+        'refuses maxEntries %s: only a whole number above 0 bounds it',
+        (maxEntries) => {
+            expect(() => new MemoryStore({ maxEntries: maxEntries as never })).toThrow(TypeError);
+        },
+    );
+
+    it('says which option and what it got', () => {
+        expect(() => new MemoryStore({ maxEntries: Number.NaN })).toThrow(
+            'maxEntries must be an integer, above 0, not NaN.',
+        );
+    });
+
+    it('holds one entry with maxEntries 1', () => {
+        const s = store(1);
+        s.set('a', entry('A'), 60_000);
+        s.set('b', entry('B'), 60_000);
+
+        expect(s.size).toBe(1);
+        expect(s.get('b')?.value).toBe('B');
+    });
+
     it('answers nothing for a key never set', () => {
         expect(store().get('missing')).toBeUndefined();
     });

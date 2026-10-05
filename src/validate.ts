@@ -6,6 +6,7 @@ import type {
     ServerSubscription,
     ServerSubscriptionList,
     SubmitResult,
+    SubscribeCosts,
     SubscribeTransaction,
     SubscriptionAttempt,
     SubscriptionAttemptList,
@@ -227,6 +228,30 @@ const SUBSCRIBE_TRANSACTION = {
     terms: OBJECT,
 } satisfies Record<keyof SubscribeTransaction, Field>;
 
+/** Lamports, as the back writes a u64. */
+const COSTS = {
+    rent: OBJECT,
+    fee: OBJECT,
+    total: BASE_UNITS,
+} satisfies Record<keyof SubscribeCosts, Field>;
+
+const RENT = {
+    subscription: BASE_UNITS,
+    // Null when the authority exists already: no rent for it.
+    authority: {
+        check: (value) => value === null || BASE_UNITS.check(value),
+        expected: 'a whole number as a string or null',
+    },
+    total: BASE_UNITS,
+} satisfies Record<keyof SubscribeCosts['rent'], Field>;
+
+const FEE = {
+    signatures: COUNT,
+    per_signature: BASE_UNITS,
+    priority: BASE_UNITS,
+    total: BASE_UNITS,
+} satisfies Record<keyof SubscribeCosts['fee'], Field>;
+
 const PLAN = {
     slug: STRING,
     name: STRING,
@@ -311,6 +336,9 @@ export function subscribeTransactionFrom(body: unknown): SubscribeTransaction {
             { id: STRING, status: STRING },
             'subscription',
         ) ??
+        problemWith((body as SubscribeTransaction).costs, COSTS, 'costs') ??
+        problemWith((body as SubscribeTransaction).costs.rent, RENT, 'costs.rent') ??
+        problemWith((body as SubscribeTransaction).costs.fee, FEE, 'costs.fee') ??
         problemWith(
             (body as SubscribeTransaction).terms,
             { message: STRING, expires_at: DATE },

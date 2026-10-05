@@ -20,12 +20,18 @@ import {
 import {
     checkWidgetOptions,
     handleWidget,
+    MAX_BODY_BYTES,
     widgetCustomer,
     type WidgetRoutesOptions,
 } from './routes.js';
 
 export { MesubError } from './errors.js';
-export type { WidgetPayment, WidgetRoutesOptions, WidgetSubscriptionDetail } from './routes.js';
+export type {
+    WidgetPayment,
+    WidgetRoutesOptions,
+    WidgetSubscriptionDetail,
+    WidgetSubscriptionList,
+} from './routes.js';
 export type { CustomerOption, Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 export type { Asked } from './customer.js';
 export type { Customer } from './answer.js';
@@ -112,6 +118,33 @@ async function pathOf(context: CatchAllContext | undefined): Promise<string> {
 }
 
 /**
+ * The body as text, read up to the limit and no further. Null past it, by
+ * `Content-Length` before anything is read, else by the bytes counted.
+ */
+async function textOf(request: Request): Promise<string | null> {
+    if (Number(request.headers.get('content-length')) > MAX_BODY_BYTES) return null;
+    if (request.body === null) return '';
+
+    const reader = request.body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    let size = 0;
+
+    for (;;) {
+        const { done, value } = await reader.read();
+
+        if (done) return text + decoder.decode();
+
+        size += value.byteLength;
+        if (size > MAX_BODY_BYTES) {
+            await reader.cancel();
+            return null;
+        }
+        text += decoder.decode(value, { stream: true });
+    }
+}
+
+/**
  * The routes `@mesub/react` calls, as an App Router catch-all:
  *
  *     // app/api/mesub/[...mesub]/route.ts
@@ -131,9 +164,9 @@ export function mesubRouteHandlers(options: WidgetRoutesOptions<Request>): {
         let body: unknown;
 
         if (request.method !== 'GET') {
-            const text = await request.text();
+            const text = await textOf(request);
 
-            if (text.length > 64 * 1024) {
+            if (text === null) {
                 return Response.json(
                     { error: { code: 'payload_too_large', message: 'The body is too large.' } },
                     { status: 413 },

@@ -22,12 +22,18 @@ import {
 import {
     checkWidgetOptions,
     handleWidget,
+    MAX_BODY_BYTES,
     widgetCustomer,
     type WidgetRoutesOptions,
 } from './routes.js';
 
 export { MesubError } from './errors.js';
-export type { WidgetPayment, WidgetRoutesOptions, WidgetSubscriptionDetail } from './routes.js';
+export type {
+    WidgetPayment,
+    WidgetRoutesOptions,
+    WidgetSubscriptionDetail,
+    WidgetSubscriptionList,
+} from './routes.js';
 export type { CustomerOption, Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 export type { Asked } from './customer.js';
 export type { Customer } from './answer.js';
@@ -105,9 +111,6 @@ export function requirePlan(
     };
 }
 
-/** The most a widget request's body may weigh: a signed transaction is under 2 kB. */
-const MAX_BODY_BYTES = 64 * 1024;
-
 /** The JSON body, from `express.json()` when it ran, read here otherwise. */
 async function jsonBody(req: Request): Promise<unknown> {
     const parsed: unknown = (req as { body?: unknown }).body;
@@ -136,8 +139,8 @@ async function jsonBody(req: Request): Promise<unknown> {
  * Nest, the same line with `app.use` in `main.ts`.
  *
  * `customer` says who is asking from your own verified auth, so put your
- * login before it. A request it cannot answer goes to `next()`, a 404 of
- * yours; an integration error goes to `next(err)`.
+ * login before it. A request it cannot answer is answered 404 here, never
+ * handed to `next()`; an integration error goes to `next(err)`.
  */
 export function mesubRoutes(options: WidgetRoutesOptions<Request>): RequestHandler {
     checkWidgetOptions(options);

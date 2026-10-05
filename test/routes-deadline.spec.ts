@@ -112,7 +112,8 @@ afterEach(() => {
 
 describe('the widget routes: a rate limit of Mesub is never waited out', () => {
     it.each([
-        ['GET', '/plans/pro', 'GET /v1/plans/pro'],
+        // A plan is read from the project's list.
+        ['GET', '/plans/pro', 'GET /v1/plans'],
         ['GET', '/subscriptions', 'GET /v1/subscriptions'],
         ['GET', '/subscriptions/sub_1', 'GET /v1/subscriptions/sub_1'],
         // The read that says whose it is, before anything is built or confirmed.
@@ -152,7 +153,7 @@ describe('the widget routes: a rate limit of Mesub is never waited out', () => {
             payments_error: { code: 'rate_limited' },
         });
         expect([...sent].sort()).toEqual([
-            'GET /v1/plans/pro',
+            'GET /v1/plans',
             `GET /v1/subscriptions/${id}`,
             `GET /v1/subscriptions/${id}/attempts`,
         ]);
@@ -189,13 +190,13 @@ describe('the widget routes: a slow Mesub is cut at one deadline', () => {
         expect(answer.value!.status).toBeGreaterThanOrEqual(500);
         expect(answer.value!.body).toMatchObject({ error: { code: 'unavailable' } });
         // Cut by the deadline, so not sent again.
-        expect(sent).toEqual(['GET /v1/plans/pro']);
+        expect(sent).toEqual(['GET /v1/plans']);
     });
 
     it('gives every read of one subscription the same deadline, not one each', async () => {
         fakeClock();
         const { fake, call, sent } = setup(({ path }) =>
-            path.endsWith('/attempts') || path.startsWith('/v1/plans/') ? 'hang' : 4_000,
+            path.endsWith('/attempts') || path === '/v1/plans' ? 'hang' : 4_000,
         );
         const id = await subscribed(fake);
 
@@ -265,6 +266,59 @@ describe('the widget routes: a slow Mesub is cut at one deadline', () => {
 
         expect(answer.value).toMatchObject({ status: 200, body: { slug: 'pro' } });
         expect(sent).toHaveLength(2);
+    });
+});
+
+describe('the widget routes: the plan list kept for a minute', () => {
+    it('does not keep a read cut at the deadline: the next request asks again', async () => {
+        fakeClock();
+        let down = true;
+        const { call, sent } = setup(() => (down ? 'hang' : undefined));
+
+        const cut = watch(call({ path: '/plans/pro' }));
+        await advance(READ_TIME);
+        await until(() => cut.settled);
+        expect(cut.value!.status).toBeGreaterThanOrEqual(500);
+
+        down = false;
+        const answer = await call({ path: '/plans/pro' });
+
+        expect(answer).toMatchObject({ status: 200, body: { slug: 'pro' } });
+        expect(sent).toEqual(['GET /v1/plans', 'GET /v1/plans']);
+    });
+
+    it('does not keep a 429 either: one call, handed on, and asked again next time', async () => {
+        fakeClock();
+        let limited = true;
+        const { call, sent } = setup(() => (limited ? rateLimited(60) : undefined));
+
+        const refused = await call({ path: '/plans/pro' });
+        expect(refused.status).toBe(429);
+        expect(refused.headers).toEqual({ 'Retry-After': '60' });
+        expect(sent).toEqual(['GET /v1/plans']);
+
+        limited = false;
+        const answer = await call({ path: '/plans/pro' });
+
+        expect(answer).toMatchObject({ status: 200, body: { slug: 'pro' } });
+        expect(sent).toEqual(['GET /v1/plans', 'GET /v1/plans']);
+    });
+
+    it("cuts a request that joined a read in flight at the first one's deadline", async () => {
+        fakeClock();
+        const { call, sent } = setup(() => 'hang');
+
+        const first = watch(call({ path: '/plans/pro' }));
+        await advance(6_000);
+        const second = watch(call({ path: '/plans/pro' }));
+
+        await advance(READ_TIME - 6_000 - 1);
+        expect(first.settled || second.settled).toBe(false);
+
+        await advance(1);
+        await until(() => first.settled && second.settled);
+        expect(second.value!.body).toMatchObject({ error: { code: 'unavailable' } });
+        expect(sent).toEqual(['GET /v1/plans']);
     });
 });
 

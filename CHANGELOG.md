@@ -51,6 +51,12 @@ The first version published to npm. Requires Node 22 or later.
 - The check that refused a publishable `PUB_` key is removed: Mesub has no
   such key any more. Any non-empty API key is accepted, and a wrong one is
   answered 401 by Mesub, thrown as `unauthorized` (#96).
+- Three options that were taken and then misbehaved now throw a `TypeError`:
+  a per-call `timeout` that is not a number of milliseconds above 0 (`NaN`
+  or `0` cut the call at once), checked as the client's own before anything
+  is sent; a `tolerance` of 0 in `webhooks.verify` and `verifyWebhook` (it
+  refused every webhook); a `maxEntries` of `MemoryStore` that is not a whole
+  number above 0 (`NaN` left the store unbounded) (#101).
 - A `baseUrl` may carry a path, for a proxy: every call is made under it.
   `headers` adds headers to every call, such as a Cloudflare Access service
   token (#63).
@@ -141,12 +147,34 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
-- The routes never hold a browser for Mesub: every read of one request (a
-  plan, a subscription, its attempts, a list, and the read before a submit,
-  a cancel, a resume or a close) shares one deadline of 10 s, and a 429 is
-  handed on at once with its `Retry-After`, never waited out and retried.
-  `submit` and the confirms keep their own timeouts, and the same methods
-  called from your code keep the client's `timeout` and `maxRetries` (#99).
+- A 2xx from Mesub that the SDK cannot read is answered as a 502
+  `unexpected`, no longer with the 2xx it came with (#97).
+- The routes read plans from your project's plan list, kept in memory for 60
+  seconds per client: `GET /plans/:slug`, which is public, and the price of
+  `upcoming` make one call to Mesub a minute at most, whatever the slugs
+  asked, and a slug that is not in the list answers 404 `plan_not_found`
+  without a call. A change to a plan shows within a minute. A failed read is
+  not kept, and `plans.list` and `plans.retrieve` stay uncached (#98).
+
+- `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
+  5 pages at most, so one browser request is never more than 5 calls to
+  Mesub. It answers `has_more` beside `subscriptions`: true when the customer
+  has more than the 500 newest, which are not read (#101).
+- A refusal's `message` is Mesub's own only when Mesub worded it (an error
+  with an `apiCode`). For any other, the browser reads `Mesub could not
+answer this request.`: never the SDK's own message, which may name your
+  `baseUrl` or a network error. `payments_error` the same. The `MesubError`
+  your server catches is unchanged (#101).
+- `mesubRouteHandlers` counts the 64 kB a body may weigh in bytes, as
+  `mesubRoutes` does: it answers 413 on a `Content-Length` over it without
+  reading, and stops reading at the limit otherwise (#101).
+- The routes never hold a browser for Mesub: every read of one request (the
+  plan list, a subscription, its attempts, a list, and the read before a
+  submit, a cancel, a resume or a close) shares one deadline of 10 s, and a
+  429 is handed on at once with its `Retry-After`, never waited out and
+  retried. `submit` and the confirms keep their own timeouts, and the same
+  methods called from your code keep the client's `timeout` and `maxRetries`
+  (#99).
 
 ### Webhooks
 
@@ -181,6 +209,9 @@ The first version published to npm. Requires Node 22 or later.
   `apiCode`, `retryable`, `status`, `body` and `retryAfter` (#60).
 - Every answer is checked against the shape the SDK types before it is used
   or cached; anything else throws `unexpected` (#59).
+- `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
+  `total`, as it is typed: amounts are whole numbers as strings, and
+  `rent.authority` may be null (#101).
 
 ### Releases and CI
 

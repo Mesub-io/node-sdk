@@ -131,7 +131,7 @@ export interface VerifyWebhookOptions {
     secret?: string;
     /**
      * How far `webhook-timestamp` may be from now, either way, in
-     * milliseconds: older is refused as a replay. Defaults to 5 minutes.
+     * milliseconds, above 0: older is refused as a replay. Defaults to 5 minutes.
      */
     tolerance?: number;
 }
@@ -194,7 +194,7 @@ async function verify(
         options.secret !== undefined || fallback !== undefined
             ? keyOf(options.secret ?? fallback, 'secret')
             : keyOf(envSecret(), 'MESUB_WEBHOOK_SECRET');
-    const tolerance = numberOf('tolerance', options.tolerance, DEFAULT_TOLERANCE, { zero: true });
+    const tolerance = numberOf('tolerance', options.tolerance, DEFAULT_TOLERANCE);
     const bytes = bytesOf(body);
 
     if (typeof headers !== 'object' || headers === null) {

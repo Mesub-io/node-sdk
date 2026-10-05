@@ -232,12 +232,18 @@ API key, nor the email and the id you gave Mesub.
 | Route                                                        | What it does                                |
 | ------------------------------------------------------------ | ------------------------------------------- |
 | `GET /plans/:slug`                                           | The plan to show. Public.                   |
-| `GET /subscriptions`                                         | The customer's subscriptions.               |
+| `GET /subscriptions`                                         | The customer's subscriptions, 500 at most.  |
 | `GET /subscriptions/:id`                                     | One of them, with its payments.             |
 | `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
 | `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
+
+`GET /plans/:slug` is public, so the routes answer it from your project's
+plan list, kept in memory for 60 seconds: one call to Mesub a minute at most,
+whatever the slugs asked, and a slug you do not have costs none. A change to a
+plan shows there within a minute. `mesub.plans.list` and `mesub.plans.retrieve`
+themselves are never cached.
 
 A refusal is `{ error: { code, message } }`. The widget's side:
 [React widget](https://docs.mesub.io/docs/react).

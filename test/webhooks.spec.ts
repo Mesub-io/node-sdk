@@ -436,6 +436,17 @@ describe('verifyWebhook', () => {
         ).rejects.toThrow(TypeError);
     });
 
+    it('refuses a tolerance of 0, which no webhook could meet', async () => {
+        const raw = body('test');
+        const headers = backendHeaders(SECRET, 'cm1', NOW, raw);
+
+        // Sent this very second, and good under the default.
+        await expect(verifyWebhook(raw, headers, { secret: SECRET })).resolves.toBeDefined();
+        await expect(verifyWebhook(raw, headers, { secret: SECRET, tolerance: 0 })).rejects.toThrow(
+            new TypeError('tolerance must be a number of milliseconds, above 0, not 0.'),
+        );
+    });
+
     it('reads the secret from MESUB_WEBHOOK_SECRET when none is passed', async () => {
         vi.stubEnv('MESUB_WEBHOOK_SECRET', SECRET);
         const raw = body('test');

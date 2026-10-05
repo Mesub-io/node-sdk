@@ -2,6 +2,7 @@ import type { Customer, ServedAttempt } from './answer.js';
 import type { Mesub } from './client.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
+import type { Plan } from './plans.js';
 import type { ServerSubscription, SubscriptionAttempt } from './subscriptions.js';
 import type { CallOptions } from './transport.js';
 
@@ -61,6 +62,9 @@ export interface WidgetResponse {
     headers?: Record<string, string>;
 }
 
+/** The most a widget request's body may weigh: a signed transaction is under 2 kB. */
+export const MAX_BODY_BYTES = 64 * 1024;
+
 const ACTIONS = ['cancel', 'resume', 'close'] as const;
 type Action = (typeof ACTIONS)[number];
 
@@ -90,10 +94,18 @@ function refusal(status: number, code: string, message: string): WidgetResponse 
 const NOT_FOUND = () => refusal(404, 'not_found', 'Nothing here.');
 const NO_SUBSCRIPTION = () => refusal(404, 'subscription_not_found', 'No such subscription.');
 
+/** Said to the browser for an error Mesub did not word itself. */
+const NO_ANSWER = 'Mesub could not answer this request.';
+
+/** Mesub's own words only: the transport's may name `baseUrl` or a network error. */
+function said(error: MesubError): string {
+    return error.apiCode === null ? NO_ANSWER : error.message;
+}
+
 /** A Mesub refusal, handed on with its own status and code, and nothing of the key. */
 function fromMesub(error: MesubError): WidgetResponse {
-    // No answer from Mesub: your server reached nobody, which is a 502 of yours.
-    const status = error.status ?? 502;
+    // No answer from Mesub, or a 2xx this SDK cannot read: a 502 of yours.
+    const status = error.status === null || error.status < 400 ? 502 : error.status;
     const retry =
         error.retryAfter === null
             ? undefined
@@ -101,7 +113,7 @@ function fromMesub(error: MesubError): WidgetResponse {
 
     return {
         status,
-        body: { error: { code: error.apiCode ?? error.code, message: error.message } },
+        body: { error: { code: error.apiCode ?? error.code, message: said(error) } },
         ...(retry && { headers: retry }),
     };
 }
@@ -129,6 +141,18 @@ function shown(subscription: ServerSubscription) {
     const { email: _email, external_id: _externalId, ...rest } = subscription;
 
     return rest;
+}
+
+/** `GET /subscriptions` reads pages of 100, Mesub's largest, and 5 at most. */
+const LIST_PAGE = 100;
+const LIST_MAX_PAGES = 5;
+
+/** What `GET /subscriptions` answers. */
+export interface WidgetSubscriptionList {
+    /** Newest first, expired checkouts included: the 500 newest at most. */
+    subscriptions: Array<Omit<ServerSubscription, 'email' | 'external_id'>>;
+    /** True when the customer has more than those, which are not read. */
+    has_more: boolean;
 }
 
 /** One pull attempt as the browser gets it: the fields Mesub serves, and no other. */
@@ -196,6 +220,47 @@ export interface WidgetUpcoming {
     retries_allowed: number | null;
 }
 
+/** How long the plan list read for the widget is kept. */
+const PLAN_TTL_MS = 60_000;
+
+interface PlanList {
+    /** Shared while the request is out. */
+    plans: Promise<Plan[]>;
+    /** Infinity until Mesub answered. */
+    until: number;
+}
+
+// Per client, so two projects never share a plan.
+const planLists = new WeakMap<Mesub, PlanList>();
+
+/**
+ * A plan for the widget routes, from the project's list: public reads must
+ * not spend the API key's rate limit, so one call per TTL whatever the slugs,
+ * and null with no call for a slug that is not in it. A failed read is
+ * forgotten at once.
+ */
+async function planOf(client: Mesub, slug: string, read: CallOptions): Promise<Plan | null> {
+    let list = planLists.get(client);
+
+    if (!list || list.until <= Date.now()) {
+        // Shared while in flight: bound by the first asker's deadline, as a guard's flight.
+        const fresh: PlanList = { plans: client.plans.list(read), until: Infinity };
+
+        list = fresh;
+        planLists.set(client, fresh);
+        fresh.plans.then(
+            () => {
+                fresh.until = Date.now() + PLAN_TTL_MS;
+            },
+            () => {
+                if (planLists.get(client) === fresh) planLists.delete(client);
+            },
+        );
+    }
+
+    return (await list.plans).find((plan) => plan.slug === slug) ?? null;
+}
+
 /**
  * What Mesub will pull next: the next charge of a running subscription, the
  * next retry of a late one, and nothing for any other, a parked seat
@@ -222,7 +287,7 @@ async function upcomingOf(
 
     if (plan !== null && SLUG.test(plan)) {
         try {
-            price = await client.plans.retrieve(plan, read);
+            price = await planOf(client, plan, read);
         } catch (error) {
             if (!(error instanceof MesubError)) throw error;
         }
@@ -304,7 +369,7 @@ async function paymentsOf(
         }
 
         // The subscription was read: it is answered without them, so the dialog still opens.
-        return unlisted(error.apiCode ?? error.code, error.message);
+        return unlisted(error.apiCode ?? error.code, said(error));
     }
 }
 
@@ -354,7 +419,7 @@ async function olderPaymentsOf(
     } catch (error) {
         if (!(error instanceof MesubError)) throw error;
 
-        return unlisted(error.apiCode ?? error.code, error.message);
+        return unlisted(error.apiCode ?? error.code, said(error));
     }
 }
 
@@ -385,7 +450,11 @@ export async function handleWidget(
                 return refusal(404, 'plan_not_found', 'No such plan.');
             }
 
-            return { status: 200, body: await client.plans.retrieve(slug, read) };
+            const plan = await planOf(client, slug, read);
+
+            return plan
+                ? { status: 200, body: plan }
+                : refusal(404, 'plan_not_found', 'No such plan.');
         }
 
         if (segments[0] !== 'subscriptions') return NOT_FOUND();
@@ -419,12 +488,27 @@ export async function handleWidget(
         if (method === 'GET') {
             if (segments.length !== 1) return NOT_FOUND();
 
-            const subscriptions: ServerSubscription[] = [];
-            for await (const each of client.subscriptions.listAll(customerParam(asked), read)) {
-                subscriptions.push(each);
+            const params = { ...customerParam(asked), limit: LIST_PAGE };
+            let page = await client.subscriptions.list(params, read);
+            const subscriptions = [...page.data];
+
+            const more = () => page.has_more && page.data.length > 0;
+
+            // One browser request is LIST_MAX_PAGES calls to Mesub at most.
+            for (let pages = 1; more() && pages < LIST_MAX_PAGES; pages++) {
+                page = await client.subscriptions.list(
+                    { ...params, starting_after: page.data.at(-1)!.id },
+                    read,
+                );
+                subscriptions.push(...page.data);
             }
 
-            return { status: 200, body: { subscriptions: subscriptions.map(shown) } };
+            const list: WidgetSubscriptionList = {
+                subscriptions: subscriptions.map(shown),
+                has_more: more(),
+            };
+
+            return { status: 200, body: list };
         }
 
         // A JSON body cannot be sent by a plain form from another site.

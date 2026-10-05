@@ -1,4 +1,5 @@
 import { MesubError, codeFor } from './errors.js';
+import { numberOf } from './options.js';
 import { API_VERSION, API_VERSION_HEADER, VERSION } from './version.js';
 
 export type QueryValue = string | number | boolean | undefined;
@@ -87,6 +88,8 @@ export class Transport {
     async #send(method: Method, url: URL, body: unknown, options: CallOptions): Promise<unknown> {
         const maxRetries = method === 'POST' ? 0 : (options.maxRetries ?? this.#config.maxRetries);
         const { deadline, signal } = options;
+        // As the client's own: NaN or 0 would cut the call as it is sent.
+        numberOf('timeout', options.timeout, this.#config.timeout, { delay: true });
 
         for (let retry = 0; ; retry++) {
             const attempt = await this.#attempt(method, url, body, options);

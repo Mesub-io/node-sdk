@@ -89,6 +89,20 @@ describe('subscriptions.create', () => {
         terms: { message: 'Mesub: the terms...', expires_at: '2026-10-02T12:05:00.000Z' },
     };
 
+    const { costs } = answer;
+
+    it('takes the rent of an authority to open, as one that is null', async () => {
+        const opened = {
+            ...answer,
+            costs: { ...costs, rent: { ...costs.rent, authority: '1002240', total: '3041520' } },
+        };
+        const { fetch } = mockFetch(json(201, opened));
+
+        await expect(
+            mesub(fetch).subscriptions.create({ plan: 'pro', wallet: WALLET }),
+        ).resolves.toEqual(opened);
+    });
+
     it('posts the plan, wallet, email and external id, and answers what to sign', async () => {
         const { fetch, calls } = mockFetch(json(201, answer));
 
@@ -159,6 +173,46 @@ describe('subscriptions.create', () => {
             'a subscription without an id',
             { ...answer, subscription: { status: 'pending' } },
             'subscription.id is missing',
+        ],
+        [
+            'costs without a total',
+            { ...answer, costs: { ...costs, total: undefined } },
+            'costs.total is missing',
+        ],
+        [
+            'costs without rent',
+            { ...answer, costs: { ...costs, rent: undefined } },
+            'costs.rent is missing',
+        ],
+        [
+            'a fee that is no object',
+            { ...answer, costs: { ...costs, fee: '10000' } },
+            'costs.fee is not an object',
+        ],
+        [
+            'a rent as a number',
+            { ...answer, costs: { ...costs, rent: { ...costs.rent, subscription: 2039280 } } },
+            'costs.rent.subscription is not a whole number as a string',
+        ],
+        [
+            'no word of the authority rent',
+            { ...answer, costs: { ...costs, rent: { subscription: '1', total: '1' } } },
+            'costs.rent.authority is missing',
+        ],
+        [
+            'an authority rent that is no amount',
+            { ...answer, costs: { ...costs, rent: { ...costs.rent, authority: 'none' } } },
+            'costs.rent.authority is not a whole number as a string or null',
+        ],
+        [
+            'signatures as a string',
+            { ...answer, costs: { ...costs, fee: { ...costs.fee, signatures: '2' } } },
+            'costs.fee.signatures is not a whole number',
+        ],
+        [
+            'a fee without its priority',
+            { ...answer, costs: { ...costs, fee: { ...costs.fee, priority: undefined } } },
+            'costs.fee.priority is missing',
         ],
     ])('throws unexpected on an answer with %s', async (_label, body, problem) => {
         const { fetch } = mockFetch(json(201, body));
@@ -408,6 +462,33 @@ describe('subscriptions.submit', () => {
             expect(error).toMatchObject({ code: 'unavailable', subscription: pending(), sends: 2 });
             expect(fetch).toHaveBeenCalledTimes(3);
         });
+
+        it.each([Number.NaN, 0])(
+            'refuses a timeout of %s by its name, sending nothing',
+            async (timeout) => {
+                const { fetch } = mockFetch();
+                const client = mesub(fetch);
+
+                await expect(
+                    client.subscriptions.submit('sub_1', signed, { timeout }),
+                ).rejects.toThrow(
+                    new TypeError(
+                        `timeout must be a number of milliseconds, above 0, 2147483647 at most, not ${timeout}.`,
+                    ),
+                );
+                await expect(
+                    client.subscriptions.confirmCancel(
+                        'sub_1',
+                        { signature: SIGNATURE },
+                        { timeout },
+                    ),
+                ).rejects.toThrow(TypeError);
+                await expect(client.subscriptions.retrieve('sub_1', { timeout })).rejects.toThrow(
+                    TypeError,
+                );
+                expect(fetch).not.toHaveBeenCalled();
+            },
+        );
 
         it('takes a timeout and a budget of the call', async () => {
             const { fetch } = mockFetch(

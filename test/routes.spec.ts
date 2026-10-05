@@ -103,6 +103,176 @@ describe('the widget routes: a plan', () => {
     });
 });
 
+describe('the widget routes: plans kept in memory', () => {
+    const paths = (fake: FakeMesub) => fake.requests.map((each) => each.path);
+    const read = (client: Mesub, slug = 'pro') =>
+        handleWidget(
+            client,
+            { method: 'GET', path: `/plans/${slug}`, body: undefined, contentType: null },
+            null,
+        );
+
+    beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('asks Mesub once for a plan read again and again', async () => {
+        const { call, fake } = setup();
+
+        for (let each = 0; each < 50; each++) {
+            const answer = await call(null, { path: '/plans/pro' });
+
+            expect(answer.status).toBe(200);
+            expect(answer.body).toMatchObject({ slug: 'pro', amount_display: '9.99' });
+        }
+        expect((await call(null, { path: '/plans/team' })).body).toMatchObject({ slug: 'team' });
+
+        expect(paths(fake)).toEqual(['/v1/plans']);
+    });
+
+    it('answers 50 made-up slugs 404 with one call at most', async () => {
+        const { call, fake } = setup();
+
+        for (let each = 0; each < 50; each++) {
+            const answer = await call(null, { path: `/plans/made-up-${each}` });
+
+            expect(answer.status).toBe(404);
+            expect(answer.body).toEqual({
+                error: { code: 'plan_not_found', message: 'No such plan.' },
+            });
+        }
+
+        expect(paths(fake)).toEqual(['/v1/plans']);
+    });
+
+    it('shares one request between reads made at the same time', async () => {
+        const { call, fake } = setup();
+
+        const answers = await Promise.all(
+            ['pro', 'team', 'nope', 'pro', 'pro'].map((slug) =>
+                call(null, { path: `/plans/${slug}` }),
+            ),
+        );
+
+        expect(answers.map((answer) => answer.status)).toEqual([200, 200, 404, 200, 200]);
+        expect(paths(fake)).toEqual(['/v1/plans']);
+    });
+
+    it('asks again once 60 s have passed, and shows what changed', async () => {
+        const before = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '9.99' }] });
+        const after = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '19.99' }] });
+        let mesub = before;
+        const client = new Mesub({
+            apiKey: before.apiKey,
+            baseUrl: before.baseUrl,
+            maxRetries: 0,
+            fetch: (input, init) => mesub.fetch(input, init),
+        });
+
+        await read(client);
+        mesub = after;
+        vi.advanceTimersByTime(59_999);
+        expect((await read(client)).body).toMatchObject({ amount_display: '9.99' });
+        expect((await read(client, 'nope')).status).toBe(404);
+        expect(paths(before)).toEqual(['/v1/plans']);
+        expect(after.requests).toEqual([]);
+
+        vi.advanceTimersByTime(1);
+        expect((await read(client)).body).toMatchObject({ amount_display: '19.99' });
+        expect((await read(client, 'nope')).status).toBe(404);
+        expect(paths(after)).toEqual(['/v1/plans']);
+    });
+
+    it.each([
+        ['an outage', 'outage' as const, 503, 'unavailable'],
+        ['a rate limit', { status: 429, code: 'rate_limited' }, 429, 'rate_limited'],
+        ['a refused key', { status: 401, code: 'invalid_api_key' }, 401, 'invalid_api_key'],
+    ])('never keeps %s', async (_name, failure, status, code) => {
+        const { call, fake } = setup();
+
+        fake.fail(failure);
+        const failed = await call(null, { path: '/plans/pro' });
+        expect(failed.status).toBe(status);
+        expect(failed.body).toMatchObject({ error: { code } });
+        // An unknown slug is not told apart while the list cannot be read.
+        expect((await call(null, { path: '/plans/nope' })).status).toBe(status);
+
+        fake.fail(null);
+        expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
+        expect(paths(fake)).toEqual(['/v1/plans', '/v1/plans', '/v1/plans']);
+    });
+
+    it('keeps the plans of two clients apart', async () => {
+        const ours = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '9.99' }] });
+        const theirs = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '49.00' }, 'max'] });
+        const [first, second] = [ours.client(), theirs.client()];
+
+        expect((await read(first)).body).toMatchObject({ amount_display: '9.99' });
+        expect((await read(second)).body).toMatchObject({ amount_display: '49.00' });
+        expect((await read(first)).body).toMatchObject({ amount_display: '9.99' });
+        expect((await read(first, 'max')).status).toBe(404);
+        expect((await read(second, 'max')).status).toBe(200);
+
+        expect(ours.requests).toHaveLength(1);
+        expect(theirs.requests).toHaveLength(1);
+        // Another client of the same project has its own.
+        await read(ours.client());
+        expect(ours.requests).toHaveLength(2);
+    });
+
+    it('prices what is pulled next from the list it already read', async () => {
+        const { call, fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'active',
+            next_charge_at: '2026-11-02T09:00:00.000Z',
+        });
+
+        await call(null, { path: '/plans/pro' });
+        const first = await call(ada, { path: `/subscriptions/${id}` });
+        const second = await call(ada, { path: `/subscriptions/${id}` });
+
+        for (const answer of [first, second]) {
+            expect(answer.body).toMatchObject({
+                upcoming: [{ kind: 'charge', amount: '9990000', amount_display: '9.99' }],
+            });
+        }
+        expect(paths(fake).filter((path) => path.startsWith('/v1/plans'))).toEqual(['/v1/plans']);
+    });
+
+    it('leaves `plans.list` and `plans.retrieve` uncached', async () => {
+        const { call, client, fake } = setup();
+
+        await call(null, { path: '/plans/pro' });
+        await client.plans.list();
+        await client.plans.list();
+        await client.plans.retrieve('pro');
+        await client.plans.retrieve('pro');
+        await expect(client.plans.retrieve('nope')).rejects.toMatchObject({
+            code: 'plan_not_found',
+        });
+        await expect(client.plans.retrieve('nope')).rejects.toMatchObject({
+            code: 'plan_not_found',
+        });
+
+        expect(paths(fake)).toEqual([
+            '/v1/plans',
+            '/v1/plans',
+            '/v1/plans',
+            '/v1/plans/pro',
+            '/v1/plans/pro',
+            '/v1/plans/nope',
+            '/v1/plans/nope',
+        ]);
+    });
+});
+
 describe('the widget routes: who is asking', () => {
     it.each([
         ['GET', '/subscriptions'],
@@ -332,10 +502,76 @@ describe('the widget routes: managing', () => {
     it('answers an empty list to a customer with none', async () => {
         const { call } = setup();
 
-        await expect(call(bob, { path: '/subscriptions' })).resolves.toMatchObject({
+        await expect(call(bob, { path: '/subscriptions' })).resolves.toEqual({
             status: 200,
-            body: { subscriptions: [] },
+            body: { subscriptions: [], has_more: false },
         });
+    });
+
+    /** A Mesub holding `total` subscriptions of Ada's, served by pages as asked. */
+    async function holding(total: number) {
+        const { client } = setup();
+        const one = await client.subscriptions.retrieve(await subscribed(client));
+        const queries: Array<Record<string, string>> = [];
+        const paged = new Mesub({
+            apiKey: 'SUB_test',
+            fetch: async (input) => {
+                const query = Object.fromEntries(new URL(String(input)).searchParams);
+                queries.push(query);
+                const from = query['starting_after'] ? Number(query['starting_after']) + 1 : 0;
+                const limit = Number(query['limit'] ?? 20);
+                const data = Array.from({ length: Math.min(limit, total - from) }, (_, index) => ({
+                    ...one,
+                    id: String(from + index),
+                }));
+
+                return Response.json({ data, has_more: from + data.length < total });
+            },
+        });
+        const list = () =>
+            handleWidget(
+                paged,
+                { method: 'GET', path: '/subscriptions', body: undefined, contentType: null },
+                ada,
+            );
+
+        return { list, queries };
+    }
+
+    it('reads the list by pages of 100, and says there is no more', async () => {
+        const { list, queries } = await holding(230);
+
+        const answer = await list();
+
+        const body = answer.body as { subscriptions: Array<{ id: string }>; has_more: boolean };
+        expect(body.subscriptions).toHaveLength(230);
+        expect(body.has_more).toBe(false);
+        expect(queries.map((query) => [query['limit'], query['starting_after']])).toEqual([
+            ['100', undefined],
+            ['100', '99'],
+            ['100', '199'],
+        ]);
+    });
+
+    it('stops at 5 pages, and says the list was cut', async () => {
+        const { list, queries } = await holding(10_000);
+
+        const answer = await list();
+
+        const body = answer.body as { subscriptions: Array<{ id: string }>; has_more: boolean };
+        expect(queries).toHaveLength(5);
+        expect(body.subscriptions).toHaveLength(500);
+        expect(body.subscriptions.at(-1)!.id).toBe('499');
+        expect(body.has_more).toBe(true);
+    });
+
+    it('says there is no more for exactly 5 full pages', async () => {
+        const { list, queries } = await holding(500);
+
+        const answer = await list();
+
+        expect(queries).toHaveLength(5);
+        expect(answer.body).toMatchObject({ has_more: false });
     });
 
     it('cancels in two steps: a transaction for the wallet, then the confirm', async () => {
@@ -397,6 +633,124 @@ describe('the widget routes: managing', () => {
         const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
 
         expect([502, 503]).toContain(answer.status);
+    });
+
+    it('never tells the browser your baseUrl when what answers there is not Mesub', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            baseUrl: 'https://proxy.internal.example/mesub',
+            fetch: async () => new Response('<h1>Not Found</h1>', { status: 404 }),
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.status).toBe(404);
+        expect(answer.body).toEqual({
+            error: { code: 'unexpected', message: 'Mesub could not answer this request.' },
+        });
+        // Your server still reads it in full.
+        await expect(mesub.plans.retrieve('pro')).rejects.toThrow(
+            'is baseUrl (https://proxy.internal.example/mesub) the Mesub API?',
+        );
+    });
+
+    it('never tells the browser why Mesub could not be reached', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => {
+                throw new Error('connect ECONNREFUSED 10.0.0.7:8443');
+            },
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.body).toEqual({
+            error: { code: 'unavailable', message: 'Mesub could not answer this request.' },
+        });
+        await expect(mesub.plans.retrieve('pro')).rejects.toThrow('ECONNREFUSED 10.0.0.7:8443');
+    });
+
+    it("still hands on Mesub's own message, the one that comes with its code", async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            fetch: async () =>
+                Response.json(
+                    {
+                        statusCode: 409,
+                        error: 'Conflict',
+                        message: 'This plan takes no new subscriber.',
+                        code: 'plan_unavailable',
+                        retryable: false,
+                    },
+                    { status: 409 },
+                ),
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.body).toEqual({
+            error: { code: 'plan_unavailable', message: 'This plan takes no new subscriber.' },
+        });
+    });
+
+    it.each([
+        ['missing a field', () => Response.json({ slug: 'pro' })],
+        ['that is not JSON', () => new Response('<html>ok</html>', { status: 200 })],
+    ])('answers 502, never 200, to a plan body %s', async (_, answered) => {
+        const { fake } = setup();
+        const mesub = new Mesub({
+            apiKey: fake.apiKey,
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: () => Promise.resolve(answered()),
+        });
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: '/plans/pro', body: undefined, contentType: null },
+            null,
+        );
+
+        expect(answer.status).toBe(502);
+        expect(answer.body).toMatchObject({ error: { code: 'unexpected' } });
+    });
+
+    it('answers 502 to a submit whose 2xx cannot be read', async () => {
+        const { client, fake } = setup();
+        const created = await client.subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_ada',
+        });
+        const id = created.subscription.id;
+        // The submit answers a 201 of another shape; the read back is the fake's.
+        const mesub = new Mesub({
+            apiKey: fake.apiKey,
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: (input, init) =>
+                String(input).endsWith('/submit')
+                    ? Promise.resolve(Response.json({ ok: true }, { status: 201 }))
+                    : fake.fetch(input, init),
+        });
+
+        const answer = await handleWidget(
+            mesub,
+            {
+                method: 'POST',
+                path: `/subscriptions/${id}/submit`,
+                body: { transaction: created.transaction, terms_signature: SIGNATURE },
+                contentType: JSON_TYPE,
+            },
+            ada,
+        );
+
+        expect(answer.status).toBe(502);
+        expect(answer.body).toMatchObject({ error: { code: 'unexpected' } });
     });
 
     it.each([
@@ -569,7 +923,7 @@ describe('the widget routes: one subscription in full', () => {
         });
 
         expect(body.upcoming).toEqual([]);
-        expect(calls(fake)).not.toContain('GET /v1/plans/pro');
+        expect(calls(fake)).not.toContain('GET /v1/plans');
     });
 
     it.each([
@@ -614,7 +968,7 @@ describe('the widget routes: one subscription in full', () => {
             baseUrl: fake.baseUrl,
             maxRetries: 0,
             fetch: (input, init) =>
-                String(input).includes('/v1/plans/')
+                String(input).endsWith('/v1/plans')
                     ? Promise.resolve(
                           Response.json(
                               { statusCode: 500, code: 'internal_error', message: 'Broken.' },
@@ -734,7 +1088,7 @@ describe('the widget routes: one subscription in full', () => {
         expect(body.payments_error).toBeNull();
         // Read by its own id: /v1/access is not asked.
         expect(calls(fake, before).sort()).toEqual([
-            'GET /v1/plans/pro',
+            'GET /v1/plans',
             `GET /v1/subscriptions/${id}`,
             `GET /v1/subscriptions/${id}/attempts`,
         ]);
@@ -1087,6 +1441,33 @@ describe('the widget routes: one subscription in full', () => {
         expect(answer.body).toMatchObject({ payments: null, paid: null, payments_error: {} });
     });
 
+    it('never tells the browser why its payments could not be read, short of a word of Mesub', async () => {
+        const { client } = setup();
+        const id = await subscribed(client);
+        const read = await client.subscriptions.retrieve(id);
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => {
+                throw new Error('connect ECONNREFUSED 10.0.0.7:8443');
+            },
+        });
+        vi.spyOn(mesub.subscriptions, 'retrieve').mockResolvedValue(read);
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.body).toMatchObject({
+            payments_error: {
+                code: 'unavailable',
+                message: 'Mesub could not answer this request.',
+            },
+        });
+    });
+
     it('throws what is not a refusal of Mesub: a bug, never an answer', async () => {
         const { client, fake } = setup();
         const id = await subscribed(client);
@@ -1160,7 +1541,7 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
         });
         expect(calls(fake, before).sort()).toEqual([
             'GET /v1/access',
-            'GET /v1/plans/pro',
+            'GET /v1/plans',
             `GET /v1/subscriptions/${id}`,
             `GET /v1/subscriptions/${id}/attempts`,
         ]);
@@ -1409,6 +1790,19 @@ describe('mesubRoutes for Express', () => {
         await request(server).get('/api/mesub/subscriptions').expect(401);
     });
 
+    it('answers 404 itself to a path it does not serve, never through next()', async () => {
+        const { server } = app(() => ({ external_id: 'user_ada' }));
+        const after = vi.fn((_req: express.Request, res: express.Response) => {
+            res.status(404).json({ yours: true });
+        });
+        server.use(after);
+
+        const response = await request(server).get('/api/mesub/nope').expect(404);
+
+        expect(response.body).toEqual({ error: { code: 'not_found', message: 'Nothing here.' } });
+        expect(after).not.toHaveBeenCalled();
+    });
+
     it('answers 400 to a body that is not JSON, and 415 to a form', async () => {
         const { server } = app(() => ({ external_id: 'user_ada' }));
 
@@ -1539,6 +1933,91 @@ describe('mesubRouteHandlers for Next', () => {
             body: '{nope',
         });
         expect((await POST(broken, context('subscriptions'))).status).toBe(400);
+    });
+
+    /** A POST whose body comes in those chunks, and how many of them were asked for. */
+    function streamed(chunks: Iterable<Uint8Array>, headers: Record<string, string> = {}) {
+        const each = chunks[Symbol.iterator]();
+        const seen = { pulls: 0, cancelled: false };
+        const body = new ReadableStream<Uint8Array>(
+            {
+                pull(controller) {
+                    seen.pulls++;
+                    const next = each.next();
+                    if (next.done) controller.close();
+                    else controller.enqueue(next.value);
+                },
+                cancel() {
+                    seen.cancelled = true;
+                },
+            },
+            { highWaterMark: 0 },
+        );
+        const request = new Request('https://shop.test/api/mesub/x', {
+            method: 'POST',
+            headers: { 'content-type': JSON_TYPE, ...headers },
+            body,
+            duplex: 'half',
+        } as RequestInit);
+
+        return { request, seen };
+    }
+
+    function* forever(chunk: Uint8Array) {
+        for (;;) yield chunk;
+    }
+
+    it('counts the 64 kB in bytes, not in characters', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        // 30 000 characters, 90 000 bytes.
+        const heavy = json({ plan: 'pro', wallet: '€'.repeat(30_000) });
+
+        const response = await POST(heavy, context('subscriptions'));
+
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+            error: { code: 'payload_too_large', message: 'The body is too large.' },
+        });
+        expect(fake.requests).toHaveLength(0);
+    });
+
+    it('takes a body of exactly 64 kB', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const empty = JSON.stringify({ plan: 'pro', wallet: WALLET, pad: '' }).length;
+        const full = json({ plan: 'pro', wallet: WALLET, pad: 'x'.repeat(64 * 1024 - empty) });
+
+        expect((await POST(full, context('subscriptions'))).status).toBe(201);
+    });
+
+    it('refuses on Content-Length alone, reading nothing', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const { request, seen } = streamed(forever(new Uint8Array(1024)), {
+            'content-length': String(64 * 1024 + 1),
+        });
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(413);
+        expect(seen.pulls).toBe(0);
+    });
+
+    it('stops reading at the limit when no Content-Length says it', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const { request, seen } = streamed(forever(new Uint8Array(16 * 1024)));
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(413);
+        // Four chunks fill the 64 kB, the fifth passes it.
+        expect(seen.pulls).toBe(5);
+        expect(seen.cancelled).toBe(true);
+    });
+
+    it('reads a body whose characters are cut across chunks', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        const bytes = new TextEncoder().encode(
+            JSON.stringify({ plan: 'pro', wallet: `${WALLET}é€` }),
+        );
+        const { request } = streamed(Array.from(bytes, (byte) => Uint8Array.of(byte)));
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(201);
+        expect(fake.requests.at(-1)?.body).toMatchObject({ wallet: `${WALLET}é€` });
     });
 
     it('serves one subscription with its payments, and 404 for one not theirs', async () => {
