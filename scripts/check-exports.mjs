@@ -89,6 +89,29 @@ for (const file of readdirSync(new URL('../dist/', import.meta.url))) {
     }
 }
 
+// `@mesub/node/situations` loads in a browser: neither it nor a chunk it
+// loads may import anything but another file of the build.
+for (const entry of ['situations.js', 'situations.cjs']) {
+    const seen = new Set();
+    const queue = [entry];
+
+    while (queue.length > 0) {
+        const file = queue.pop();
+        if (seen.has(file)) continue;
+        seen.add(file);
+
+        const code = readFileSync(new URL(`../dist/${file}`, import.meta.url), 'utf8');
+        const specifiers = [
+            ...code.matchAll(/(?:from\s*|import\s*\(?\s*|require\(\s*)["']([^"']+)["']/g),
+        ].map(([, specifier]) => specifier);
+
+        for (const specifier of specifiers) {
+            if (specifier.startsWith('./')) queue.push(specifier.slice(2));
+            else failures.push(`dist/${file}, loaded by dist/${entry}, imports ${specifier}`);
+        }
+    }
+}
+
 if (failures.length > 0) {
     console.error(failures.join('\n'));
     process.exit(1);

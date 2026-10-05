@@ -192,6 +192,34 @@ const { data, paid } = await mesub.subscriptions.attempts(id); // its charges, a
 `listAll` and `allAttempts` walk every page. The steps, the refusals and what
 an attempt carries: [Manage from your server](https://docs.mesub.io/docs/manage).
 
+## Show a subscription's situation
+
+`explain` turns an access answer or a subscription into the words Mesub uses
+everywhere: one sentence for the subscriber, one for you, the access line,
+and what each of you can do now. Show these rather than your own: a late
+payment the wallet cannot fix by adding funds reads differently from one it
+can.
+
+```ts
+import { explain } from '@mesub/node'; // or '@mesub/node/situations' in a page
+
+const answer = await mesub.access({ external_id: user.id }, 'pro');
+const { key, subscriber, access, actions } = explain(answer, {
+    names: { plan: 'Pro', merchant: 'Acme', amount: '9.99 USDC', token: 'USDC' },
+});
+// key "unpaid_approval_revoked"
+// subscriber "Mesub could not take your payment of 9.99 USDC: your wallet no longer approves it (...)"
+// access "No access"
+// actions [{ by: 'subscriber', action: 'cancel', sdk: 'subscriptions.cancel', confirm: 'Cancel Pro? ...' }]
+```
+
+`names` fills what neither answer carries; a placeholder left without a value
+stays as `{amount}` and is listed in `missing`. Dates are written as Mesub
+serves them, in ISO 8601, unless you pass `formatDate`. A status or a reason
+newer than this release gives `key: 'unknown'` and the access line, never an
+error. `@mesub/node/situations` imports nothing of Node, so your pages can use
+it too; `SITUATIONS` is the whole table.
+
 ## Routes for the React widget
 
 [`@mesub/react`](https://github.com/Mesub-io/react-sdk) is optional. It never

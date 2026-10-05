@@ -1,4 +1,7 @@
-/** `@mesub/node`: the client, its types and errors, webhooks, and the memory cache. */
+/**
+ * `@mesub/node`: the client, its types and errors, webhooks, the memory
+ * cache, and `explain`, a subscription's situation in words.
+ */
 export { Mesub } from './client.js';
 export type { Decision, MesubOptions } from './client.js';
 export { MesubError, MesubSubmitError } from './errors.js';
@@ -61,4 +64,18 @@ export type {
     WebhookEventType,
     Webhooks,
 } from './webhooks.js';
+export { ACCESS_LINE, CONFIRMATIONS, SITUATIONS, explain, situationOf } from './situations.js';
+export type {
+    ConfirmationKey,
+    Explainable,
+    ExplainedAction,
+    Explanation,
+    ExplainOptions,
+    Situation,
+    SituationActionId,
+    SituationActionTemplate,
+    SituationActor,
+    SituationKey,
+    SituationText,
+} from './situations.js';
 export * from './cache/index.js';
