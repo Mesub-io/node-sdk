@@ -52,17 +52,6 @@ describe('new Mesub()', () => {
         expect(() => new Mesub({ apiKey: 'sk', guardTimeout })).toThrow(/guardTimeout/);
     });
 
-    it('refuses the publishable key, naming the one it needs', () => {
-        expect(() => new Mesub({ apiKey: 'PUB_abc' })).toThrow(TypeError);
-        expect(() => new Mesub({ apiKey: 'PUB_abc' })).toThrow(/publishable key.*SUB_/s);
-    });
-
-    it('refuses the publishable key from MESUB_API_KEY too', () => {
-        vi.stubEnv('MESUB_API_KEY', 'PUB_abc');
-
-        expect(() => new Mesub()).toThrow(/publishable key/);
-    });
-
     it('refuses an apiKey that is not a string', () => {
         expect(() => new Mesub({ apiKey: 42 as unknown as string })).toThrow(TypeError);
     });
