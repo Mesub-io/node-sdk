@@ -194,6 +194,9 @@ answer this request.`: never the SDK's own message, which may name your
   `apiCode`, `retryable`, `status`, `body` and `retryAfter` (#60).
 - Every answer is checked against the shape the SDK types before it is used
   or cached; anything else throws `unexpected` (#59).
+- `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
+  `total`, as it is typed: amounts are whole numbers as strings, and
+  `rent.authority` may be null (#101).
 
 ### Releases and CI
 
