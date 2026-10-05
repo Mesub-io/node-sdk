@@ -400,6 +400,62 @@ describe('the widget routes: managing', () => {
     });
 
     it.each([
+        ['missing a field', () => Response.json({ slug: 'pro' })],
+        ['that is not JSON', () => new Response('<html>ok</html>', { status: 200 })],
+    ])('answers 502, never 200, to a plan body %s', async (_, answered) => {
+        const { fake } = setup();
+        const mesub = new Mesub({
+            apiKey: fake.apiKey,
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: () => Promise.resolve(answered()),
+        });
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: '/plans/pro', body: undefined, contentType: null },
+            null,
+        );
+
+        expect(answer.status).toBe(502);
+        expect(answer.body).toMatchObject({ error: { code: 'unexpected' } });
+    });
+
+    it('answers 502 to a submit whose 2xx cannot be read', async () => {
+        const { client, fake } = setup();
+        const created = await client.subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_ada',
+        });
+        const id = created.subscription.id;
+        // The submit answers a 201 of another shape; the read back is the fake's.
+        const mesub = new Mesub({
+            apiKey: fake.apiKey,
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: (input, init) =>
+                String(input).endsWith('/submit')
+                    ? Promise.resolve(Response.json({ ok: true }, { status: 201 }))
+                    : fake.fetch(input, init),
+        });
+
+        const answer = await handleWidget(
+            mesub,
+            {
+                method: 'POST',
+                path: `/subscriptions/${id}/submit`,
+                body: { transaction: created.transaction, terms_signature: SIGNATURE },
+                contentType: JSON_TYPE,
+            },
+            ada,
+        );
+
+        expect(answer.status).toBe(502);
+        expect(answer.body).toMatchObject({ error: { code: 'unexpected' } });
+    });
+
+    it.each([
         ['GET', '/nope'],
         ['GET', '/subscriptions/sub_1/cancel'],
         ['GET', '/subscriptions/sub_1/payments'],

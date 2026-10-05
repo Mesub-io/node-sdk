@@ -141,6 +141,8 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
+- A 2xx from Mesub that the SDK cannot read is answered as a 502
+  `unexpected`, no longer with the 2xx it came with (#97).
 
 ### Webhooks
 
