@@ -1475,6 +1475,19 @@ describe('mesubRoutes for Express', () => {
         await request(server).get('/api/mesub/subscriptions').expect(401);
     });
 
+    it('answers 404 itself to a path it does not serve, never through next()', async () => {
+        const { server } = app(() => ({ external_id: 'user_ada' }));
+        const after = vi.fn((_req: express.Request, res: express.Response) => {
+            res.status(404).json({ yours: true });
+        });
+        server.use(after);
+
+        const response = await request(server).get('/api/mesub/nope').expect(404);
+
+        expect(response.body).toEqual({ error: { code: 'not_found', message: 'Nothing here.' } });
+        expect(after).not.toHaveBeenCalled();
+    });
+
     it('answers 400 to a body that is not JSON, and 415 to a form', async () => {
         const { server } = app(() => ({ external_id: 'user_ada' }));
 

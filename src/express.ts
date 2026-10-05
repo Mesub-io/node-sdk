@@ -141,8 +141,8 @@ async function jsonBody(req: Request): Promise<unknown> {
  * Nest, the same line with `app.use` in `main.ts`.
  *
  * `customer` says who is asking from your own verified auth, so put your
- * login before it. A request it cannot answer goes to `next()`, a 404 of
- * yours; an integration error goes to `next(err)`.
+ * login before it. A request it cannot answer is answered 404 here, never
+ * handed to `next()`; an integration error goes to `next(err)`.
  */
 export function mesubRoutes(options: WidgetRoutesOptions<Request>): RequestHandler {
     checkWidgetOptions(options);
