@@ -39,6 +39,8 @@ export interface FakeMesubOptions {
      * The plans that exist: any other slug is answered 404 `plan_not_found`.
      * By default every slug exists. A slug alone, or the fields `plans.list`
      * and `plans.retrieve` should answer for it: the rest is filled in.
+     * Name them to test the widget routes, which read `plans.list`: left
+     * out, the list is empty.
      */
     plans?: Array<string | (Partial<Plan> & { slug: string })>;
     /** What `webhook()` signs with, and `client()` verifies with. Defaults to a fixed `whsec_` secret. */

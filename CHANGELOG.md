@@ -147,6 +147,14 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
+- A 2xx from Mesub that the SDK cannot read is answered as a 502
+  `unexpected`, no longer with the 2xx it came with (#97).
+- The routes read plans from your project's plan list, kept in memory for 60
+  seconds per client: `GET /plans/:slug`, which is public, and the price of
+  `upcoming` make one call to Mesub a minute at most, whatever the slugs
+  asked, and a slug that is not in the list answers 404 `plan_not_found`
+  without a call. A change to a plan shows within a minute. A failed read is
+  not kept, and `plans.list` and `plans.retrieve` stay uncached (#98).
 
 - `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
   5 pages at most, so one browser request is never more than 5 calls to
