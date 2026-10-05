@@ -115,6 +115,18 @@ function shown(subscription: ServerSubscription) {
     return rest;
 }
 
+/** `GET /subscriptions` reads pages of 100, Mesub's largest, and 5 at most. */
+const LIST_PAGE = 100;
+const LIST_MAX_PAGES = 5;
+
+/** What `GET /subscriptions` answers. */
+export interface WidgetSubscriptionList {
+    /** Newest first, expired checkouts included: the 500 newest at most. */
+    subscriptions: Array<Omit<ServerSubscription, 'email' | 'external_id'>>;
+    /** True when the customer has more than those, which are not read. */
+    has_more: boolean;
+}
+
 /** One pull attempt as the browser gets it: the fields Mesub serves, and no other. */
 export interface WidgetPayment {
     attempted_at: string;
@@ -393,12 +405,27 @@ export async function handleWidget(
         if (method === 'GET') {
             if (segments.length !== 1) return NOT_FOUND();
 
-            const subscriptions: ServerSubscription[] = [];
-            for await (const each of client.subscriptions.listAll(customerParam(asked))) {
-                subscriptions.push(each);
+            const params = { ...customerParam(asked), limit: LIST_PAGE };
+            let page = await client.subscriptions.list(params);
+            const subscriptions = [...page.data];
+
+            const more = () => page.has_more && page.data.length > 0;
+
+            // One browser request is LIST_MAX_PAGES calls to Mesub at most.
+            for (let read = 1; more() && read < LIST_MAX_PAGES; read++) {
+                page = await client.subscriptions.list({
+                    ...params,
+                    starting_after: page.data.at(-1)!.id,
+                });
+                subscriptions.push(...page.data);
             }
 
-            return { status: 200, body: { subscriptions: subscriptions.map(shown) } };
+            const list: WidgetSubscriptionList = {
+                subscriptions: subscriptions.map(shown),
+                has_more: more(),
+            };
+
+            return { status: 200, body: list };
         }
 
         // A JSON body cannot be sent by a plain form from another site.

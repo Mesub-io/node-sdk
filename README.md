@@ -232,7 +232,7 @@ API key, nor the email and the id you gave Mesub.
 | Route                                                        | What it does                                |
 | ------------------------------------------------------------ | ------------------------------------------- |
 | `GET /plans/:slug`                                           | The plan to show. Public.                   |
-| `GET /subscriptions`                                         | The customer's subscriptions.               |
+| `GET /subscriptions`                                         | The customer's subscriptions, 500 at most.  |
 | `GET /subscriptions/:id`                                     | One of them, with its payments.             |
 | `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
 | `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |

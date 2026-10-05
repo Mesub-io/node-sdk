@@ -332,10 +332,76 @@ describe('the widget routes: managing', () => {
     it('answers an empty list to a customer with none', async () => {
         const { call } = setup();
 
-        await expect(call(bob, { path: '/subscriptions' })).resolves.toMatchObject({
+        await expect(call(bob, { path: '/subscriptions' })).resolves.toEqual({
             status: 200,
-            body: { subscriptions: [] },
+            body: { subscriptions: [], has_more: false },
         });
+    });
+
+    /** A Mesub holding `total` subscriptions of Ada's, served by pages as asked. */
+    async function holding(total: number) {
+        const { client } = setup();
+        const one = await client.subscriptions.retrieve(await subscribed(client));
+        const queries: Array<Record<string, string>> = [];
+        const paged = new Mesub({
+            apiKey: 'SUB_test',
+            fetch: async (input) => {
+                const query = Object.fromEntries(new URL(String(input)).searchParams);
+                queries.push(query);
+                const from = query['starting_after'] ? Number(query['starting_after']) + 1 : 0;
+                const limit = Number(query['limit'] ?? 20);
+                const data = Array.from({ length: Math.min(limit, total - from) }, (_, index) => ({
+                    ...one,
+                    id: String(from + index),
+                }));
+
+                return Response.json({ data, has_more: from + data.length < total });
+            },
+        });
+        const list = () =>
+            handleWidget(
+                paged,
+                { method: 'GET', path: '/subscriptions', body: undefined, contentType: null },
+                ada,
+            );
+
+        return { list, queries };
+    }
+
+    it('reads the list by pages of 100, and says there is no more', async () => {
+        const { list, queries } = await holding(230);
+
+        const answer = await list();
+
+        const body = answer.body as { subscriptions: Array<{ id: string }>; has_more: boolean };
+        expect(body.subscriptions).toHaveLength(230);
+        expect(body.has_more).toBe(false);
+        expect(queries.map((query) => [query['limit'], query['starting_after']])).toEqual([
+            ['100', undefined],
+            ['100', '99'],
+            ['100', '199'],
+        ]);
+    });
+
+    it('stops at 5 pages, and says the list was cut', async () => {
+        const { list, queries } = await holding(10_000);
+
+        const answer = await list();
+
+        const body = answer.body as { subscriptions: Array<{ id: string }>; has_more: boolean };
+        expect(queries).toHaveLength(5);
+        expect(body.subscriptions).toHaveLength(500);
+        expect(body.subscriptions.at(-1)!.id).toBe('499');
+        expect(body.has_more).toBe(true);
+    });
+
+    it('says there is no more for exactly 5 full pages', async () => {
+        const { list, queries } = await holding(500);
+
+        const answer = await list();
+
+        expect(queries).toHaveLength(5);
+        expect(answer.body).toMatchObject({ has_more: false });
     });
 
     it('cancels in two steps: a transaction for the wallet, then the confirm', async () => {

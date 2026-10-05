@@ -142,6 +142,11 @@ The first version published to npm. Requires Node 22 or later.
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
 
+- `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
+  5 pages at most, so one browser request is never more than 5 calls to
+  Mesub. It answers `has_more` beside `subscriptions`: true when the customer
+  has more than the 500 newest, which are not read (#101).
+
 ### Webhooks
 
 - `mesub.webhooks.verify(body, headers)`, or `verifyWebhook` without a
