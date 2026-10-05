@@ -314,6 +314,79 @@ describe('FakeMesub', () => {
         await request(app).get('/pro').expect(401);
     });
 
+    it('keeps one checkout per customer on a wallet, as Mesub does (#100)', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const ask = (customer: { external_id?: string; email?: string }) =>
+            mesub.subscriptions.create({ plan: 'pro', wallet: WALLET, ...customer });
+
+        const his = await ask({ external_id: 'user_bob' });
+        const again = await ask({ external_id: 'user_bob', email: ' Bob@Shop.test ' });
+        const hers = await ask({ external_id: 'user_alice' });
+        const byEmail = await ask({ email: 'bob@shop.test' });
+        const nobody = await ask({});
+
+        // The same customer gets its own back, with the email given this time.
+        expect(again.subscription.id).toBe(his.subscription.id);
+        await expect(mesub.subscriptions.retrieve(his.subscription.id)).resolves.toMatchObject({
+            external_id: 'user_bob',
+            email: 'bob@shop.test',
+        });
+        // Anybody else naming that wallet gets another, and his is not written.
+        const ids = [his, hers, byEmail, nobody].map((made) => made.subscription.id);
+        expect(new Set(ids).size).toBe(4);
+        await expect(mesub.subscriptions.retrieve(hers.subscription.id)).resolves.toMatchObject({
+            external_id: 'user_alice',
+            wallet: WALLET,
+        });
+    });
+
+    it('expires the other checkouts on a wallet once one lands, and takes no new one', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const signed = { transaction: 'signed', terms_signature: 'signed' };
+        const his = await mesub.subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_bob',
+        });
+        const hers = await mesub.subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_alice',
+        });
+        const elsewhere = await mesub.subscriptions.create({
+            plan: 'pro',
+            wallet: OTHER,
+            external_id: 'user_alice',
+        });
+
+        await mesub.subscriptions.submit(his.subscription.id, signed);
+
+        await expect(mesub.hasAccess({ external_id: 'user_bob' }, 'pro')).resolves.toBe(true);
+        await expect(mesub.hasAccess({ external_id: 'user_alice' }, 'pro')).resolves.toBe(false);
+        await expect(mesub.subscriptions.retrieve(hers.subscription.id)).resolves.toMatchObject({
+            status: 'expired',
+            access: false,
+        });
+        expect(await codeOf(mesub.subscriptions.submit(hers.subscription.id, signed))).toBe(
+            'not_awaiting_signature',
+        );
+        expect(
+            await codeOf(
+                mesub.subscriptions.create({
+                    plan: 'pro',
+                    wallet: WALLET,
+                    external_id: 'user_alice',
+                }),
+            ),
+        ).toBe('already_subscribed');
+        // Another wallet's checkout is no business of his.
+        await expect(
+            mesub.subscriptions.retrieve(elsewhere.subscription.id),
+        ).resolves.toMatchObject({ status: 'pending' });
+    });
+
     it('subscribes: create, submit, then access, retrieve and list', async () => {
         const fake = new FakeMesub();
         const mesub = fake.client();

@@ -334,9 +334,12 @@ export class Subscriptions {
     /**
      * Reserves a subscription to that plan for that wallet, and builds what
      * it signs: `terms.message`, then `transaction`. Hand both to your front,
-     * then their signatures to `submit`. Called again for the same plan and
-     * wallet while nothing landed, it answers the same subscription with a
-     * fresh transaction. Sent once, never retried.
+     * then their signatures to `submit`. Called again for the same plan,
+     * wallet and customer (`external_id`, else `email`) while nothing landed,
+     * it answers the same subscription with a fresh transaction. Another
+     * customer naming that wallet gets a subscription of its own
+     * (Mesub-io/backend#311): only the one the wallet signs for lands, and
+     * the others then expire. Sent once, never retried.
      */
     async create(
         params: SubscribeParams,
