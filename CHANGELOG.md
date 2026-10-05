@@ -37,6 +37,12 @@ The first version published to npm. Requires Node 22 or later.
   API that predates the two fields is read as `paused: false` and
   `end_reason: null`, and a reason or an outcome newer than this release is
   handed back, not refused (#78).
+- The answer carries `late_reason`, why an `unpaid` one is late:
+  `insufficient_balance` (adding funds fixes it), `approval_revoked` (it does
+  not: Mesub's approval on the token account was revoked or replaced) or
+  `authority_closed`, typed as `LateReason`; null on any other status. A
+  subscription and a webhook's `data` carry it too. Required: an answer
+  without it is refused as `unexpected` (#109).
 - Calls for the same answer share one request in flight: while one is out
   for a customer and plan (or a customer's list), `access`, `hasAccess`,
   `decide` and `accessList` wait for its answer, or its error, instead of

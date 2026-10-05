@@ -46,6 +46,7 @@ const FIELDS: Record<
     status: 'string',
     paused: 'boolean',
     end_reason: 'string|null',
+    late_reason: 'string|null',
     payment_status: 'string',
     subscribed_since: 'string|null',
     first_subscribed_at: 'string|null',
@@ -67,6 +68,7 @@ const SUBSCRIPTION_FIELDS: Record<
     status: 'string',
     paused: 'boolean',
     end_reason: 'string|null',
+    late_reason: 'string|null',
     access: 'boolean',
     payment_status: 'string',
     plan: 'string|null',
@@ -194,6 +196,7 @@ describe.skipIf(!env.url)('contract with the back', () => {
             await expect(mesub().access(STRANGER, env.plan)).resolves.toMatchObject({
                 paused: false,
                 end_reason: null,
+                late_reason: null,
             });
         });
 

@@ -41,6 +41,7 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         status: 'active',
         paused: false,
         end_reason: null,
+        late_reason: null,
         payment_status: 'paid',
         subscribed_since: null,
         first_subscribed_at: null,

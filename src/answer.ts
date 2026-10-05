@@ -35,6 +35,14 @@ export type EndReason =
     'cancelled' | 'plan_removed' | 'plan_replaced' | 'plan_ended' | 'authority_closed' | 'closed';
 
 /**
+ * Why a payment is late (Mesub-io/backend#264), as the last failed pull found
+ * it: the wallet holds too little (adding funds fixes it), Mesub's approval on
+ * the token account was revoked or replaced by another app's (adding funds
+ * does not fix it), or the wallet's authorisation was closed, which is final.
+ */
+export type LateReason = 'insufficient_balance' | 'approval_revoked' | 'authority_closed';
+
+/**
  * `BLOCKED` is a pull nothing was tried for, none of it the subscriber's
  * doing (Mesub's fee payer, the network): it never counts against them.
  */
@@ -72,6 +80,8 @@ export interface AccessAnswer {
      * predates it.
      */
     end_reason: EndReason | null;
+    /** Why it is late, only when `status` is `unpaid`; null on a refusal Mesub cannot place. */
+    late_reason: LateReason | null;
     /** `none` on a paused seat: nothing is billed, so nothing is late. */
     payment_status: PaymentStatus;
     subscribed_since: string | null;
