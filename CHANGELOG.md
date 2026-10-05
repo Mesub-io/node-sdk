@@ -136,6 +136,18 @@ The first version published to npm. Requires Node 22 or later.
   nothing changed. A confirm that settled drops every cached access answer
   for that customer on that plan, the yes too (#50).
 
+### Situations
+
+- `explain(answer | subscription, { names, now, formatDate })` gives the
+  situation's key, a sentence for the subscriber and one for the merchant,
+  the access line, and the actions open now (who, the SDK method and route,
+  the sentence to show before signing), from the canonical wording agreed
+  with the backend. Chosen from `status`, then `paused`, then `end_reason` or
+  `late_reason`; Free is read as a `retry_deadline` set. A status or reason
+  newer than this release gives `unknown`, never an error. `SITUATIONS` is
+  the table, also served by `@mesub/node/situations`, which imports nothing
+  of Node so a page can use it (#116).
+
 ### Routes for the React widget
 
 - `mesubRoutes` (Express, and Nest through `app.use`) and

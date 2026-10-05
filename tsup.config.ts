@@ -14,6 +14,8 @@ export default defineConfig({
         nest: 'src/nest.ts',
         // The fake Mesub, for merchants' tests: loaded only by its own entry.
         testing: 'src/testing.ts',
+        // The situations' wording, browser-safe: it imports nothing of Node.
+        situations: 'src/situations.ts',
     },
     format: ['esm', 'cjs'],
     // Shared chunks in CJS too: without them each entry inlines its own copy

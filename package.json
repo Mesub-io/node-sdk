@@ -75,6 +75,16 @@
         "default": "./dist/testing.cjs"
       }
     },
+    "./situations": {
+      "import": {
+        "types": "./dist/situations.d.ts",
+        "default": "./dist/situations.js"
+      },
+      "require": {
+        "types": "./dist/situations.d.cts",
+        "default": "./dist/situations.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "engines": {
