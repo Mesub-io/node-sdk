@@ -1,9 +1,11 @@
+import { numberOf } from '../options.js';
 import type { CacheEntry, CacheStore } from './store.js';
 
 /** How many answers the memory store keeps before dropping the least recently used. */
 export const DEFAULT_MAX_ENTRIES = 10_000;
 
 export interface MemoryStoreOptions {
+    /** A whole number above 0: 10 000 by default. */
     maxEntries?: number;
     /** The clock, replaced in tests. */
     now?: () => number;
@@ -20,7 +22,10 @@ export class MemoryStore<T = unknown> implements CacheStore<T> {
     private readonly now: () => number;
 
     constructor(options: MemoryStoreOptions = {}) {
-        this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+        // NaN would never drop an entry: the store would grow without bound.
+        this.maxEntries = numberOf('maxEntries', options.maxEntries, DEFAULT_MAX_ENTRIES, {
+            integer: true,
+        });
         this.now = options.now ?? Date.now;
     }
 

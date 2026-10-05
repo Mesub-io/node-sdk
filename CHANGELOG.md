@@ -51,6 +51,12 @@ The first version published to npm. Requires Node 22 or later.
 - The check that refused a publishable `PUB_` key is removed: Mesub has no
   such key any more. Any non-empty API key is accepted, and a wrong one is
   answered 401 by Mesub, thrown as `unauthorized` (#96).
+- Three options that were taken and then misbehaved now throw a `TypeError`:
+  a per-call `timeout` that is not a number of milliseconds above 0 (`NaN`
+  or `0` cut the call at once), checked as the client's own before anything
+  is sent; a `tolerance` of 0 in `webhooks.verify` and `verifyWebhook` (it
+  refused every webhook); a `maxEntries` of `MemoryStore` that is not a whole
+  number above 0 (`NaN` left the store unbounded) (#101).
 - A `baseUrl` may carry a path, for a proxy: every call is made under it.
   `headers` adds headers to every call, such as a Cloudflare Access service
   token (#63).

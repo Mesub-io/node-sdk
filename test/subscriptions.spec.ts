@@ -409,6 +409,33 @@ describe('subscriptions.submit', () => {
             expect(fetch).toHaveBeenCalledTimes(3);
         });
 
+        it.each([Number.NaN, 0])(
+            'refuses a timeout of %s by its name, sending nothing',
+            async (timeout) => {
+                const { fetch } = mockFetch();
+                const client = mesub(fetch);
+
+                await expect(
+                    client.subscriptions.submit('sub_1', signed, { timeout }),
+                ).rejects.toThrow(
+                    new TypeError(
+                        `timeout must be a number of milliseconds, above 0, 2147483647 at most, not ${timeout}.`,
+                    ),
+                );
+                await expect(
+                    client.subscriptions.confirmCancel(
+                        'sub_1',
+                        { signature: SIGNATURE },
+                        { timeout },
+                    ),
+                ).rejects.toThrow(TypeError);
+                await expect(client.subscriptions.retrieve('sub_1', { timeout })).rejects.toThrow(
+                    TypeError,
+                );
+                expect(fetch).not.toHaveBeenCalled();
+            },
+        );
+
         it('takes a timeout and a budget of the call', async () => {
             const { fetch } = mockFetch(
                 new TypeError('fetch failed'),

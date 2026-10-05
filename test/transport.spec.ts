@@ -743,6 +743,31 @@ describe('per-call options', () => {
         expect((await result).value).toEqual({ ok: 1 });
     });
 
+    it.each([Number.NaN, 0, -1, Infinity, 2 ** 31, '5000', null])(
+        'refuses a timeout of %s before anything is sent, on a GET as on a POST',
+        async (timeout) => {
+            const { fetch } = mockFetch(json(200, {}), json(200, {}));
+            const options = { timeout: timeout as never };
+
+            const get = await settle(transport(fetch).get('/v1/access', {}, options));
+            const post = await settle(transport(fetch).post('/v1/subscriptions', {}, options));
+
+            expect(get.error).toBeInstanceOf(TypeError);
+            expect(post.error).toBeInstanceOf(TypeError);
+            expect(fetch).not.toHaveBeenCalled();
+        },
+    );
+
+    it('says which option and what it got', async () => {
+        const { fetch } = mockFetch();
+
+        await expect(
+            transport(fetch).get('/v1/access', {}, { timeout: Number.NaN }),
+        ).rejects.toThrow(
+            'timeout must be a number of milliseconds, above 0, 2147483647 at most, not NaN.',
+        );
+    });
+
     it('stops an attempt on the signal, with its reason, and never retries', async () => {
         const controller = new AbortController();
         const { fetch } = mockFetch('hang', json(200, {}));
