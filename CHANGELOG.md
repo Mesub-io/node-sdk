@@ -141,6 +141,12 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
+- The routes never hold a browser for Mesub: every read of one request (a
+  plan, a subscription, its attempts, a list, and the read before a submit,
+  a cancel, a resume or a close) shares one deadline of 10 s, and a 429 is
+  handed on at once with its `Retry-After`, never waited out and retried.
+  `submit` and the confirms keep their own timeouts, and the same methods
+  called from your code keep the client's `timeout` and `maxRetries` (#99).
 
 ### Webhooks
 
