@@ -173,7 +173,7 @@ export interface SubscriptionAttempt {
      * `paid` one that is what the transfer moved.
      */
     amount: string;
-    /** Null when nothing was sent. */
+    /** The transaction that paid. Null on every outcome but `paid`, a refused one included. */
     signature: string | null;
     /** The subscription had already failed on this period. */
     retry: boolean;
