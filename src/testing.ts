@@ -271,7 +271,7 @@ export class FakeMesub {
             .map((attempt): SubscriptionAttempt => ({
                 id: `att_fake_${(this.#attemptIds += 1)}`,
                 attempted_at: now,
-                outcome: 'PAID',
+                outcome: 'paid',
                 reason: null,
                 amount: '9990000',
                 signature: 'fake_signature',
@@ -517,7 +517,7 @@ export class FakeMesub {
             );
         }
 
-        const paid = all.filter((each) => each.outcome === 'PAID');
+        const paid = all.filter((each) => each.outcome === 'paid');
         const page: SubscriptionAttemptList = {
             data: all.slice(from, from + limit),
             has_more: all.length > from + limit,

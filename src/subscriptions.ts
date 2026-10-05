@@ -170,7 +170,7 @@ export interface SubscriptionAttempt {
     reason: string | null;
     /**
      * In the mint's smallest unit, as a string. What was asked for; on a
-     * `PAID` one that is what the transfer moved.
+     * `paid` one that is what the transfer moved.
      */
     amount: string;
     /** Null when nothing was sent. */
@@ -195,7 +195,7 @@ export interface SubscriptionAttemptList {
     /** Ask for the next page with `starting_after` set to the last id of this one. */
     has_more: boolean;
     /**
-     * Its `PAID` attempts since it began and the sum of what they moved, in
+     * Its `paid` attempts since it began and the sum of what they moved, in
      * the mint's smallest unit: counted by Mesub over all of them, not this page.
      */
     paid: { count: number; amount: string };

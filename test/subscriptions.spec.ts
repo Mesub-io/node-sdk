@@ -1415,7 +1415,7 @@ describe('subscriptions.attempts', () => {
         return {
             id: 'att_1',
             attempted_at: '2026-10-02T12:00:03.000Z',
-            outcome: 'PAID',
+            outcome: 'paid',
             reason: null,
             amount: '9990000',
             signature: SIGNATURE,
@@ -1493,7 +1493,7 @@ describe('subscriptions.attempts', () => {
 
     it('takes an attempt with no period, no signature and a reason', async () => {
         const blocked = attempt({
-            outcome: 'BLOCKED',
+            outcome: 'blocked',
             reason: 'fee-payer-empty',
             signature: null,
             period_start: null,

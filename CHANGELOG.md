@@ -32,8 +32,10 @@ The first version published to npm. Requires Node 22 or later.
   `end_reason`, why an `ended` one ended: `cancelled`, `plan_removed`,
   `plan_replaced`, `plan_ended`, `authority_closed` or `closed`, typed as
   `EndReason`. A `cancelled` subscription reads `ended`, with `end_reason`
-  `cancelled`, once its end date passed. An attempt's `outcome` may be
-  `BLOCKED`: nothing was tried, and none of it the subscriber's doing. An
+  `cancelled`, once its end date passed. An attempt's `outcome` is lowercase,
+  like every state on `/v1` (Mesub-io/backend#321): `paid`, `skipped`,
+  `rejected` or `blocked`, where `blocked` means nothing was tried, and none of
+  it the subscriber's doing. An
   API that predates the two fields is read as `paused: false` and
   `end_reason: null`, and a reason or an outcome newer than this release is
   handed back, not refused (#78).

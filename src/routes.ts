@@ -158,7 +158,7 @@ export interface WidgetSubscriptionList {
 /** One pull attempt as the browser gets it: the fields Mesub serves, and no other. */
 export interface WidgetPayment {
     attempted_at: string;
-    /** `PAID`, `SKIPPED`, `REJECTED` or `BLOCKED` today; a newer one is handed on as is. */
+    /** `paid`, `skipped`, `rejected` or `blocked` today; a newer one is handed on as is. */
     outcome: string;
     /** What was asked for, in the mint's smallest unit; on a paid one, what was paid. */
     amount: string;
