@@ -61,6 +61,9 @@ export interface WidgetResponse {
     headers?: Record<string, string>;
 }
 
+/** The most a widget request's body may weigh: a signed transaction is under 2 kB. */
+export const MAX_BODY_BYTES = 64 * 1024;
+
 const ACTIONS = ['cancel', 'resume', 'close'] as const;
 type Action = (typeof ACTIONS)[number];
 
@@ -75,6 +78,14 @@ function refusal(status: number, code: string, message: string): WidgetResponse 
 const NOT_FOUND = () => refusal(404, 'not_found', 'Nothing here.');
 const NO_SUBSCRIPTION = () => refusal(404, 'subscription_not_found', 'No such subscription.');
 
+/** Said to the browser for an error Mesub did not word itself. */
+const NO_ANSWER = 'Mesub could not answer this request.';
+
+/** Mesub's own words only: the transport's may name `baseUrl` or a network error. */
+function said(error: MesubError): string {
+    return error.apiCode === null ? NO_ANSWER : error.message;
+}
+
 /** A Mesub refusal, handed on with its own status and code, and nothing of the key. */
 function fromMesub(error: MesubError): WidgetResponse {
     // No answer from Mesub, or a 2xx this SDK cannot read: a 502 of yours.
@@ -86,7 +97,7 @@ function fromMesub(error: MesubError): WidgetResponse {
 
     return {
         status,
-        body: { error: { code: error.apiCode ?? error.code, message: error.message } },
+        body: { error: { code: error.apiCode ?? error.code, message: said(error) } },
         ...(retry && { headers: retry }),
     };
 }
@@ -114,6 +125,18 @@ function shown(subscription: ServerSubscription) {
     const { email: _email, external_id: _externalId, ...rest } = subscription;
 
     return rest;
+}
+
+/** `GET /subscriptions` reads pages of 100, Mesub's largest, and 5 at most. */
+const LIST_PAGE = 100;
+const LIST_MAX_PAGES = 5;
+
+/** What `GET /subscriptions` answers. */
+export interface WidgetSubscriptionList {
+    /** Newest first, expired checkouts included: the 500 newest at most. */
+    subscriptions: Array<Omit<ServerSubscription, 'email' | 'external_id'>>;
+    /** True when the customer has more than those, which are not read. */
+    has_more: boolean;
 }
 
 /** One pull attempt as the browser gets it: the fields Mesub serves, and no other. */
@@ -324,7 +347,7 @@ async function paymentsOf(client: Mesub, subscription: ServerSubscription): Prom
         }
 
         // The subscription was read: it is answered without them, so the dialog still opens.
-        return unlisted(error.apiCode ?? error.code, error.message);
+        return unlisted(error.apiCode ?? error.code, said(error));
     }
 }
 
@@ -370,7 +393,7 @@ async function olderPaymentsOf(client: Mesub, subscription: ServerSubscription):
     } catch (error) {
         if (!(error instanceof MesubError)) throw error;
 
-        return unlisted(error.apiCode ?? error.code, error.message);
+        return unlisted(error.apiCode ?? error.code, said(error));
     }
 }
 
@@ -438,12 +461,27 @@ export async function handleWidget(
         if (method === 'GET') {
             if (segments.length !== 1) return NOT_FOUND();
 
-            const subscriptions: ServerSubscription[] = [];
-            for await (const each of client.subscriptions.listAll(customerParam(asked))) {
-                subscriptions.push(each);
+            const params = { ...customerParam(asked), limit: LIST_PAGE };
+            let page = await client.subscriptions.list(params);
+            const subscriptions = [...page.data];
+
+            const more = () => page.has_more && page.data.length > 0;
+
+            // One browser request is LIST_MAX_PAGES calls to Mesub at most.
+            for (let read = 1; more() && read < LIST_MAX_PAGES; read++) {
+                page = await client.subscriptions.list({
+                    ...params,
+                    starting_after: page.data.at(-1)!.id,
+                });
+                subscriptions.push(...page.data);
             }
 
-            return { status: 200, body: { subscriptions: subscriptions.map(shown) } };
+            const list: WidgetSubscriptionList = {
+                subscriptions: subscriptions.map(shown),
+                has_more: more(),
+            };
+
+            return { status: 200, body: list };
         }
 
         // A JSON body cannot be sent by a plain form from another site.

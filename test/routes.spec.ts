@@ -502,10 +502,76 @@ describe('the widget routes: managing', () => {
     it('answers an empty list to a customer with none', async () => {
         const { call } = setup();
 
-        await expect(call(bob, { path: '/subscriptions' })).resolves.toMatchObject({
+        await expect(call(bob, { path: '/subscriptions' })).resolves.toEqual({
             status: 200,
-            body: { subscriptions: [] },
+            body: { subscriptions: [], has_more: false },
         });
+    });
+
+    /** A Mesub holding `total` subscriptions of Ada's, served by pages as asked. */
+    async function holding(total: number) {
+        const { client } = setup();
+        const one = await client.subscriptions.retrieve(await subscribed(client));
+        const queries: Array<Record<string, string>> = [];
+        const paged = new Mesub({
+            apiKey: 'SUB_test',
+            fetch: async (input) => {
+                const query = Object.fromEntries(new URL(String(input)).searchParams);
+                queries.push(query);
+                const from = query['starting_after'] ? Number(query['starting_after']) + 1 : 0;
+                const limit = Number(query['limit'] ?? 20);
+                const data = Array.from({ length: Math.min(limit, total - from) }, (_, index) => ({
+                    ...one,
+                    id: String(from + index),
+                }));
+
+                return Response.json({ data, has_more: from + data.length < total });
+            },
+        });
+        const list = () =>
+            handleWidget(
+                paged,
+                { method: 'GET', path: '/subscriptions', body: undefined, contentType: null },
+                ada,
+            );
+
+        return { list, queries };
+    }
+
+    it('reads the list by pages of 100, and says there is no more', async () => {
+        const { list, queries } = await holding(230);
+
+        const answer = await list();
+
+        const body = answer.body as { subscriptions: Array<{ id: string }>; has_more: boolean };
+        expect(body.subscriptions).toHaveLength(230);
+        expect(body.has_more).toBe(false);
+        expect(queries.map((query) => [query['limit'], query['starting_after']])).toEqual([
+            ['100', undefined],
+            ['100', '99'],
+            ['100', '199'],
+        ]);
+    });
+
+    it('stops at 5 pages, and says the list was cut', async () => {
+        const { list, queries } = await holding(10_000);
+
+        const answer = await list();
+
+        const body = answer.body as { subscriptions: Array<{ id: string }>; has_more: boolean };
+        expect(queries).toHaveLength(5);
+        expect(body.subscriptions).toHaveLength(500);
+        expect(body.subscriptions.at(-1)!.id).toBe('499');
+        expect(body.has_more).toBe(true);
+    });
+
+    it('says there is no more for exactly 5 full pages', async () => {
+        const { list, queries } = await holding(500);
+
+        const answer = await list();
+
+        expect(queries).toHaveLength(5);
+        expect(answer.body).toMatchObject({ has_more: false });
     });
 
     it('cancels in two steps: a transaction for the wallet, then the confirm', async () => {
@@ -567,6 +633,68 @@ describe('the widget routes: managing', () => {
         const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
 
         expect([502, 503]).toContain(answer.status);
+    });
+
+    it('never tells the browser your baseUrl when what answers there is not Mesub', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            baseUrl: 'https://proxy.internal.example/mesub',
+            fetch: async () => new Response('<h1>Not Found</h1>', { status: 404 }),
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.status).toBe(404);
+        expect(answer.body).toEqual({
+            error: { code: 'unexpected', message: 'Mesub could not answer this request.' },
+        });
+        // Your server still reads it in full.
+        await expect(mesub.plans.retrieve('pro')).rejects.toThrow(
+            'is baseUrl (https://proxy.internal.example/mesub) the Mesub API?',
+        );
+    });
+
+    it('never tells the browser why Mesub could not be reached', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => {
+                throw new Error('connect ECONNREFUSED 10.0.0.7:8443');
+            },
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.body).toEqual({
+            error: { code: 'unavailable', message: 'Mesub could not answer this request.' },
+        });
+        await expect(mesub.plans.retrieve('pro')).rejects.toThrow('ECONNREFUSED 10.0.0.7:8443');
+    });
+
+    it("still hands on Mesub's own message, the one that comes with its code", async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            fetch: async () =>
+                Response.json(
+                    {
+                        statusCode: 409,
+                        error: 'Conflict',
+                        message: 'This plan takes no new subscriber.',
+                        code: 'plan_unavailable',
+                        retryable: false,
+                    },
+                    { status: 409 },
+                ),
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.body).toEqual({
+            error: { code: 'plan_unavailable', message: 'This plan takes no new subscriber.' },
+        });
     });
 
     it.each([
@@ -1313,6 +1441,33 @@ describe('the widget routes: one subscription in full', () => {
         expect(answer.body).toMatchObject({ payments: null, paid: null, payments_error: {} });
     });
 
+    it('never tells the browser why its payments could not be read, short of a word of Mesub', async () => {
+        const { client } = setup();
+        const id = await subscribed(client);
+        const read = await client.subscriptions.retrieve(id);
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => {
+                throw new Error('connect ECONNREFUSED 10.0.0.7:8443');
+            },
+        });
+        vi.spyOn(mesub.subscriptions, 'retrieve').mockResolvedValue(read);
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.body).toMatchObject({
+            payments_error: {
+                code: 'unavailable',
+                message: 'Mesub could not answer this request.',
+            },
+        });
+    });
+
     it('throws what is not a refusal of Mesub: a bug, never an answer', async () => {
         const { client, fake } = setup();
         const id = await subscribed(client);
@@ -1635,6 +1790,19 @@ describe('mesubRoutes for Express', () => {
         await request(server).get('/api/mesub/subscriptions').expect(401);
     });
 
+    it('answers 404 itself to a path it does not serve, never through next()', async () => {
+        const { server } = app(() => ({ external_id: 'user_ada' }));
+        const after = vi.fn((_req: express.Request, res: express.Response) => {
+            res.status(404).json({ yours: true });
+        });
+        server.use(after);
+
+        const response = await request(server).get('/api/mesub/nope').expect(404);
+
+        expect(response.body).toEqual({ error: { code: 'not_found', message: 'Nothing here.' } });
+        expect(after).not.toHaveBeenCalled();
+    });
+
     it('answers 400 to a body that is not JSON, and 415 to a form', async () => {
         const { server } = app(() => ({ external_id: 'user_ada' }));
 
@@ -1765,6 +1933,91 @@ describe('mesubRouteHandlers for Next', () => {
             body: '{nope',
         });
         expect((await POST(broken, context('subscriptions'))).status).toBe(400);
+    });
+
+    /** A POST whose body comes in those chunks, and how many of them were asked for. */
+    function streamed(chunks: Iterable<Uint8Array>, headers: Record<string, string> = {}) {
+        const each = chunks[Symbol.iterator]();
+        const seen = { pulls: 0, cancelled: false };
+        const body = new ReadableStream<Uint8Array>(
+            {
+                pull(controller) {
+                    seen.pulls++;
+                    const next = each.next();
+                    if (next.done) controller.close();
+                    else controller.enqueue(next.value);
+                },
+                cancel() {
+                    seen.cancelled = true;
+                },
+            },
+            { highWaterMark: 0 },
+        );
+        const request = new Request('https://shop.test/api/mesub/x', {
+            method: 'POST',
+            headers: { 'content-type': JSON_TYPE, ...headers },
+            body,
+            duplex: 'half',
+        } as RequestInit);
+
+        return { request, seen };
+    }
+
+    function* forever(chunk: Uint8Array) {
+        for (;;) yield chunk;
+    }
+
+    it('counts the 64 kB in bytes, not in characters', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        // 30 000 characters, 90 000 bytes.
+        const heavy = json({ plan: 'pro', wallet: '€'.repeat(30_000) });
+
+        const response = await POST(heavy, context('subscriptions'));
+
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+            error: { code: 'payload_too_large', message: 'The body is too large.' },
+        });
+        expect(fake.requests).toHaveLength(0);
+    });
+
+    it('takes a body of exactly 64 kB', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const empty = JSON.stringify({ plan: 'pro', wallet: WALLET, pad: '' }).length;
+        const full = json({ plan: 'pro', wallet: WALLET, pad: 'x'.repeat(64 * 1024 - empty) });
+
+        expect((await POST(full, context('subscriptions'))).status).toBe(201);
+    });
+
+    it('refuses on Content-Length alone, reading nothing', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const { request, seen } = streamed(forever(new Uint8Array(1024)), {
+            'content-length': String(64 * 1024 + 1),
+        });
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(413);
+        expect(seen.pulls).toBe(0);
+    });
+
+    it('stops reading at the limit when no Content-Length says it', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const { request, seen } = streamed(forever(new Uint8Array(16 * 1024)));
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(413);
+        // Four chunks fill the 64 kB, the fifth passes it.
+        expect(seen.pulls).toBe(5);
+        expect(seen.cancelled).toBe(true);
+    });
+
+    it('reads a body whose characters are cut across chunks', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        const bytes = new TextEncoder().encode(
+            JSON.stringify({ plan: 'pro', wallet: `${WALLET}é€` }),
+        );
+        const { request } = streamed(Array.from(bytes, (byte) => Uint8Array.of(byte)));
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(201);
+        expect(fake.requests.at(-1)?.body).toMatchObject({ wallet: `${WALLET}é€` });
     });
 
     it('serves one subscription with its payments, and 404 for one not theirs', async () => {

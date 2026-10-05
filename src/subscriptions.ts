@@ -1,6 +1,7 @@
 import type { Customer, EndReason, PaymentStatus, PullOutcome } from './answer.js';
 import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
+import { numberOf } from './options.js';
 import { type QueryValue, type RequestOptions, type Transport, sleep } from './transport.js';
 import {
     confirmResultFrom,
@@ -401,7 +402,8 @@ export class Subscriptions {
         // Built once: every send carries exactly this body.
         const body = { transaction: params.transaction, terms_signature: params.terms_signature };
         const { signal } = options;
-        const timeout = options.timeout ?? SUBMIT_TIMEOUT;
+        // Checked here too: the budget is worked out from it.
+        const timeout = numberOf('timeout', options.timeout, SUBMIT_TIMEOUT, { delay: true });
         const budget = options.budget ?? timeout + REPLAY_ROOM;
         if (!Number.isFinite(budget) || budget <= 0) {
             throw new TypeError(`budget must be a positive number of ms, not ${budget}.`);
