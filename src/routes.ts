@@ -181,51 +181,44 @@ export interface WidgetUpcoming {
     retries_allowed: number | null;
 }
 
-/** How long a plan read for the widget is kept, a slug Mesub does not know included. */
+/** How long the plan list read for the widget is kept. */
 const PLAN_TTL_MS = 60_000;
-/** Slugs are the caller's to make up: past this many, the oldest read is dropped. */
-const PLAN_READS_MAX = 200;
 
-interface PlanRead {
-    /** Shared while the request is out, kept rejected for `plan_not_found`. */
-    plan: Promise<Plan>;
+interface PlanList {
+    /** Shared while the request is out. */
+    plans: Promise<Plan[]>;
     /** Infinity until Mesub answered. */
     until: number;
 }
 
 // Per client, so two projects never share a plan.
-const planReads = new WeakMap<Mesub, Map<string, PlanRead>>();
+const planLists = new WeakMap<Mesub, PlanList>();
 
 /**
- * A plan for the widget routes: public reads must not spend the API key's
- * rate limit, so one call per slug and per TTL. Any error but
- * `plan_not_found` is forgotten at once.
+ * A plan for the widget routes, from the project's list: public reads must
+ * not spend the API key's rate limit, so one call per TTL whatever the slugs,
+ * and null with no call for a slug that is not in it. A failed read is
+ * forgotten at once.
  */
-function planOf(client: Mesub, slug: string): Promise<Plan> {
-    let reads = planReads.get(client);
-    if (!reads) planReads.set(client, (reads = new Map()));
+async function planOf(client: Mesub, slug: string): Promise<Plan | null> {
+    let list = planLists.get(client);
 
-    const known = reads.get(slug);
-    if (known && known.until > Date.now()) return known.plan;
+    if (!list || list.until <= Date.now()) {
+        const read: PlanList = { plans: client.plans.list(), until: Infinity };
 
-    const read: PlanRead = { plan: client.plans.retrieve(slug), until: Infinity };
-    const kept = reads;
-    const settle = (keep: boolean) => {
-        if (keep) read.until = Date.now() + PLAN_TTL_MS;
-        else if (kept.get(slug) === read) kept.delete(slug);
-    };
+        list = read;
+        planLists.set(client, read);
+        read.plans.then(
+            () => {
+                read.until = Date.now() + PLAN_TTL_MS;
+            },
+            () => {
+                if (planLists.get(client) === read) planLists.delete(client);
+            },
+        );
+    }
 
-    // Deleted first: read again, it is the newest.
-    reads.delete(slug);
-    reads.set(slug, read);
-    if (reads.size > PLAN_READS_MAX) reads.delete(reads.keys().next().value!);
-
-    read.plan.then(
-        () => settle(true),
-        (error: unknown) => settle(error instanceof MesubError && error.code === 'plan_not_found'),
-    );
-
-    return read.plan;
+    return (await list.plans).find((plan) => plan.slug === slug) ?? null;
 }
 
 /**
@@ -407,7 +400,11 @@ export async function handleWidget(
                 return refusal(404, 'plan_not_found', 'No such plan.');
             }
 
-            return { status: 200, body: await planOf(client, slug) };
+            const plan = await planOf(client, slug);
+
+            return plan
+                ? { status: 200, body: plan }
+                : refusal(404, 'plan_not_found', 'No such plan.');
         }
 
         if (segments[0] !== 'subscriptions') return NOT_FOUND();

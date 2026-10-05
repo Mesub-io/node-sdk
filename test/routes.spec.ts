@@ -105,6 +105,12 @@ describe('the widget routes: a plan', () => {
 
 describe('the widget routes: plans kept in memory', () => {
     const paths = (fake: FakeMesub) => fake.requests.map((each) => each.path);
+    const read = (client: Mesub, slug = 'pro') =>
+        handleWidget(
+            client,
+            { method: 'GET', path: `/plans/${slug}`, body: undefined, contentType: null },
+            null,
+        );
 
     beforeEach(() => {
         vi.useFakeTimers({ toFake: ['Date'] });
@@ -117,78 +123,68 @@ describe('the widget routes: plans kept in memory', () => {
     it('asks Mesub once for a plan read again and again', async () => {
         const { call, fake } = setup();
 
-        for (let read = 0; read < 50; read++) {
+        for (let each = 0; each < 50; each++) {
             const answer = await call(null, { path: '/plans/pro' });
 
             expect(answer.status).toBe(200);
             expect(answer.body).toMatchObject({ slug: 'pro', amount_display: '9.99' });
         }
+        expect((await call(null, { path: '/plans/team' })).body).toMatchObject({ slug: 'team' });
 
-        expect(paths(fake)).toEqual(['/v1/plans/pro']);
+        expect(paths(fake)).toEqual(['/v1/plans']);
     });
 
-    it('asks once for a slug Mesub does not know, and still answers its 404', async () => {
+    it('answers 50 made-up slugs 404 with one call at most', async () => {
         const { call, fake } = setup();
 
-        const first = await call(null, { path: '/plans/nope' });
-        const second = await call(null, { path: '/plans/nope' });
+        for (let each = 0; each < 50; each++) {
+            const answer = await call(null, { path: `/plans/made-up-${each}` });
 
-        expect(first.status).toBe(404);
-        expect(first.body).toEqual({
-            error: { code: 'plan_not_found', message: 'No plan under slug nope' },
-        });
-        expect(second).toEqual(first);
-        expect(paths(fake)).toEqual(['/v1/plans/nope']);
+            expect(answer.status).toBe(404);
+            expect(answer.body).toEqual({
+                error: { code: 'plan_not_found', message: 'No such plan.' },
+            });
+        }
+
+        expect(paths(fake)).toEqual(['/v1/plans']);
     });
 
     it('shares one request between reads made at the same time', async () => {
         const { call, fake } = setup();
 
         const answers = await Promise.all(
-            Array.from({ length: 10 }, () => call(null, { path: '/plans/pro' })),
+            ['pro', 'team', 'nope', 'pro', 'pro'].map((slug) =>
+                call(null, { path: `/plans/${slug}` }),
+            ),
         );
 
-        expect(answers.map((answer) => answer.status)).toEqual(Array(10).fill(200));
-        expect(paths(fake)).toEqual(['/v1/plans/pro']);
+        expect(answers.map((answer) => answer.status)).toEqual([200, 200, 404, 200, 200]);
+        expect(paths(fake)).toEqual(['/v1/plans']);
     });
 
-    it('asks again once 60 s have passed, for a plan as for an unknown slug', async () => {
-        const { call, fake } = setup();
+    it('asks again once 60 s have passed, and shows what changed', async () => {
+        const before = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '9.99' }] });
+        const after = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '19.99' }] });
+        let mesub = before;
+        const client = new Mesub({
+            apiKey: before.apiKey,
+            baseUrl: before.baseUrl,
+            maxRetries: 0,
+            fetch: (input, init) => mesub.fetch(input, init),
+        });
 
-        await call(null, { path: '/plans/pro' });
-        await call(null, { path: '/plans/nope' });
+        await read(client);
+        mesub = after;
         vi.advanceTimersByTime(59_999);
-        await call(null, { path: '/plans/pro' });
-        await call(null, { path: '/plans/nope' });
-
-        expect(fake.requests).toHaveLength(2);
+        expect((await read(client)).body).toMatchObject({ amount_display: '9.99' });
+        expect((await read(client, 'nope')).status).toBe(404);
+        expect(paths(before)).toEqual(['/v1/plans']);
+        expect(after.requests).toEqual([]);
 
         vi.advanceTimersByTime(1);
-        expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
-        expect((await call(null, { path: '/plans/nope' })).status).toBe(404);
-
-        expect(fake.requests).toHaveLength(4);
-    });
-
-    it('keeps 200 slugs at most, dropping the oldest read', async () => {
-        const fake = new FakeMesub();
-        const client = fake.client();
-        const read = (slug: string) =>
-            handleWidget(
-                client,
-                { method: 'GET', path: `/plans/${slug}`, body: undefined, contentType: null },
-                null,
-            );
-
-        for (let each = 0; each <= 200; each++) await read(`plan-${each}`);
-        expect(fake.requests).toHaveLength(201);
-
-        // The newest 200 are kept: none of them is asked again.
-        for (let each = 1; each <= 200; each++) await read(`plan-${each}`);
-        expect(fake.requests).toHaveLength(201);
-
-        await read('plan-0');
-        expect(fake.requests).toHaveLength(202);
+        expect((await read(client)).body).toMatchObject({ amount_display: '19.99' });
+        expect((await read(client, 'nope')).status).toBe(404);
+        expect(paths(after)).toEqual(['/v1/plans']);
     });
 
     it.each([
@@ -202,27 +198,24 @@ describe('the widget routes: plans kept in memory', () => {
         const failed = await call(null, { path: '/plans/pro' });
         expect(failed.status).toBe(status);
         expect(failed.body).toMatchObject({ error: { code } });
-        expect((await call(null, { path: '/plans/pro' })).status).toBe(status);
+        // An unknown slug is not told apart while the list cannot be read.
+        expect((await call(null, { path: '/plans/nope' })).status).toBe(status);
 
         fake.fail(null);
         expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
-        expect(fake.requests).toHaveLength(3);
+        expect(paths(fake)).toEqual(['/v1/plans', '/v1/plans', '/v1/plans']);
     });
 
     it('keeps the plans of two clients apart', async () => {
         const ours = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '9.99' }] });
-        const theirs = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '49.00' }] });
-        const read = (client: Mesub) =>
-            handleWidget(
-                client,
-                { method: 'GET', path: '/plans/pro', body: undefined, contentType: null },
-                null,
-            );
+        const theirs = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '49.00' }, 'max'] });
         const [first, second] = [ours.client(), theirs.client()];
 
         expect((await read(first)).body).toMatchObject({ amount_display: '9.99' });
         expect((await read(second)).body).toMatchObject({ amount_display: '49.00' });
         expect((await read(first)).body).toMatchObject({ amount_display: '9.99' });
+        expect((await read(first, 'max')).status).toBe(404);
+        expect((await read(second, 'max')).status).toBe(200);
 
         expect(ours.requests).toHaveLength(1);
         expect(theirs.requests).toHaveLength(1);
@@ -231,7 +224,7 @@ describe('the widget routes: plans kept in memory', () => {
         expect(ours.requests).toHaveLength(2);
     });
 
-    it('prices what is pulled next from the plan it already read', async () => {
+    it('prices what is pulled next from the list it already read', async () => {
         const { call, fake } = setup();
         const { id } = fake.addSubscription({
             wallet: WALLET,
@@ -250,13 +243,15 @@ describe('the widget routes: plans kept in memory', () => {
                 upcoming: [{ kind: 'charge', amount: '9990000', amount_display: '9.99' }],
             });
         }
-        expect(paths(fake).filter((path) => path === '/v1/plans/pro')).toHaveLength(1);
+        expect(paths(fake).filter((path) => path.startsWith('/v1/plans'))).toEqual(['/v1/plans']);
     });
 
-    it('leaves `plans.retrieve` uncached, and unknown to the routes', async () => {
+    it('leaves `plans.list` and `plans.retrieve` uncached', async () => {
         const { call, client, fake } = setup();
 
         await call(null, { path: '/plans/pro' });
+        await client.plans.list();
+        await client.plans.list();
         await client.plans.retrieve('pro');
         await client.plans.retrieve('pro');
         await expect(client.plans.retrieve('nope')).rejects.toMatchObject({
@@ -266,7 +261,15 @@ describe('the widget routes: plans kept in memory', () => {
             code: 'plan_not_found',
         });
 
-        expect(fake.requests).toHaveLength(5);
+        expect(paths(fake)).toEqual([
+            '/v1/plans',
+            '/v1/plans',
+            '/v1/plans',
+            '/v1/plans/pro',
+            '/v1/plans/pro',
+            '/v1/plans/nope',
+            '/v1/plans/nope',
+        ]);
     });
 });
 
@@ -792,7 +795,7 @@ describe('the widget routes: one subscription in full', () => {
         });
 
         expect(body.upcoming).toEqual([]);
-        expect(calls(fake)).not.toContain('GET /v1/plans/pro');
+        expect(calls(fake)).not.toContain('GET /v1/plans');
     });
 
     it.each([
@@ -837,7 +840,7 @@ describe('the widget routes: one subscription in full', () => {
             baseUrl: fake.baseUrl,
             maxRetries: 0,
             fetch: (input, init) =>
-                String(input).includes('/v1/plans/')
+                String(input).endsWith('/v1/plans')
                     ? Promise.resolve(
                           Response.json(
                               { statusCode: 500, code: 'internal_error', message: 'Broken.' },
@@ -957,7 +960,7 @@ describe('the widget routes: one subscription in full', () => {
         expect(body.payments_error).toBeNull();
         // Read by its own id: /v1/access is not asked.
         expect(calls(fake, before).sort()).toEqual([
-            'GET /v1/plans/pro',
+            'GET /v1/plans',
             `GET /v1/subscriptions/${id}`,
             `GET /v1/subscriptions/${id}/attempts`,
         ]);
@@ -1383,7 +1386,7 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
         });
         expect(calls(fake, before).sort()).toEqual([
             'GET /v1/access',
-            'GET /v1/plans/pro',
+            'GET /v1/plans',
             `GET /v1/subscriptions/${id}`,
             `GET /v1/subscriptions/${id}/attempts`,
         ]);

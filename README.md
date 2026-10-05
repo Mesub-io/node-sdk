@@ -239,10 +239,11 @@ API key, nor the email and the id you gave Mesub.
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
 
-`GET /plans/:slug` is public, so the routes keep each plan in memory for 60
-seconds, an unknown slug included: anonymous traffic does not spend your API
-key's rate limit, and a change to a plan shows there within a minute.
-`mesub.plans.retrieve` itself is never cached.
+`GET /plans/:slug` is public, so the routes answer it from your project's
+plan list, kept in memory for 60 seconds: one call to Mesub a minute at most,
+whatever the slugs asked, and a slug you do not have costs none. A change to a
+plan shows there within a minute. `mesub.plans.list` and `mesub.plans.retrieve`
+themselves are never cached.
 
 A refusal is `{ error: { code, message } }`. The widget's side:
 [React widget](https://docs.mesub.io/docs/react).
