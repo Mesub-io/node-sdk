@@ -352,6 +352,42 @@ describe('FakeMesub', () => {
         );
     });
 
+    it('hands back the pending subscription of a plan and wallet, to the last caller', async () => {
+        const fake = new FakeMesub();
+        const { subscriptions } = fake.client();
+        const first = await subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_42',
+            email: 'a@b.co',
+        });
+
+        const second = await subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_43',
+        });
+
+        expect(second.subscription).toEqual(first.subscription);
+        // What the last call gives is written over, what it does not is kept.
+        await expect(subscriptions.list({ wallet: WALLET })).resolves.toMatchObject({
+            data: [{ id: first.subscription.id, external_id: 'user_43', email: 'a@b.co' }],
+        });
+
+        const other = await subscriptions.create({ plan: 'team', wallet: WALLET });
+        const elsewhere = await subscriptions.create({ plan: 'pro', wallet: OTHER });
+        expect(other.subscription.id).not.toBe(first.subscription.id);
+        expect(elsewhere.subscription.id).not.toBe(first.subscription.id);
+
+        // Landed, it waits no more: the next create is a new one.
+        await subscriptions.submit(first.subscription.id, {
+            transaction: first.transaction,
+            terms_signature: 'signed',
+        });
+        const next = await subscriptions.create({ plan: 'pro', wallet: WALLET });
+        expect(next.subscription.id).not.toBe(first.subscription.id);
+    });
+
     describe('cancel, resume and close', () => {
         const PAST = '2020-01-01T00:00:00.000Z';
         const signed = { signature: 'fake_signature' };

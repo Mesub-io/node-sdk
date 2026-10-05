@@ -541,17 +541,28 @@ export class FakeMesub {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
 
-        const subscription = this.addSubscription({
-            plan,
-            wallet,
-            email: typeof email === 'string' ? email.trim().toLowerCase() : null,
-            external_id: typeof external_id === 'string' ? external_id.trim() : null,
-            status: 'pending',
-            access: false,
-            payment_status: 'none',
-            current_period_start: null,
-            confirmed_at: null,
-        });
+        const given = {
+            ...(typeof email === 'string' && { email: email.trim().toLowerCase() }),
+            ...(typeof external_id === 'string' && { external_id: external_id.trim() }),
+        };
+        // One pending per plan and wallet: the last caller gets it, what it gives written over.
+        const waiting = this.#subscriptions.find(
+            (each) => each.status === 'pending' && each.plan === plan && each.wallet === wallet,
+        );
+        const subscription = waiting
+            ? Object.assign(waiting, given)
+            : this.addSubscription({
+                  plan,
+                  wallet,
+                  email: null,
+                  external_id: null,
+                  ...given,
+                  status: 'pending',
+                  access: false,
+                  payment_status: 'none',
+                  current_period_start: null,
+                  confirmed_at: null,
+              });
         const zero = '0';
         const answer: SubscribeTransaction = {
             subscription: { id: subscription.id, status: 'pending' },

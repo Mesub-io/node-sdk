@@ -421,6 +421,19 @@ export async function handleWidget(
             if (asked.kind === 'wallet' && asked.value !== wallet) {
                 return refusal(403, 'wallet_mismatch', 'Connect the wallet you signed in with.');
             }
+            // Mesub hands a pending checkout to the last caller: another customer's is left alone.
+            if (asked.kind !== 'wallet') {
+                // One page: nothing is made for a plan and wallet while one waits, so it is the newest.
+                const { data } = await client.subscriptions.list({ wallet, plan });
+
+                if (data.some((each) => each.status === 'pending' && !isTheirs(each, asked))) {
+                    return refusal(
+                        409,
+                        'checkout_in_progress',
+                        'A checkout is already in progress for this wallet.',
+                    );
+                }
+            }
 
             const email = asked.kind === 'email' ? asked.value : options.email;
             const created = await client.subscriptions.create({

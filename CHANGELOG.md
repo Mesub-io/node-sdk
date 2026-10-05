@@ -141,6 +141,11 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
+- `POST /subscriptions` answers 409 `checkout_in_progress`, and creates
+  nothing, when the wallet sent has a pending checkout on that plan under
+  another customer's `external_id` or email, or under none: Mesub would have
+  handed that checkout over. It costs one more Mesub call per create, and
+  none for a customer named by wallet (#100).
 
 ### Webhooks
 
@@ -168,6 +173,9 @@ The first version published to npm. Requires Node 22 or later.
 - `FakeMesub` answers cancel, resume and close and their confirms, which
   land at once: the subscription and its access answers move, and a step the
   status does not allow is refused with Mesub's code (#50).
+- `FakeMesub` hands back the pending subscription of a plan and wallet to a
+  second `create`, as Mesub does, with the email and external id that call
+  gives written over: it no longer adds one each time (#100).
 
 ### Errors
 

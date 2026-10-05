@@ -239,7 +239,9 @@ API key, nor the email and the id you gave Mesub.
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
 
-A refusal is `{ error: { code, message } }`. The widget's side:
+A refusal is `{ error: { code, message } }`. `POST /subscriptions` reads
+Mesub once before it creates: a wallet another customer's checkout is waiting
+on answers 409 `checkout_in_progress`. The widget's side:
 [React widget](https://docs.mesub.io/docs/react).
 
 ## Webhooks

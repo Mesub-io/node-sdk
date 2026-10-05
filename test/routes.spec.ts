@@ -313,6 +313,177 @@ describe('the widget routes: subscribing', () => {
     });
 });
 
+describe('the widget routes: a checkout in progress', () => {
+    const sent = (fake: FakeMesub, from = 0) =>
+        fake.requests.slice(from).map((each) => `${each.method} ${each.path}`);
+
+    it("refuses another customer's wallet while their checkout waits, and leaves it theirs", async () => {
+        const { client, post, fake } = setup();
+        const theirs = await post(
+            bob,
+            '/subscriptions',
+            { plan: 'pro', wallet: WALLET },
+            { email: 'bob@example.com' },
+        );
+        const { subscription, transaction } = theirs.body as {
+            subscription: { id: string };
+            transaction: string;
+        };
+        const before = fake.requests.length;
+
+        const answer = await post(
+            ada,
+            '/subscriptions',
+            { plan: 'pro', wallet: WALLET },
+            { email: 'ada@example.com' },
+        );
+
+        expect(answer).toMatchObject({
+            status: 409,
+            body: { error: { code: 'checkout_in_progress' } },
+        });
+        // One read, and nothing created: Mesub would have handed Ada the row.
+        expect(sent(fake, before)).toEqual(['GET /v1/subscriptions']);
+        expect(fake.requests.at(-1)?.query).toEqual({ wallet: WALLET, plan: 'pro' });
+        expect(JSON.stringify(answer)).not.toContain('bob');
+        await expect(client.subscriptions.retrieve(subscription.id)).resolves.toMatchObject({
+            status: 'pending',
+            external_id: 'user_bob',
+            email: 'bob@example.com',
+        });
+        await expect(
+            post(bob, `/subscriptions/${subscription.id}/submit`, {
+                transaction,
+                terms_signature: SIGNATURE,
+            }),
+        ).resolves.toMatchObject({ status: 201, body: { subscription: { status: 'active' } } });
+    });
+
+    it('creates again for the customer whose checkout it is, on the same subscription', async () => {
+        const { post, fake } = setup();
+        const first = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+        const before = fake.requests.length;
+
+        const again = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(again.status).toBe(201);
+        expect(again.body).toMatchObject({
+            subscription: (first.body as { subscription: unknown }).subscription,
+        });
+        expect(sent(fake, before)).toEqual(['GET /v1/subscriptions', 'POST /v1/subscriptions']);
+    });
+
+    it('creates when nothing waits on that wallet, after one read', async () => {
+        const { post, fake } = setup();
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.status).toBe(201);
+        expect(sent(fake)).toEqual(['GET /v1/subscriptions', 'POST /v1/subscriptions']);
+    });
+
+    it.each(['expired', 'ended', 'failed'] as const)(
+        'is not held back by an %s subscription of another customer',
+        async (status) => {
+            const { post, fake } = setup();
+            fake.addSubscription({ wallet: WALLET, plan: 'pro', external_id: 'user_bob', status });
+
+            const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+            expect(answer.status).toBe(201);
+        },
+    );
+
+    it("is not held back by another customer's checkout on another plan or wallet", async () => {
+        const { post } = setup();
+        await post(bob, '/subscriptions', { plan: 'team', wallet: WALLET });
+        await post(bob, '/subscriptions', { plan: 'pro', wallet: OTHER_WALLET });
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.status).toBe(201);
+    });
+
+    it('refuses a checkout that waits under no id: it is not theirs either', async () => {
+        const { client, post, fake } = setup();
+        // As your own server opens one without naming the customer.
+        const created = await client.subscriptions.create({ plan: 'pro', wallet: WALLET });
+        const before = fake.requests.length;
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer).toMatchObject({
+            status: 409,
+            body: { error: { code: 'checkout_in_progress' } },
+        });
+        expect(sent(fake, before)).toEqual(['GET /v1/subscriptions']);
+        await expect(client.subscriptions.retrieve(created.subscription.id)).resolves.toMatchObject(
+            { external_id: null },
+        );
+    });
+
+    it('tells customers apart by email when that is how yours are named', async () => {
+        const { client, post, fake } = setup();
+        const adaByEmail = { kind: 'email', value: 'ada@example.com' } as const;
+        const bobByEmail = { kind: 'email', value: 'bob@example.com' } as const;
+        const theirs = await post(bobByEmail, '/subscriptions', { plan: 'pro', wallet: WALLET });
+        const { id } = (theirs.body as { subscription: { id: string } }).subscription;
+        const before = fake.requests.length;
+
+        const answer = await post(adaByEmail, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer).toMatchObject({
+            status: 409,
+            body: { error: { code: 'checkout_in_progress' } },
+        });
+        expect(sent(fake, before)).toEqual(['GET /v1/subscriptions']);
+        await expect(client.subscriptions.retrieve(id)).resolves.toMatchObject({
+            email: 'bob@example.com',
+        });
+        await expect(
+            post(bobByEmail, '/subscriptions', { plan: 'pro', wallet: WALLET }),
+        ).resolves.toMatchObject({ status: 201, body: { subscription: { id } } });
+    });
+
+    it('reads nothing first for a customer named by wallet: the wallet is who they are', async () => {
+        const { client, post, fake } = setup();
+        const walletCustomer = { kind: 'wallet', value: WALLET } as const;
+        // A checkout your server opened for that wallet, under an id.
+        await client.subscriptions.create({ plan: 'pro', wallet: WALLET, external_id: 'user_bob' });
+        const before = fake.requests.length;
+
+        const answer = await post(walletCustomer, '/subscriptions', {
+            plan: 'pro',
+            wallet: WALLET,
+        });
+        const mismatch = await post(walletCustomer, '/subscriptions', {
+            plan: 'pro',
+            wallet: OTHER_WALLET,
+        });
+
+        expect(answer.status).toBe(201);
+        expect(mismatch).toMatchObject({
+            status: 403,
+            body: { error: { code: 'wallet_mismatch' } },
+        });
+        expect(sent(fake, before)).toEqual(['POST /v1/subscriptions']);
+    });
+
+    it("hands on Mesub's refusal of the read, and creates nothing", async () => {
+        const { post, fake } = setup();
+        fake.fail({ status: 429, code: 'rate_limited', retryAfter: 30 });
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer).toMatchObject({
+            status: 429,
+            body: { error: { code: 'rate_limited' } },
+            headers: { 'Retry-After': '30' },
+        });
+        expect(sent(fake)).toEqual(['GET /v1/subscriptions']);
+    });
+});
+
 describe('the widget routes: managing', () => {
     it("lists the customer's subscriptions, without the email and the id", async () => {
         const { client, call } = setup();
