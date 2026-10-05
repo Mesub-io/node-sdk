@@ -671,6 +671,41 @@ describe('subscriptions.submit', () => {
             expect(fetch).toHaveBeenCalledTimes(3);
         });
 
+        it('throws a return refused while its period turns at once, with when to build again', async () => {
+            const turning = coded(
+                409,
+                'comeback_period_rolling',
+                "This subscription's billing period is turning. Ask again in 150 seconds.",
+                true,
+                { 'Retry-After': '150' },
+            );
+            const { fetch } = mockFetch(turning);
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            // The same transaction would not pass after the wait: not sent again.
+            expect(error).not.toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({
+                status: 409,
+                apiCode: 'comeback_period_rolling',
+                retryable: true,
+                retryAfter: 150_000,
+            });
+            expect(fetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('reads back when that refusal follows a send that got no answer', async () => {
+            const turning = coded(409, 'comeback_period_rolling', 'Turning.', true);
+            const { fetch } = mockFetch(unavailable(), turning, json(200, pending()));
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            // The lost send may have been co-signed: the row says, no third send.
+            expect(error).toMatchObject({ code: 'unavailable', subscription: pending(), sends: 2 });
+        });
+
         it('reads back when a retryable refusal follows a send that got no answer', async () => {
             const limited = () => coded(429, 'rate_limited', 'Slow down.', true);
             const { fetch } = mockFetch(unavailable(), limited(), limited(), json(200, pending()));

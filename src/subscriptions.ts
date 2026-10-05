@@ -457,7 +457,10 @@ export class Subscriptions {
                 });
             }
 
-            const replay = error.status === null || error.retryable;
+            // Refused while the billing period turns: the same transaction is
+            // not taken after the wait, a new one is. Nothing to send again.
+            const rebuild = error.apiCode === 'comeback_period_rolling';
+            const replay = !rebuild && (error.status === null || error.retryable);
             const wait = error.retryAfter ?? REPLAY_WAIT;
             if (!replay || sent >= MAX_SENDS || Date.now() + wait >= deadline) {
                 // A refusal is Mesub's word on the request, whatever was lost
