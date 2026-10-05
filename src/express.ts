@@ -22,6 +22,7 @@ import {
 import {
     checkWidgetOptions,
     handleWidget,
+    MAX_BODY_BYTES,
     widgetCustomer,
     type WidgetRoutesOptions,
 } from './routes.js';
@@ -109,9 +110,6 @@ export function requirePlan(
         }
     };
 }
-
-/** The most a widget request's body may weigh: a signed transaction is under 2 kB. */
-const MAX_BODY_BYTES = 64 * 1024;
 
 /** The JSON body, from `express.json()` when it ran, read here otherwise. */
 async function jsonBody(req: Request): Promise<unknown> {

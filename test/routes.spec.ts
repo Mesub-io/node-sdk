@@ -1709,6 +1709,91 @@ describe('mesubRouteHandlers for Next', () => {
         expect((await POST(broken, context('subscriptions'))).status).toBe(400);
     });
 
+    /** A POST whose body comes in those chunks, and how many of them were asked for. */
+    function streamed(chunks: Iterable<Uint8Array>, headers: Record<string, string> = {}) {
+        const each = chunks[Symbol.iterator]();
+        const seen = { pulls: 0, cancelled: false };
+        const body = new ReadableStream<Uint8Array>(
+            {
+                pull(controller) {
+                    seen.pulls++;
+                    const next = each.next();
+                    if (next.done) controller.close();
+                    else controller.enqueue(next.value);
+                },
+                cancel() {
+                    seen.cancelled = true;
+                },
+            },
+            { highWaterMark: 0 },
+        );
+        const request = new Request('https://shop.test/api/mesub/x', {
+            method: 'POST',
+            headers: { 'content-type': JSON_TYPE, ...headers },
+            body,
+            duplex: 'half',
+        } as RequestInit);
+
+        return { request, seen };
+    }
+
+    function* forever(chunk: Uint8Array) {
+        for (;;) yield chunk;
+    }
+
+    it('counts the 64 kB in bytes, not in characters', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        // 30 000 characters, 90 000 bytes.
+        const heavy = json({ plan: 'pro', wallet: '€'.repeat(30_000) });
+
+        const response = await POST(heavy, context('subscriptions'));
+
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({
+            error: { code: 'payload_too_large', message: 'The body is too large.' },
+        });
+        expect(fake.requests).toHaveLength(0);
+    });
+
+    it('takes a body of exactly 64 kB', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const empty = JSON.stringify({ plan: 'pro', wallet: WALLET, pad: '' }).length;
+        const full = json({ plan: 'pro', wallet: WALLET, pad: 'x'.repeat(64 * 1024 - empty) });
+
+        expect((await POST(full, context('subscriptions'))).status).toBe(201);
+    });
+
+    it('refuses on Content-Length alone, reading nothing', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const { request, seen } = streamed(forever(new Uint8Array(1024)), {
+            'content-length': String(64 * 1024 + 1),
+        });
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(413);
+        expect(seen.pulls).toBe(0);
+    });
+
+    it('stops reading at the limit when no Content-Length says it', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const { request, seen } = streamed(forever(new Uint8Array(16 * 1024)));
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(413);
+        // Four chunks fill the 64 kB, the fifth passes it.
+        expect(seen.pulls).toBe(5);
+        expect(seen.cancelled).toBe(true);
+    });
+
+    it('reads a body whose characters are cut across chunks', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        const bytes = new TextEncoder().encode(
+            JSON.stringify({ plan: 'pro', wallet: `${WALLET}é€` }),
+        );
+        const { request } = streamed(Array.from(bytes, (byte) => Uint8Array.of(byte)));
+
+        expect((await POST(request, context('subscriptions'))).status).toBe(201);
+        expect(fake.requests.at(-1)?.body).toMatchObject({ wallet: `${WALLET}é€` });
+    });
+
     it('serves one subscription with its payments, and 404 for one not theirs', async () => {
         let user: string | null = 'user_ada';
         const { GET, fake } = handlers(() => (user ? { external_id: user } : null));

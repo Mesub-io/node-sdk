@@ -60,6 +60,9 @@ export interface WidgetResponse {
     headers?: Record<string, string>;
 }
 
+/** The most a widget request's body may weigh: a signed transaction is under 2 kB. */
+export const MAX_BODY_BYTES = 64 * 1024;
+
 const ACTIONS = ['cancel', 'resume', 'close'] as const;
 type Action = (typeof ACTIONS)[number];
 

@@ -151,6 +151,9 @@ The first version published to npm. Requires Node 22 or later.
 answer this request.`: never the SDK's own message, which may name your
   `baseUrl` or a network error. `payments_error` the same. The `MesubError`
   your server catches is unchanged (#101).
+- `mesubRouteHandlers` counts the 64 kB a body may weigh in bytes, as
+  `mesubRoutes` does: it answers 413 on a `Content-Length` over it without
+  reading, and stops reading at the limit otherwise (#101).
 
 ### Webhooks
 
