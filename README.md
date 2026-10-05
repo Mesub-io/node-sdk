@@ -245,7 +245,10 @@ whatever the slugs asked, and a slug you do not have costs none. A change to a
 plan shows there within a minute. `mesub.plans.list` and `mesub.plans.retrieve`
 themselves are never cached.
 
-A refusal is `{ error: { code, message } }`. The widget's side:
+A refusal is `{ error: { code, message } }`. A 401 always means nobody is
+signed in on your site. Mesub refusing your API key (missing, wrong or
+rotated) is thrown to your framework, which logs it and answers 500, never
+handed to the browser as a 401. The widget's side:
 [React widget](https://docs.mesub.io/docs/react).
 
 ## Webhooks

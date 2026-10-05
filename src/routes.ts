@@ -102,6 +102,21 @@ function said(error: MesubError): string {
     return error.apiCode === null ? NO_ANSWER : error.message;
 }
 
+/**
+ * Whether Mesub refused your server, not what the customer did: any 401,
+ * which Mesub answers only to an API key missing, never issued or rotated
+ * since (`missing_api_key`, `invalid_api_key`), or a 403 that names none of
+ * Mesub's own codes, from something in front of Mesub turning your server
+ * away. Handed on, a 401 reads to `@mesub/react` as "nobody is signed in",
+ * and every visitor gets the sign-in screen: thrown instead, a broken
+ * integration, for the framework to log and answer 500.
+ */
+function brokenIntegration(error: MesubError): boolean {
+    if (error.status === 401) return true;
+
+    return error.status === 403 && (error.apiCode === null || error.apiCode === 'forbidden');
+}
+
 /** A Mesub refusal, handed on with its own status and code, and nothing of the key. */
 function fromMesub(error: MesubError): WidgetResponse {
     // No answer from Mesub, or a 2xx this SDK cannot read: a 502 of yours.
@@ -289,7 +304,7 @@ async function upcomingOf(
         try {
             price = await planOf(client, plan, read);
         } catch (error) {
-            if (!(error instanceof MesubError)) throw error;
+            if (!(error instanceof MesubError) || brokenIntegration(error)) throw error;
         }
     }
 
@@ -362,7 +377,7 @@ async function paymentsOf(
 
         return { payments: page.data.map(payment), paid: page.paid, payments_error: null };
     } catch (error) {
-        if (!(error instanceof MesubError)) throw error;
+        if (!(error instanceof MesubError) || brokenIntegration(error)) throw error;
         // No such route, not no such subscription: that one names its code.
         if (error.status === 404 && error.apiCode === null) {
             return olderPaymentsOf(client, subscription, read);
@@ -417,7 +432,7 @@ async function olderPaymentsOf(
                 .sort((a, b) => Date.parse(b.attempted_at) - Date.parse(a.attempted_at)),
         );
     } catch (error) {
-        if (!(error instanceof MesubError)) throw error;
+        if (!(error instanceof MesubError) || brokenIntegration(error)) throw error;
 
         return unlisted(error.apiCode ?? error.code, said(error));
     }
@@ -427,9 +442,12 @@ async function olderPaymentsOf(
  * Answers one request of the widget. `asked` is who your auth says is asking,
  * already normalised, or null for nobody; `email` their notices' address.
  *
- * Never throws for what the caller sent or what Mesub refused: both are
- * answered. An integration error (a bad API key is answered 401 by Mesub and
- * handed on; anything that is not a MesubError) is thrown to the framework.
+ * Never throws for what the caller sent or what Mesub refused of the
+ * customer's request: both are answered. An integration error is thrown to
+ * the framework, which logs it and answers 500: Mesub refusing your API key
+ * (its 401, never handed on as the customer's own) or something in front of
+ * Mesub refusing your server (a 403 without Mesub's code), and anything that
+ * is not a MesubError. The 401 answered here means nobody is signed in, only.
  */
 export async function handleWidget(
     client: Mesub,
@@ -592,7 +610,7 @@ export async function handleWidget(
             body: { ...confirmed, subscription: shown(confirmed.subscription) },
         };
     } catch (error) {
-        if (!(error instanceof MesubError)) throw error;
+        if (!(error instanceof MesubError) || brokenIntegration(error)) throw error;
         // An unknown id is Mesub's 404, answered as ours: nothing tells the two apart.
         if (error.apiCode === 'subscription_not_found') return NO_SUBSCRIPTION();
 
