@@ -2,6 +2,7 @@ import type { Customer, ServedAttempt } from './answer.js';
 import type { Mesub } from './client.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
+import type { Plan } from './plans.js';
 import type { ServerSubscription, SubscriptionAttempt } from './subscriptions.js';
 
 /**
@@ -180,6 +181,53 @@ export interface WidgetUpcoming {
     retries_allowed: number | null;
 }
 
+/** How long a plan read for the widget is kept, a slug Mesub does not know included. */
+const PLAN_TTL_MS = 60_000;
+/** Slugs are the caller's to make up: past this many, the oldest read is dropped. */
+const PLAN_READS_MAX = 200;
+
+interface PlanRead {
+    /** Shared while the request is out, kept rejected for `plan_not_found`. */
+    plan: Promise<Plan>;
+    /** Infinity until Mesub answered. */
+    until: number;
+}
+
+// Per client, so two projects never share a plan.
+const planReads = new WeakMap<Mesub, Map<string, PlanRead>>();
+
+/**
+ * A plan for the widget routes: public reads must not spend the API key's
+ * rate limit, so one call per slug and per TTL. Any error but
+ * `plan_not_found` is forgotten at once.
+ */
+function planOf(client: Mesub, slug: string): Promise<Plan> {
+    let reads = planReads.get(client);
+    if (!reads) planReads.set(client, (reads = new Map()));
+
+    const known = reads.get(slug);
+    if (known && known.until > Date.now()) return known.plan;
+
+    const read: PlanRead = { plan: client.plans.retrieve(slug), until: Infinity };
+    const kept = reads;
+    const settle = (keep: boolean) => {
+        if (keep) read.until = Date.now() + PLAN_TTL_MS;
+        else if (kept.get(slug) === read) kept.delete(slug);
+    };
+
+    // Deleted first: read again, it is the newest.
+    reads.delete(slug);
+    reads.set(slug, read);
+    if (reads.size > PLAN_READS_MAX) reads.delete(reads.keys().next().value!);
+
+    read.plan.then(
+        () => settle(true),
+        (error: unknown) => settle(error instanceof MesubError && error.code === 'plan_not_found'),
+    );
+
+    return read.plan;
+}
+
 /**
  * What Mesub will pull next: the next charge of a running subscription, the
  * next retry of a late one, and nothing for any other, a parked seat
@@ -205,7 +253,7 @@ async function upcomingOf(
 
     if (plan !== null && SLUG.test(plan)) {
         try {
-            price = await client.plans.retrieve(plan);
+            price = await planOf(client, plan);
         } catch (error) {
             if (!(error instanceof MesubError)) throw error;
         }
@@ -359,7 +407,7 @@ export async function handleWidget(
                 return refusal(404, 'plan_not_found', 'No such plan.');
             }
 
-            return { status: 200, body: await client.plans.retrieve(slug) };
+            return { status: 200, body: await planOf(client, slug) };
         }
 
         if (segments[0] !== 'subscriptions') return NOT_FOUND();

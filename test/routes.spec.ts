@@ -103,6 +103,173 @@ describe('the widget routes: a plan', () => {
     });
 });
 
+describe('the widget routes: plans kept in memory', () => {
+    const paths = (fake: FakeMesub) => fake.requests.map((each) => each.path);
+
+    beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+    });
+
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    it('asks Mesub once for a plan read again and again', async () => {
+        const { call, fake } = setup();
+
+        for (let read = 0; read < 50; read++) {
+            const answer = await call(null, { path: '/plans/pro' });
+
+            expect(answer.status).toBe(200);
+            expect(answer.body).toMatchObject({ slug: 'pro', amount_display: '9.99' });
+        }
+
+        expect(paths(fake)).toEqual(['/v1/plans/pro']);
+    });
+
+    it('asks once for a slug Mesub does not know, and still answers its 404', async () => {
+        const { call, fake } = setup();
+
+        const first = await call(null, { path: '/plans/nope' });
+        const second = await call(null, { path: '/plans/nope' });
+
+        expect(first.status).toBe(404);
+        expect(first.body).toEqual({
+            error: { code: 'plan_not_found', message: 'No plan under slug nope' },
+        });
+        expect(second).toEqual(first);
+        expect(paths(fake)).toEqual(['/v1/plans/nope']);
+    });
+
+    it('shares one request between reads made at the same time', async () => {
+        const { call, fake } = setup();
+
+        const answers = await Promise.all(
+            Array.from({ length: 10 }, () => call(null, { path: '/plans/pro' })),
+        );
+
+        expect(answers.map((answer) => answer.status)).toEqual(Array(10).fill(200));
+        expect(paths(fake)).toEqual(['/v1/plans/pro']);
+    });
+
+    it('asks again once 60 s have passed, for a plan as for an unknown slug', async () => {
+        const { call, fake } = setup();
+
+        await call(null, { path: '/plans/pro' });
+        await call(null, { path: '/plans/nope' });
+        vi.advanceTimersByTime(59_999);
+        await call(null, { path: '/plans/pro' });
+        await call(null, { path: '/plans/nope' });
+
+        expect(fake.requests).toHaveLength(2);
+
+        vi.advanceTimersByTime(1);
+        expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
+        expect((await call(null, { path: '/plans/nope' })).status).toBe(404);
+
+        expect(fake.requests).toHaveLength(4);
+    });
+
+    it('keeps 200 slugs at most, dropping the oldest read', async () => {
+        const fake = new FakeMesub();
+        const client = fake.client();
+        const read = (slug: string) =>
+            handleWidget(
+                client,
+                { method: 'GET', path: `/plans/${slug}`, body: undefined, contentType: null },
+                null,
+            );
+
+        for (let each = 0; each <= 200; each++) await read(`plan-${each}`);
+        expect(fake.requests).toHaveLength(201);
+
+        // The newest 200 are kept: none of them is asked again.
+        for (let each = 1; each <= 200; each++) await read(`plan-${each}`);
+        expect(fake.requests).toHaveLength(201);
+
+        await read('plan-0');
+        expect(fake.requests).toHaveLength(202);
+    });
+
+    it.each([
+        ['an outage', 'outage' as const, 503, 'unavailable'],
+        ['a rate limit', { status: 429, code: 'rate_limited' }, 429, 'rate_limited'],
+        ['a refused key', { status: 401, code: 'invalid_api_key' }, 401, 'invalid_api_key'],
+    ])('never keeps %s', async (_name, failure, status, code) => {
+        const { call, fake } = setup();
+
+        fake.fail(failure);
+        const failed = await call(null, { path: '/plans/pro' });
+        expect(failed.status).toBe(status);
+        expect(failed.body).toMatchObject({ error: { code } });
+        expect((await call(null, { path: '/plans/pro' })).status).toBe(status);
+
+        fake.fail(null);
+        expect((await call(null, { path: '/plans/pro' })).status).toBe(200);
+        expect(fake.requests).toHaveLength(3);
+    });
+
+    it('keeps the plans of two clients apart', async () => {
+        const ours = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '9.99' }] });
+        const theirs = new FakeMesub({ plans: [{ slug: 'pro', amount_display: '49.00' }] });
+        const read = (client: Mesub) =>
+            handleWidget(
+                client,
+                { method: 'GET', path: '/plans/pro', body: undefined, contentType: null },
+                null,
+            );
+        const [first, second] = [ours.client(), theirs.client()];
+
+        expect((await read(first)).body).toMatchObject({ amount_display: '9.99' });
+        expect((await read(second)).body).toMatchObject({ amount_display: '49.00' });
+        expect((await read(first)).body).toMatchObject({ amount_display: '9.99' });
+
+        expect(ours.requests).toHaveLength(1);
+        expect(theirs.requests).toHaveLength(1);
+        // Another client of the same project has its own.
+        await read(ours.client());
+        expect(ours.requests).toHaveLength(2);
+    });
+
+    it('prices what is pulled next from the plan it already read', async () => {
+        const { call, fake } = setup();
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'active',
+            next_charge_at: '2026-11-02T09:00:00.000Z',
+        });
+
+        await call(null, { path: '/plans/pro' });
+        const first = await call(ada, { path: `/subscriptions/${id}` });
+        const second = await call(ada, { path: `/subscriptions/${id}` });
+
+        for (const answer of [first, second]) {
+            expect(answer.body).toMatchObject({
+                upcoming: [{ kind: 'charge', amount: '9990000', amount_display: '9.99' }],
+            });
+        }
+        expect(paths(fake).filter((path) => path === '/v1/plans/pro')).toHaveLength(1);
+    });
+
+    it('leaves `plans.retrieve` uncached, and unknown to the routes', async () => {
+        const { call, client, fake } = setup();
+
+        await call(null, { path: '/plans/pro' });
+        await client.plans.retrieve('pro');
+        await client.plans.retrieve('pro');
+        await expect(client.plans.retrieve('nope')).rejects.toMatchObject({
+            code: 'plan_not_found',
+        });
+        await expect(client.plans.retrieve('nope')).rejects.toMatchObject({
+            code: 'plan_not_found',
+        });
+
+        expect(fake.requests).toHaveLength(5);
+    });
+});
+
 describe('the widget routes: who is asking', () => {
     it.each([
         ['GET', '/subscriptions'],

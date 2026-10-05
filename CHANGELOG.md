@@ -141,6 +141,11 @@ The first version published to npm. Requires Node 22 or later.
   `/v1/access` as before, with `paid: null`. In `@mesub/node/testing`,
   `fake.setAttempts(id, [...])` gives a subscription its attempts, and
   `attemptsRoute: false` acts as that older Mesub (#89, #91).
+- The routes keep a plan in memory for 60 seconds, per client, 200 slugs at
+  most, a slug Mesub does not know included: `GET /plans/:slug`, which is
+  public, and the price of `upcoming` no longer make one call to Mesub per
+  request. Any other error is not kept, and `plans.retrieve` stays uncached
+  (#98).
 
 ### Webhooks
 
