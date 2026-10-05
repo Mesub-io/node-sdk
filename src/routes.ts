@@ -74,6 +74,14 @@ function refusal(status: number, code: string, message: string): WidgetResponse 
 const NOT_FOUND = () => refusal(404, 'not_found', 'Nothing here.');
 const NO_SUBSCRIPTION = () => refusal(404, 'subscription_not_found', 'No such subscription.');
 
+/** Said to the browser for an error Mesub did not word itself. */
+const NO_ANSWER = 'Mesub could not answer this request.';
+
+/** Mesub's own words only: the transport's may name `baseUrl` or a network error. */
+function said(error: MesubError): string {
+    return error.apiCode === null ? NO_ANSWER : error.message;
+}
+
 /** A Mesub refusal, handed on with its own status and code, and nothing of the key. */
 function fromMesub(error: MesubError): WidgetResponse {
     // No answer from Mesub: your server reached nobody, which is a 502 of yours.
@@ -85,7 +93,7 @@ function fromMesub(error: MesubError): WidgetResponse {
 
     return {
         status,
-        body: { error: { code: error.apiCode ?? error.code, message: error.message } },
+        body: { error: { code: error.apiCode ?? error.code, message: said(error) } },
         ...(retry && { headers: retry }),
     };
 }
@@ -295,7 +303,7 @@ async function paymentsOf(client: Mesub, subscription: ServerSubscription): Prom
         }
 
         // The subscription was read: it is answered without them, so the dialog still opens.
-        return unlisted(error.apiCode ?? error.code, error.message);
+        return unlisted(error.apiCode ?? error.code, said(error));
     }
 }
 
@@ -341,7 +349,7 @@ async function olderPaymentsOf(client: Mesub, subscription: ServerSubscription):
     } catch (error) {
         if (!(error instanceof MesubError)) throw error;
 
-        return unlisted(error.apiCode ?? error.code, error.message);
+        return unlisted(error.apiCode ?? error.code, said(error));
     }
 }
 

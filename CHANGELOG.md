@@ -146,6 +146,11 @@ The first version published to npm. Requires Node 22 or later.
   5 pages at most, so one browser request is never more than 5 calls to
   Mesub. It answers `has_more` beside `subscriptions`: true when the customer
   has more than the 500 newest, which are not read (#101).
+- A refusal's `message` is Mesub's own only when Mesub worded it (an error
+  with an `apiCode`). For any other, the browser reads `Mesub could not
+answer this request.`: never the SDK's own message, which may name your
+  `baseUrl` or a network error. `payments_error` the same. The `MesubError`
+  your server catches is unchanged (#101).
 
 ### Webhooks
 

@@ -465,6 +465,68 @@ describe('the widget routes: managing', () => {
         expect([502, 503]).toContain(answer.status);
     });
 
+    it('never tells the browser your baseUrl when what answers there is not Mesub', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            baseUrl: 'https://proxy.internal.example/mesub',
+            fetch: async () => new Response('<h1>Not Found</h1>', { status: 404 }),
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.status).toBe(404);
+        expect(answer.body).toEqual({
+            error: { code: 'unexpected', message: 'Mesub could not answer this request.' },
+        });
+        // Your server still reads it in full.
+        await expect(mesub.plans.retrieve('pro')).rejects.toThrow(
+            'is baseUrl (https://proxy.internal.example/mesub) the Mesub API?',
+        );
+    });
+
+    it('never tells the browser why Mesub could not be reached', async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => {
+                throw new Error('connect ECONNREFUSED 10.0.0.7:8443');
+            },
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.body).toEqual({
+            error: { code: 'unavailable', message: 'Mesub could not answer this request.' },
+        });
+        await expect(mesub.plans.retrieve('pro')).rejects.toThrow('ECONNREFUSED 10.0.0.7:8443');
+    });
+
+    it("still hands on Mesub's own message, the one that comes with its code", async () => {
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            fetch: async () =>
+                Response.json(
+                    {
+                        statusCode: 409,
+                        error: 'Conflict',
+                        message: 'This plan takes no new subscriber.',
+                        code: 'plan_unavailable',
+                        retryable: false,
+                    },
+                    { status: 409 },
+                ),
+        });
+        const read = { method: 'GET', path: '/plans/pro', body: undefined, contentType: null };
+
+        const answer = await handleWidget(mesub, read, null);
+
+        expect(answer.body).toEqual({
+            error: { code: 'plan_unavailable', message: 'This plan takes no new subscriber.' },
+        });
+    });
+
     it.each([
         ['GET', '/nope'],
         ['GET', '/subscriptions/sub_1/cancel'],
@@ -1151,6 +1213,33 @@ describe('the widget routes: one subscription in full', () => {
 
         expect(answer.status).toBe(200);
         expect(answer.body).toMatchObject({ payments: null, paid: null, payments_error: {} });
+    });
+
+    it('never tells the browser why its payments could not be read, short of a word of Mesub', async () => {
+        const { client } = setup();
+        const id = await subscribed(client);
+        const read = await client.subscriptions.retrieve(id);
+        const mesub = new Mesub({
+            apiKey: 'SUB_test',
+            maxRetries: 0,
+            fetch: async () => {
+                throw new Error('connect ECONNREFUSED 10.0.0.7:8443');
+            },
+        });
+        vi.spyOn(mesub.subscriptions, 'retrieve').mockResolvedValue(read);
+
+        const answer = await handleWidget(
+            mesub,
+            { method: 'GET', path: `/subscriptions/${id}`, body: undefined, contentType: null },
+            ada,
+        );
+
+        expect(answer.body).toMatchObject({
+            payments_error: {
+                code: 'unavailable',
+                message: 'Mesub could not answer this request.',
+            },
+        });
     });
 
     it('throws what is not a refusal of Mesub: a bug, never an answer', async () => {
