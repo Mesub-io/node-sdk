@@ -2,6 +2,7 @@ import type { Customer, ServedAttempt } from './answer.js';
 import type { Mesub } from './client.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
+import type { Plan } from './plans.js';
 import type { ServerSubscription, SubscriptionAttempt } from './subscriptions.js';
 
 /**
@@ -180,6 +181,46 @@ export interface WidgetUpcoming {
     retries_allowed: number | null;
 }
 
+/** How long the plan list read for the widget is kept. */
+const PLAN_TTL_MS = 60_000;
+
+interface PlanList {
+    /** Shared while the request is out. */
+    plans: Promise<Plan[]>;
+    /** Infinity until Mesub answered. */
+    until: number;
+}
+
+// Per client, so two projects never share a plan.
+const planLists = new WeakMap<Mesub, PlanList>();
+
+/**
+ * A plan for the widget routes, from the project's list: public reads must
+ * not spend the API key's rate limit, so one call per TTL whatever the slugs,
+ * and null with no call for a slug that is not in it. A failed read is
+ * forgotten at once.
+ */
+async function planOf(client: Mesub, slug: string): Promise<Plan | null> {
+    let list = planLists.get(client);
+
+    if (!list || list.until <= Date.now()) {
+        const read: PlanList = { plans: client.plans.list(), until: Infinity };
+
+        list = read;
+        planLists.set(client, read);
+        read.plans.then(
+            () => {
+                read.until = Date.now() + PLAN_TTL_MS;
+            },
+            () => {
+                if (planLists.get(client) === read) planLists.delete(client);
+            },
+        );
+    }
+
+    return (await list.plans).find((plan) => plan.slug === slug) ?? null;
+}
+
 /**
  * What Mesub will pull next: the next charge of a running subscription, the
  * next retry of a late one, and nothing for any other, a parked seat
@@ -205,7 +246,7 @@ async function upcomingOf(
 
     if (plan !== null && SLUG.test(plan)) {
         try {
-            price = await client.plans.retrieve(plan);
+            price = await planOf(client, plan);
         } catch (error) {
             if (!(error instanceof MesubError)) throw error;
         }
@@ -359,7 +400,11 @@ export async function handleWidget(
                 return refusal(404, 'plan_not_found', 'No such plan.');
             }
 
-            return { status: 200, body: await client.plans.retrieve(slug) };
+            const plan = await planOf(client, slug);
+
+            return plan
+                ? { status: 200, body: plan }
+                : refusal(404, 'plan_not_found', 'No such plan.');
         }
 
         if (segments[0] !== 'subscriptions') return NOT_FOUND();
