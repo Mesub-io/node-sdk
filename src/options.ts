@@ -12,8 +12,8 @@ const MAX_DELAY = 2_147_483_647;
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /**
- * The secret API key: the one given, else `MESUB_API_KEY`. Refuses none, and
- * the publishable key, which every route would answer 401.
+ * The API key: the one given, else `MESUB_API_KEY`. Refuses none. A wrong one
+ * is not guessed at here: Mesub answers it 401, thrown as `unauthorized`.
  */
 export function apiKeyOf(given: unknown): string {
     if (given !== undefined && typeof given !== 'string') {
@@ -28,13 +28,6 @@ export function apiKeyOf(given: unknown): string {
                 ? 'Missing Mesub API key: there is no process.env here (an edge runtime such as ' +
                       'Cloudflare Workers), so pass it: `new Mesub({ apiKey: env.MESUB_API_KEY })`.'
                 : 'Missing Mesub API key: pass `new Mesub({ apiKey })` or set MESUB_API_KEY.',
-        );
-    }
-
-    if (apiKey.startsWith('PUB_')) {
-        throw new TypeError(
-            'That is the publishable key (PUB_...), the one for @mesub/react in the browser. ' +
-                'The server needs the secret API key (SUB_...), from the same dashboard page.',
         );
     }
 

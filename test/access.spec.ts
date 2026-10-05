@@ -68,7 +68,7 @@ describe('access', () => {
         vi.useRealTimers();
     });
 
-    it('asks /v1/access about that wallet and plan, with the secret key', async () => {
+    it('asks /v1/access about that wallet and plan, with the API key', async () => {
         const { fetch, calls } = mockFetch(json(200, answer()));
 
         await expect(client(fetch).access(WALLET, 'pro')).resolves.toEqual(answer());

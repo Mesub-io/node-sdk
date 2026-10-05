@@ -47,8 +47,10 @@ The first version published to npm. Requires Node 22 or later.
 - `new Mesub()` checks its options and throws a `TypeError` naming the wrong
   one: a `baseUrl` that is not https (plain http only to localhost), a
   timeout that is not a finite number of milliseconds above 0, a negative
-  `maxRetries` or `maxStaleMs`, the publishable `PUB_` key instead of the
-  API key, `SUB_` (#62).
+  `maxRetries` or `maxStaleMs`, a missing API key (#62).
+- The check that refused a publishable `PUB_` key is removed: Mesub has no
+  such key any more. Any non-empty API key is accepted, and a wrong one is
+  answered 401 by Mesub, thrown as `unauthorized` (#96).
 - A `baseUrl` may carry a path, for a proxy: every call is made under it.
   `headers` adds headers to every call, such as a Cloudflare Access service
   token (#63).

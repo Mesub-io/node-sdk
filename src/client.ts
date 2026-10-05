@@ -26,7 +26,7 @@ export interface Decision {
 }
 
 export interface MesubOptions {
-    /** Secret API key. Defaults to `process.env.MESUB_API_KEY`. */
+    /** API key. Defaults to `process.env.MESUB_API_KEY`. */
     apiKey?: string;
     /**
      * Defaults to `https://api.mesub.io`. May carry a path, e.g. behind a
