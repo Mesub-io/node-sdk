@@ -10,6 +10,7 @@ export type {
     AccessOptions,
     Customer,
     EndReason,
+    LateReason,
     PaymentStatus,
     PullOutcome,
     ServedAttempt,

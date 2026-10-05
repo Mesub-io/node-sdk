@@ -39,6 +39,7 @@ const SUBSCRIPTION = {
     status: 'active',
     paused: false,
     end_reason: null,
+    late_reason: null,
     access: true,
     payment_status: 'paid',
     plan: 'pro',

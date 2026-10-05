@@ -42,10 +42,12 @@ describe('FakeMesub', () => {
         await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
             paused: false,
             end_reason: null,
+            late_reason: null,
         });
         await expect(mesub.access(WALLET, 'never')).resolves.toMatchObject({
             paused: false,
             end_reason: null,
+            late_reason: null,
         });
         await expect(mesub.access(WALLET, 'team')).resolves.toMatchObject({
             access: false,
@@ -312,6 +314,20 @@ describe('FakeMesub', () => {
         await request(app).get('/pro').set('x-test-user', WALLET).expect(200, { ok: true });
         await request(app).get('/pro').set('x-test-user', OTHER).expect(402);
         await request(app).get('/pro').expect(401);
+    });
+
+    it('says why a late customer is late, and nothing for any other (#109)', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        fake.grant(WALLET, 'pro', { status: 'unpaid', late_reason: 'approval_revoked' });
+        fake.grant(OTHER, 'pro');
+
+        await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+            status: 'unpaid',
+            late_reason: 'approval_revoked',
+        });
+        await expect(mesub.access(OTHER, 'pro')).resolves.toMatchObject({ late_reason: null });
+        expect(fake.addSubscription({ wallet: WALLET, plan: 'pro' }).late_reason).toBeNull();
     });
 
     it('keeps one checkout per customer on a wallet, as Mesub does (#100)', async () => {

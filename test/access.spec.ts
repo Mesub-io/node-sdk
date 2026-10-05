@@ -17,6 +17,7 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         status: 'active',
         paused: false,
         end_reason: null,
+        late_reason: null,
         payment_status: 'paid',
         subscribed_since: '2026-09-01T00:00:00.000Z',
         first_subscribed_at: '2026-09-01T00:00:00.000Z',
@@ -249,6 +250,12 @@ describe('access', () => {
                 without('end_reason', false),
                 'end_reason is not a string or null',
             ],
+            ['no late_reason', without('late_reason'), 'late_reason is missing'],
+            [
+                'a late_reason that is not a string',
+                without('late_reason', 3),
+                'late_reason is not a string or null',
+            ],
             ['attempts that are not a list', without('attempts', {}), 'attempts is not a list'],
             [
                 'an attempt whose outcome is not a string',
@@ -345,6 +352,7 @@ describe('access', () => {
             await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
                 paused: false,
                 end_reason: null,
+                late_reason: null,
             });
             await expect(mesub.access(OTHER_WALLET, 'pro')).resolves.toMatchObject({
                 paused: false,
@@ -1798,6 +1806,7 @@ describe('concurrent lookups', () => {
         const subscription = {
             id: 'sub_1',
             status: 'active',
+            late_reason: null,
             access: true,
             payment_status: 'paid',
             plan: 'pro',

@@ -1,4 +1,4 @@
-import type { Customer, EndReason, PaymentStatus, PullOutcome } from './answer.js';
+import type { Customer, EndReason, LateReason, PaymentStatus, PullOutcome } from './answer.js';
 import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
 import { numberOf } from './options.js';
@@ -47,6 +47,8 @@ export interface ServerSubscription {
     paused: boolean;
     /** Why it ended, only on `ended`, as `/v1/access` answers it. */
     end_reason: EndReason | null;
+    /** Why it is late, only on `unpaid`, as `/v1/access` answers it. */
+    late_reason: LateReason | null;
     /** Whether it grants access now, as `/v1/access` answers it. */
     access: boolean;
     /** `paid`, `late` or `none`, as `/v1/access` answers it. */
