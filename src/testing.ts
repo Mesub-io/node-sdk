@@ -543,17 +543,34 @@ export class FakeMesub {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
 
-        const subscription = this.addSubscription({
-            plan,
-            wallet,
+        const contact = {
             email: typeof email === 'string' ? email.trim().toLowerCase() : null,
             external_id: typeof external_id === 'string' ? external_id.trim() : null,
-            status: 'pending',
-            access: false,
-            payment_status: 'none',
-            current_period_start: null,
-            confirmed_at: null,
-        });
+        };
+        const held = this.#subscriptions.filter((s) => s.plan === plan && s.wallet === wallet);
+        if (held.some((s) => RUNNING.includes(s.status))) {
+            return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
+        }
+
+        // One checkout per customer on a wallet, as Mesub keeps them: the same
+        // customer gets its own back, another one never does.
+        const waiting = held.find(
+            (s) => s.status === 'pending' && holderOf(s) === holderOf(contact),
+        );
+        if (waiting && contact.email !== null) waiting.email = contact.email;
+
+        const subscription =
+            waiting ??
+            this.addSubscription({
+                plan,
+                wallet,
+                ...contact,
+                status: 'pending',
+                access: false,
+                payment_status: 'none',
+                current_period_start: null,
+                confirmed_at: null,
+            });
         const zero = '0';
         const answer: SubscribeTransaction = {
             subscription: { id: subscription.id, status: 'pending' },
@@ -573,10 +590,19 @@ export class FakeMesub {
         return Response.json(answer, { status: 201 });
     }
 
-    /** Lands at once: the subscription turns active and its customer is granted the plan. */
+    /**
+     * Lands at once: the subscription turns active and its customer is granted
+     * the plan. The other checkouts waiting on that wallet expire, as on Mesub.
+     */
     #submit(subscription: ServerSubscription): Response {
         if (subscription.status !== 'pending') {
             return error(409, 'not_awaiting_signature', 'That subscription awaits no signature.');
+        }
+        for (const other of this.#subscriptions) {
+            const beside = other.plan === subscription.plan && other.wallet === subscription.wallet;
+            if (beside && other !== subscription && other.status === 'pending') {
+                other.status = 'expired';
+            }
         }
 
         const now = new Date();
@@ -772,6 +798,16 @@ function refusalOf(action: FakeAction, subscription: ServerSubscription): Respon
     return over
         ? null
         : error(409, 'close_too_early', `This subscription runs until ${access_until}.`);
+}
+
+/** The statuses a wallet holds a plan in: no new checkout beside one. */
+const RUNNING: ServerSubscription['status'][] = ['active', 'cancelled', 'unpaid'];
+
+/** Whose checkout it is, as Mesub tells them apart: the external id, else the email, else nobody. */
+function holderOf(contact: Pick<ServerSubscription, 'email' | 'external_id'>): string {
+    if (contact.external_id) return `x:${contact.external_id}`;
+
+    return contact.email ? `e:${contact.email}` : '-';
 }
 
 function isClosed(subscription: ServerSubscription): boolean {

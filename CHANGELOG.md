@@ -202,6 +202,11 @@ answer this request.`: never the SDK's own message, which may name your
 - `FakeMesub` answers cancel, resume and close and their confirms, which
   land at once: the subscription and its access answers move, and a step the
   status does not allow is refused with Mesub's code (#50).
+- `FakeMesub` keeps one checkout per customer on a wallet, as Mesub does
+  since Mesub-io/backend#311: `create` again for the same plan, wallet and
+  customer (`external_id`, else `email`) answers the same subscription,
+  another customer gets its own, and once one lands the others on that
+  wallet expire and a new `create` is refused `already_subscribed` (#100).
 
 ### Errors
 
