@@ -77,8 +77,8 @@ const NO_SUBSCRIPTION = () => refusal(404, 'subscription_not_found', 'No such su
 
 /** A Mesub refusal, handed on with its own status and code, and nothing of the key. */
 function fromMesub(error: MesubError): WidgetResponse {
-    // No answer from Mesub: your server reached nobody, which is a 502 of yours.
-    const status = error.status ?? 502;
+    // No answer from Mesub, or a 2xx this SDK cannot read: a 502 of yours.
+    const status = error.status === null || error.status < 400 ? 502 : error.status;
     const retry =
         error.retryAfter === null
             ? undefined
