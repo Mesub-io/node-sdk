@@ -8,8 +8,12 @@ part that lives on your servers. It answers **does this customer have access
 to this plan?** on every request, and opens subscriptions for your front to
 have the wallet sign.
 
-> **Status: early, 0.x.** The API may still change between minor versions.
-> See the [board](https://github.com/orgs/Mesub-io/projects/4) for what is next.
+**[Read the docs](https://docs.mesub.io)** for the walkthroughs. This page is
+the short version and the reference of the options.
+
+> **Status: early, 0.x, not on npm yet.** The API may still change between
+> minor versions. See the [board](https://github.com/orgs/Mesub-io/projects/4)
+> for what is next.
 
 ## Install
 
@@ -17,150 +21,56 @@ have the wallet sign.
 npm install @mesub/node
 ```
 
+Node 22 or later. No runtime dependency.
+
 ## How it fits
 
 Your subscribers get no Mesub account. You keep your own login and your own
 UI; your server talks to Mesub with the API key, through this package, and
-your front only has the wallet sign.
+your pages only have the wallet sign. See
+[How it works](https://docs.mesub.io/docs/how-it-works).
 
-```
-your front                 your server (@mesub/node)              Mesub
-----------                 -------------------------              -----
-a request           --->   hasAccess({ external_id }, 'pro')  --->  answers, cached
-"Subscribe"         --->   subscriptions.create               --->  reserves, builds
-wallet signs terms  <---   terms + unsigned transaction
-  then transaction  --->   subscriptions.submit               --->  co-signs, sends
-```
-
-Mesub knows a customer by your own id for them (`external_id`), by the
-wallet that pays, or by the email given when they subscribed: see
-[Who to ask about](#who-to-ask-about). The wallet is what pays, not an
-account.
-
-Three walkthroughs, in the order you need them:
-
-1. [Gate a route](#gate-a-route): serve only customers with access to a plan.
-2. [Subscribe from your server](#subscribe-from-your-server): create, have the
-   wallet sign in your front, submit.
-3. [Webhooks](#webhooks): hear from Mesub when a subscription renews, misses a
-   payment or stops.
-
-The [`@mesub/react`](https://github.com/Mesub-io/react-sdk) widget is
-optional: a ready-made checkout that calls your own server, see
-[Routes for the React widget](#routes-for-the-react-widget).
-
-## Configuration
-
-One key on your server, from your Mesub dashboard:
-
-| Where                | What                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| Your server's `.env` | `MESUB_API_KEY=SUB_...`, the API key. Read by this package.                                |
-| Your server's `.env` | With webhooks: `MESUB_WEBHOOK_SECRET=whsec_...`, the endpoint's signing secret.            |
-| Your frontend        | Only with the widget: `PUB_...`, the publishable key, given to `@mesub/react`. Not secret. |
+| Where                | What                                                                             |
+| -------------------- | -------------------------------------------------------------------------------- |
+| Your server's `.env` | `MESUB_API_KEY=SUB_...`, the API key, from your dashboard. Read by this package. |
+| Your server's `.env` | With webhooks: `MESUB_WEBHOOK_SECRET=whsec_...`, the endpoint's signing secret.  |
+| Your pages           | Nothing. No key ever goes to the browser.                                        |
 
 ## Gate a route
 
-Ask Mesub before serving. Your own login says who the user is; Mesub says
-whether they have access.
-
-### With `hasAccess`
-
-Ask about the user by your own id, the `external_id` you passed when they
-subscribed.
+Your own login says who the user is; Mesub says whether they have access.
 
 ```ts
 import { Mesub } from '@mesub/node';
 
 const mesub = new Mesub(); // reads MESUB_API_KEY
 
-app.get('/api/reports', yourLogin, async (req, res) => {
-    const user = res.locals.user; // whoever your login says
-    if (!(await mesub.hasAccess({ external_id: user.id }, 'pro'))) {
+app.get('/api/analytics', yourLogin, async (req, res) => {
+    if (!(await mesub.hasAccess({ external_id: req.user.id }, 'pro'))) {
         res.status(402).json({ error: 'The Pro plan is needed.' });
         return;
     }
-    res.json(buildReport(user));
+    res.json(buildAnalytics(req.user));
 });
 ```
 
-`hasAccess` caches Mesub's answer for as long as Mesub says it stays true
-(`revalidate_after`), and serves the last one it knew when Mesub does not
-answer: see [When Mesub does not answer](#when-mesub-does-not-answer). During
-an outage it answers `false` for a customer it never saw. `access` throws
-instead, and gives the full answer, for a screen:
+The guards do the same in one line and answer the refusals themselves (401
+nobody signed in, 402 no access, 503 Mesub could not answer about a customer it
+never saw):
 
 ```ts
-await mesub.access({ external_id: user.id }, 'pro'); // status, dates, next charge
-await mesub.access({ external_id: user.id }, 'pro', { attempts: true }); // plus the last pull attempts
-```
-
-#### What the answer says
-
-`access` is the only field a guard needs. `status` says where the
-subscription stands: `none` (never subscribed), `pending`, `active`, `unpaid`
-(a pull missed), `cancelled`, `stopped` (no more pulls), `ended`, `failed` or
-`superseded`. Three things the status alone does not say:
-
-- **`cancelled`** is only read while the cancellation runs: access, if any,
-  holds until `access_until`. Once that end date passed, the same
-  subscription reads `ended`, with `end_reason: 'cancelled'`.
-- **`end_reason`** says why an `ended` one ended, and is null on every other
-  status: `cancelled`, `plan_removed` (the plan was deleted), `plan_replaced`
-  (another plan stands at its address), `plan_ended` (past the plan's own end
-  date), `authority_closed` (the wallet's authorisation was closed outside
-  Mesub) or `closed` (the subscriber closed it through Mesub). Null too on
-  one that ended before Mesub recorded reasons.
-- **`paused`** is true on a seat parked over your project's cap: its `status`
-  stays as it was, nothing is charged (`payment_status` is `none`), and
-  `access` runs to the end of the period already paid, in `access_until`.
-
-With `{ attempts: true }`, each attempt has an `outcome`: `PAID`, `SKIPPED`
-(nothing was sent, the chain said it could not work), `REJECTED` (sent, and
-refused for a reason that is the subscriber's) or `BLOCKED` (nothing was
-tried, and none of it the subscriber's doing: it never counts against them).
-
-Mesub may add a status, an end reason or an outcome: the SDK hands back one
-it does not know rather than throw, so keep a default branch. `paused` and
-`end_reason` are read as `false` and `null` from an API that predates them.
-
-### With a guard
-
-The guards, `requirePlan` (Express), `withMesub` (Next) and `RequirePlan`
-(Nest), do the same in one line, and answer the refusals themselves. Give
-them `customer`, a function of the request returning who your login says is
-asking: it is required, and the only way a guard learns who is asking.
-
-```ts
+// Express
 import { requirePlan } from '@mesub/node/express';
 
-// Once, for TypeScript: what your login leaves on the request.
-declare global {
-    namespace Express {
-        interface Request {
-            user?: { id: string };
-        }
-    }
-}
-
-app.get(
-    '/api/reports',
-    yourLogin,
-    requirePlan('pro', {
-        customer: (req) => (req.user ? { external_id: req.user.id } : null),
-    }),
-    (req, res) => {
-        const { customer, wallet, answer } = res.locals.mesub; // who, and what Mesub said
-        res.json(buildReport(customer));
-    },
-);
+const customer = (req) => (req.user ? { external_id: req.user.id } : null);
+app.get('/api/analytics', yourLogin, requirePlan('pro', { customer }), handler);
 ```
 
 ```ts
-// Next, app/api/reports/route.ts
+// Next, app/api/analytics/route.ts
 import { withMesub } from '@mesub/node/next';
 
-export const GET = withMesub(async (request, mesub) => Response.json(await report(mesub)), {
+export const GET = withMesub(async (request, mesub) => Response.json(await analytics(mesub)), {
     plan: 'pro',
     customer: async (request) => {
         const session = await yourSession(request);
@@ -174,444 +84,119 @@ export const GET = withMesub(async (request, mesub) => Response.json(await repor
 import { Controller, Get, UseGuards } from '@nestjs/common';
 import { MesubAccess, type MesubRequest, RequirePlan } from '@mesub/node/nest';
 
-// The request as your own guard leaves it.
 interface AuthedRequest extends MesubRequest {
     user?: { id: string };
 }
 
-@Controller('reports')
+@Controller('analytics')
 @UseGuards(
     YourAuthGuard,
     RequirePlan<AuthedRequest>('pro', {
         customer: (req) => (req.user ? { external_id: req.user.id } : null),
     }),
 )
-export class ReportsController {
+export class AnalyticsController {
     @Get()
     list(@MesubAccess() mesub: MesubAccess) {
-        return buildReport(mesub.customer);
+        return buildAnalytics(mesub.customer);
     }
 }
 ```
 
-- Return a customer as in [Who to ask about](#who-to-ask-about): `{ external_id }`,
-  a wallet, or `{ email }`. It may be async.
-- The id is a string: with numeric ids, pass `String(user.id)`.
-- Return `null` or `undefined` when nobody is signed in: the guard answers 401.
-- Anything else (two identifiers, an empty string) is thrown as a `TypeError`:
-  a bug in the integration, never a refusal.
-- A guard built without `customer` throws a `TypeError` at once, before any
-  request.
-- The route gets `mesub.customer` (who was asked about), `mesub.wallet` (the
-  wallet that pays, as Mesub answered it), `mesub.plan` and `mesub.answer`:
-  on `res.locals.mesub` in Express, as the handler's second argument in Next,
-  through `@MesubAccess()` in Nest.
+> **`customer` must come from a session you verified**, never from the request
+> itself. A guard reading `req.query.wallet` lets in anyone who types a
+> subscriber's address.
 
-> **The customer must come from a session you verified**, never from the
-> request itself: not a query, a body, nor a header the caller writes. A
-> guard reading `req.query.wallet` lets anyone in who types a subscriber's
-> address.
+A customer is named by exactly one of `external_id` (your own id for them),
+`wallet` or `email`. A guard takes one plan, a list of up to three, or a
+function of the request. `access` returns the whole answer for a screen, and
+`accessList` every plan a customer has anything on.
 
-All three answer a refusal themselves:
+Everything else, the answer's fields, the errors, who to ask about:
+[Check access](https://docs.mesub.io/docs/access). What each status means:
+[Lifecycle](https://docs.mesub.io/docs/lifecycle).
 
-| Status  | When                                                                                                    | Body                                             |
-| ------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| **401** | `customer` returned `null` or `undefined`: nobody is signed in                                          | `{ access: false, reason: 'unauthenticated' }`   |
-| **402** | Mesub said this customer has no access to that plan, or to any of the list                              | `{ access: false, reason: 'no_access', status }` |
-| **503** | Mesub failed (outage, rate limit, `guardTimeout` run out) on a customer it never saw. `Retry-After: 30` | `{ access: false, reason: 'unavailable' }`       |
+## When Mesub does not answer
 
-`onDenied(denial, ...)` answers instead: a redirect to your pricing page, your
-own JSON. In Nest it throws your own exception, and the default refusal is
-thrown if it returns. It may be async: it is awaited, and what it throws or
-rejects with goes where an integration error goes. A broken integration (a
-bad API key, an unknown plan) is never a refusal: Express gets it through
-`next(err)`, Next and Nest through a thrown error, answered 500.
-
-#### Which plan
-
-The plan is a slug, a list, or a function of the request giving either:
-
-```ts
-requirePlan('pro', { customer }); // that plan
-requirePlan(['pro', 'team'], { customer }); // any one of them
-
-// worked out per request, from a list you wrote
-const PLANS = new Map([
-    ['reports', ['pro', 'team']],
-    ['exports', ['team']],
-]);
-requirePlan((req) => PLANS.get(String(req.params.feature)) ?? 'team', { customer });
-```
-
-`withMesub` takes the same as `{ plan }`, `RequirePlan` as its first argument.
-For a list, the plans are asked at once and read in order: the first that
-grants lets the request through, without waiting for the ones after it, and
-`mesub.plan` with `mesub.answer` say which plan it was and what Mesub
-answered for it. Each plan keeps its own outage fallback, within the one
-`guardTimeout`:
-
-| None of the plans grants, and                       | Answer                                                         |
-| --------------------------------------------------- | -------------------------------------------------------------- |
-| Mesub said no for every one                         | **402**, with the `status` of the first plan of the list       |
-| Mesub failed on one it never answered this customer | **503** with `Retry-After`: nobody knows yet whether it grants |
-
-The plan comes from what the route serves, never from what the request asks
-for: `(req) => req.query.tier` lets anyone pick the plan they are checked
-against. Map the request to a list you wrote, as above, or guard with every
-plan the route accepts and serve according to `mesub.plan`. A function runs
-only once `customer` named somebody, so an anonymous request never reaches it.
-
-A guard asks about **3 plans at most**, what a Dev project holds: each one is
-a call to Mesub on every request, against your key's 1000 calls a minute.
-
-An unknown plan is a broken integration, like a bad API key, unless a plan
-earlier in the list already let the request through. An empty list, an empty
-slug, or more than 3 plans is thrown when the guard is built, or on the
-request for a function.
-
-### Who to ask about
-
-`access`, `hasAccess`, `accessList` and `subscriptions.list` take a customer,
-named by exactly one of:
-
-```ts
-await mesub.hasAccess({ external_id: user.id }, 'pro'); // your own id for them
-await mesub.hasAccess({ wallet }, 'pro'); // the wallet that pays (a string alone works too)
-await mesub.hasAccess({ email: 'ada@example.com' }, 'pro'); // the email given when they subscribed
-```
-
-- **`external_id`** when your app has its own login: the id you passed to
-  `subscriptions.create`. It follows the customer whichever wallet pays, and
-  across several: access if any of them grants it, and the answer names that
-  wallet.
-- **`wallet`** for a wallet-only dApp, where the connected wallet is the
-  customer.
-- **`email`** as a fallback, or for a support lookup: it is the address given
-  when they subscribed, never verified by Mesub, so anyone could have typed
-  it.
-
-Asked by `external_id` or `email`, a customer with nothing on that plan is
-answered `wallet: null`. Emails are trimmed and lowercased, external ids
-trimmed, as Mesub reads them: `' Ada@Example.com'` is `ada@example.com`.
-
-Without a plan, `accessList` answers every plan the customer has anything on,
-for a page listing their entitlements in one call:
-
-```ts
-const { plans } = await mesub.accessList({ external_id: user.id });
-// [{ plan: 'pro', access: true, status: 'active', ... }, ...]
-```
-
-It is cached on its own, for its own `revalidate_after`, and throws like
-`access` when Mesub cannot answer. `access` and `hasAccess` always need a plan:
-called without one, they throw a `TypeError` instead of asking.
+`hasAccess` and the guards never lock out a paying subscriber for an outage,
+nor let a stranger in: they serve the last answer they knew for that customer
+and plan, for up to 24 hours (`maxStaleMs`), and `false` or a 503 for one they
+never saw. `access` throws instead. A guard never holds a request longer than
+`guardTimeout`, 2 s by default. A bad key or an unknown plan always throws: a
+broken integration is never read as "not subscribed".
 
 ## Show your plans
-
-For a pricing page, read your plans from Mesub rather than writing their
-price down twice:
 
 ```ts
 const plans = await mesub.plans.list(); // sorted by slug
 const pro = await mesub.plans.retrieve('pro');
-
-// pro.amount_display "9.99", pro.symbol "USDC", pro.period_hours 720
-// pro.available: whether it takes new subscribers now
+// pro.amount_display "9.99", pro.symbol "USDC", pro.period_hours 720, pro.available
 ```
 
-- `available` is false on a plan that is ending (`status: 'sunset'`, with
-  `ends_at`) and when your project is full: show "Subscribe" only when true.
-- `amount` is the price in the token's base units, a string; `amount_display`
-  is the same as a person reads it.
-- A slug your project lacks throws a `MesubError` `plan_not_found`.
-- Nothing is cached: call it where you render, and cache it your way.
+`available` is false on a plan that is ending and when your project is full:
+show "Subscribe" only when it is true. Nothing is cached.
 
 ## Subscribe from your server
 
-Your server opens the subscription and relays the signatures; your front only
-has the wallet sign. No Mesub account is involved, and the API key never
-leaves your server.
-
-1. **Create**, on your server: Mesub reserves the subscription and builds what
-   the wallet signs.
-
-    ```ts
-    const { subscription, transaction, terms, costs } = await mesub.subscriptions.create({
-        plan: 'pro',
-        wallet, // the wallet that signs and pays
-        email, // optional: where the subscriber's notices go
-        external_id: user.id, // optional: your own id, what you gate routes by
-    });
-    // Send transaction, terms and costs to your front; keep subscription.id.
-    ```
-
-    Pass `external_id` when your app has a login: it is how
-    [Gate a route](#gate-a-route) finds this customer, whichever wallet
-    pays. Called again for the same plan and wallet while nothing landed,
-    `create` answers the same subscription with a fresh transaction, and the
-    `email` and `external_id` of the last call replace those before.
-
-2. **Sign**, in your front, terms first, within five minutes
-   (`terms.expires_at`), and without sending the transaction:
-
-    ```ts
-    import bs58 from 'bs58';
-    import { VersionedTransaction } from '@solana/web3.js';
-
-    // wallet: the connected wallet, e.g. useWallet() of @solana/wallet-adapter-react.
-    // Show terms.message and costs (lamports) to the subscriber first.
-    const signature = await wallet.signMessage(new TextEncoder().encode(terms.message));
-    const terms_signature = bs58.encode(signature);
-
-    const bytes = Uint8Array.from(atob(transaction), (c) => c.charCodeAt(0));
-    const signed = await wallet.signTransaction(VersionedTransaction.deserialize(bytes));
-    const signedTransaction = btoa(String.fromCharCode(...signed.serialize()));
-    // Send terms_signature and signedTransaction back to your server.
-    ```
-
-3. **Submit**, on your server: Mesub checks both signatures, co-signs, sends
-   the transaction and waits for the chain, up to a minute or so.
-
-    ```ts
-    import { MesubSubmitError } from '@mesub/node';
-
-    // subscriptionId: the subscription.id kept at create.
-    try {
-        const { subscription, reason } = await mesub.subscriptions.submit(subscriptionId, {
-            transaction: signedTransaction,
-            terms_signature,
-        });
-
-        if (subscription.access) {
-            // active (or cancelled, if the wallet set an end): grant the plan
-        } else {
-            // pending: Mesub read the chain, and this transaction did not land
-            //   and no longer can (reason says why): create again for a new one
-            // failed: what landed is not what Mesub built
-        }
-    } catch (error) {
-        if (error instanceof MesubSubmitError) {
-            // Mesub never said what became of it: the wallet may have paid.
-            // error.subscription is the row read back (null if that failed):
-            // read it again with retrieve before creating anew.
-        }
-        throw error;
-    }
-    ```
-
-One send of `submit` waits up to 90 s (`{ timeout }` changes it). When it
-gets no answer that says what became of it (a timeout, a network error, a
-5xx, Mesub's `network_unavailable` while the Solana network does not answer),
-or an error Mesub marks `retryable`, `submit` sends **the same request** again,
-the same transaction and terms signature, up to twice: after the
-`Retry-After` Mesub asks for, or 10 s, and only within the whole call's
-budget, 120 s by default (`{ budget }`, in ms, changes it). Mesub recognises
-a request it already co-signed, signs nothing again, and answers it from the
-chain: `active` if it landed, or `pending` with its reason if it did not.
-
-This relies on Mesub-io/backend#190 and #202 being deployed, as they are on
-every Mesub environment this SDK talks to: a back without them would refuse
-the second send with `terms_missing`, thrown as is.
-
-When no send got an answer, `submit` reads the subscription back once, for
-10 s at most, retries included. It returns it if it is `active` or
-`cancelled` (it landed), and otherwise throws a `MesubSubmitError`: a
-`MesubError` with `code` `unavailable`, how many `sends` it made, and the
-`subscription` it read back, or `null` if that read failed too. Its
-`status`, `apiCode`, `body` and `retryAfter` are those of the last send that
-got a response (a 503, a 429), all null when none did (timeouts, network
-errors); its `cause` is the last send's own error. A `pending` one may still
-land: read it again a little later (Mesub also confirms it, or marks it
-`expired`, on its own within the hour), and only create anew once it is
-`expired`. The same read back
-follows an answer the SDK cannot read (thrown as `unexpected`), and a replay
-refused with `not_awaiting_signature` after a send that got no answer, since
-the row has moved on (thrown as that `conflict`, with the row).
-
-So `submit` takes at most its budget plus 10 s: **130 s by default**. That is
-past Cloudflare's 100 s (a 524 to your front) and past many serverless
-functions' limit: there, lower it, e.g. `{ timeout: 25_000, budget: 40_000 }`
-for a 60 s function. A short `timeout` does not stop the request already
-sent: Mesub may still co-sign it and the transaction land after `submit`
-threw, so read the subscription back later rather than create anew.
-
-An abort through `{ signal }` stops the sends, the waits and the read back,
-and rejects with the signal's reason. A send already out may have been
-co-signed: read the subscription back before anything else.
-
-A subscription `submit` returns with `access` (`active`, or `cancelled`
-before its end) drops the `/v1/access` answers this client cached for that
-customer that still say no: by wallet, and by external id and email when the
-subscription has them, for its plan and in `accessList`. So `hasAccess` right
-after asks Mesub again, rather than answering the no it cached a few seconds
-before. `retrieve` and `list` do the same for each subscription they find
-with `access`. Another server sharing no store with this one keeps its own
-cached no until its `revalidate_after` runs out.
-
-Refusals throw a `MesubError` (see [Errors](#errors)): its `code` says the
-kind, its `apiCode` which one, e.g. `forbidden` / `terms_expired` (create
-again for fresh terms, and sign those), `conflict` / `transaction_expired` (create again), `conflict` /
-`insufficient_balance` or `already_subscribed` on create, and `not_found` /
-`subscription_not_found` for an id Mesub does not know.
-
-Reading back:
+Three steps, with the wallet in the middle. The API key never leaves your
+server.
 
 ```ts
-await mesub.subscriptions.retrieve(id); // status, paused, end_reason, access, dates, wallet, email, external_id
-await mesub.subscriptions.list({ external_id: user.id }); // { data, has_more }, newest first
-for await (const sub of mesub.subscriptions.listAll({ email: 'a@b.co', plan: 'pro' })) {
-    // every page, one call per page
+// 1. On your server: Mesub reserves it and builds what the wallet signs.
+const { subscription, transaction, terms, costs } = await mesub.subscriptions.create({
+    plan: 'pro',
+    wallet, // the wallet that signs and pays
+    external_id: user.id, // optional: your own id, what you gate routes by
+    email, // optional: where their notices go
+});
+
+// 2. In your pages: the wallet signs terms.message, then the transaction,
+//    without sending it, before terms.expires_at.
+
+// 3. On your server: Mesub co-signs, sends, and waits for the chain.
+const { subscription: now, reason } = await mesub.subscriptions.submit(subscription.id, {
+    transaction: signedTransaction,
+    terms_signature,
+});
+if (now.access) {
+    // it landed: grant the plan
 }
 ```
 
-`list` names the customer as `access` does (see
-[Who to ask about](#who-to-ask-about)): exactly one of `wallet`, `external_id`
-and `email`, trimmed and lowercased the same way, a `TypeError` otherwise. It
-also answers `expired` checkouts, which nobody signed: `access` is false on
-them. `status`, `paused` and `end_reason` read as on `access` (see
-[What the answer says](#what-the-answer-says)): a `cancelled` subscription is
-`ended`, with `end_reason: 'cancelled'`, once its end date passed. On a late
-one Mesub retries on its own, `next_retry_number` and `retries_allowed` say
-which retry comes at `next_retry_at` and out of how many: 2 and 3 before the
-second retry of three. Both are null otherwise (paid up, paused, stopped, on
-Free), and from a Mesub that does not serve them yet.
+`submit` waits for the chain: up to 130 s by default, which `{ timeout, budget }`
+lower for a serverless function. When no answer says what became of it, it
+throws a `MesubSubmitError`: read the subscription back with `retrieve` before
+creating a new one, since the wallet may have paid.
 
-### A subscription's payments
+The signing code, what `create` answers, the refusals:
+[Subscribe from your server](https://docs.mesub.io/docs/subscribe).
+
+## Cancel, resume, close, and payments
+
+Each action is two calls from your server with the wallet in between: your
+server builds a transaction, the subscription's own wallet signs and sends it,
+your server confirms with the signature.
+
+| To                                            | Build        | Confirm                            |
+| --------------------------------------------- | ------------ | ---------------------------------- |
+| stop the renewals of a running one            | `cancel(id)` | `confirmCancel(id, { signature })` |
+| take a cancellation back before its end       | `resume(id)` | `confirmResume(id, { signature })` |
+| close one that is over, and get its rent back | `close(id)`  | `confirmClose(id, { signature })`  |
 
 ```ts
-const { data, has_more, paid } = await mesub.subscriptions.attempts(id, { limit: 20 });
-// paid: { count: 14, amount: '139860000' }, since the subscription began
-for await (const attempt of mesub.subscriptions.allAttempts(id)) {
-    // every page, one call per page
-}
+await mesub.subscriptions.retrieve(id);
+await mesub.subscriptions.list({ external_id: user.id }); // { data, has_more }
+const { data, paid } = await mesub.subscriptions.attempts(id); // its charges, and the total paid
 ```
 
-`attempts` answers that subscription's own pull attempts, newest first, 20 a
-page unless `limit` (1 to 100) says otherwise; `starting_after` takes the `id`
-of the last one of the previous page. Each one:
-
-| Field                             | What it says                                                                                             |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `id`, `attempted_at`              | Which one, and when.                                                                                     |
-| `outcome`                         | `PAID`, `SKIPPED`, `REJECTED` or `BLOCKED`; one newer than this release is handed back as is.            |
-| `reason`                          | Mesub's short reason, null on a paid one.                                                                |
-| `amount`                          | In the mint's smallest unit, as a string: what was asked for, and on a paid one what was paid.           |
-| `signature`                       | The transaction, null when nothing was sent.                                                             |
-| `retry`                           | True when the subscription had already failed on that period.                                            |
-| `retry_number`, `retries_allowed` | Which retry it was and out of how many, as recorded when it ran: 1 is the first after the missed charge. |
-| `period_start`                    | The start of the period it was for, null when Mesub recorded none.                                       |
-
-`retry_number` and `retries_allowed` are null on a first try, on a retry fired
-by hand on Dev or Business, and on an attempt that kept none. `paid` is
-counted by Mesub over every paid attempt of the subscription, not over the
-page: `count`, and `amount`, their sum in the mint's smallest unit.
-
-The attempts are those of the id asked. A subscription the wallet came back
-over (`superseded`) keeps its own, and the one that replaced it starts from
-its first pull: neither total includes the other's. From a Mesub that does not
-serve the route yet, `attempts` throws a `not_found` whose `apiCode` is null;
-an id Mesub does not hold is a `not_found` / `subscription_not_found`.
-
-## Cancel, resume and close from your server
-
-Stopping a subscription takes the same two calls from your server as starting
-one, with the wallet in between. Your server asks Mesub for a transaction,
-**the subscriber's wallet signs and sends it in your front**, and your server
-confirms it with the signature the wallet answered. No Mesub account, and
-nothing of `@mesub/react`. The API key alone moves nothing: only the
-subscription's own wallet can sign.
-
-| To                                            | Build, on your server | Confirm, on your server            | Settles as                      |
-| --------------------------------------------- | --------------------- | ---------------------------------- | ------------------------------- |
-| stop the renewals of a running one            | `cancel(id)`          | `confirmCancel(id, { signature })` | `cancelled`                     |
-| take a cancellation back before its end       | `resume(id)`          | `confirmResume(id, { signature })` | `active`                        |
-| close one that is over, and get its rent back | `close(id)`           | `confirmClose(id, { signature })`  | `ended`, `end_reason: 'closed'` |
-
-1. **Build**, on your server, for a subscription of the customer asking (find
-   it with `list`):
-
-    ```ts
-    const { transaction } = await mesub.subscriptions.cancel(subscriptionId);
-    // Send transaction to your front. Nothing is cancelled yet.
-    ```
-
-2. **Sign and send**, in your front. Unlike subscribing, the wallet sends this
-   one itself: Mesub signs nothing of it, and the wallet pays its network fee.
-
-    ```ts
-    import { VersionedTransaction } from '@solana/web3.js';
-
-    // wallet and connection: e.g. useWallet() and useConnection() of
-    // @solana/wallet-adapter-react, with the subscription's own wallet connected.
-    const bytes = Uint8Array.from(atob(transaction), (c) => c.charCodeAt(0));
-    const signature = await wallet.sendTransaction(
-        VersionedTransaction.deserialize(bytes),
-        connection,
-    );
-    // Send signature (base58) back to your server.
-    ```
-
-3. **Confirm**, on your server: Mesub waits for the chain, up to a minute or
-   so, and answers the subscription as it is now.
-
-    ```ts
-    const { subscription, reason } = await mesub.subscriptions.confirmCancel(subscriptionId, {
-        signature,
-    });
-
-    if (reason === undefined) {
-        // cancelled: subscription.access_until says when access ends
-    } else {
-        // Nothing changed (the transaction failed, or expired before it
-        // landed): reason says why. Build a new one to try again.
-    }
-    ```
-
-`resume` with `confirmResume`, and `close` with `confirmClose`, work the same
-way, steps 1 to 3.
-
-A cancellation is not an immediate stop: a subscription paid up keeps its
-`access` until the end of the period it paid for (`access_until`), and can be
-resumed until then. One cancelled while `unpaid` or `stopped` has no access,
-and its missed period is never collected. Once that end has passed it reads
-`ended` with `end_reason: 'cancelled'`, and `close` gives the wallet back the
-rent it paid when subscribing; the same wallet can then subscribe to the plan
-anew.
-
-Each of the six is sent once and never retried. `cancel`, `resume` and `close`
-take the client's `timeout`; a confirm waits 90 s by default. Both take
-`{ timeout, signal }` per call. A confirm that timed out or got a 5xx changed
-nothing by itself: send it again with the same signature, it is answered the
-same once the transaction has landed. A transaction built and never sent
-changes nothing either.
-
-A confirm that settled (no `reason`) drops every `/v1/access` answer this
-client cached for that customer on that plan, by wallet, external id and
-email, and in `accessList`: `access` right after says `cancelled`, or `active`
-again, rather than what it cached before.
-
-Refusals throw a `MesubError` (see [Errors](#errors)), told apart by `apiCode`:
-
-| `code`            | `apiCode`                    | When                                                      |
-| ----------------- | ---------------------------- | --------------------------------------------------------- |
-| `not_found`       | `subscription_not_found`     | no subscription of your project under that id             |
-| `conflict`        | `subscription_not_active`    | `cancel`: it is not `active`, `unpaid` or `stopped`       |
-| `conflict`        | `subscription_cancelled`     | `cancel`: it was cancelled already                        |
-| `conflict`        | `subscription_not_cancelled` | `resume` or `close`: nothing cancelled it                 |
-| `conflict`        | `subscription_ended`         | `resume`: the period it paid for is over, subscribe again |
-| `conflict`        | `plan_deleted`               | `resume`: its plan is gone                                |
-| `conflict`        | `close_too_early`            | `close`: its end has not passed yet                       |
-| `conflict`        | `subscription_not_on_chain`  | it is closed already, or gone from the chain              |
-| `invalid_request` | `nothing_to_confirm`         | a confirm before any transaction was built                |
-| `invalid_request` |                              | a `signature` that is not a base58 transaction signature  |
-| `rate_limited`    |                              | more than 60 of these calls in a minute for the key       |
+`listAll` and `allAttempts` walk every page. The steps, the refusals and what
+an attempt carries: [Manage from your server](https://docs.mesub.io/docs/manage).
 
 ## Routes for the React widget
 
-[`@mesub/react`](https://github.com/Mesub-io/react-sdk) never talks to Mesub:
-it calls your server, which holds the key. These routes are that server side,
-one line to mount. Without the widget you do not need them: `subscriptions.*`
-above is the same thing, by hand.
+[`@mesub/react`](https://github.com/Mesub-io/react-sdk) is optional. It never
+talks to Mesub: it calls your server, on routes this package mounts in one
+line.
 
 ```ts
 // Express, after your own login. Under Nest: the same app.use in main.ts.
@@ -639,18 +224,10 @@ export const { GET, POST } = mesubRouteHandlers({
 });
 ```
 
-- `customer` is who your own auth says is asking, as on the guards, and it is
-  required. It must come from a session you verified, never from the request.
-  Null answers 401.
-- Every subscription created is tied to that customer, whatever the browser
-  sends. One that is not theirs answers 404, as one that does not exist.
-- `plans: ['pro', 'team']` keeps the widget to those plans. `email` says where
-  the customer's notices go.
-- A POST must be JSON, which a plain form on another site cannot send. Your
-  own CSRF protection still applies if you have one.
-- The browser never gets your API key, nor the email and the id you gave Mesub.
-
-What they serve, under your mount point:
+Every subscription created is tied to the customer your function returns,
+whatever the browser sends; one that is not theirs answers 404. `plans:
+['pro', 'team']` keeps the widget to those plans. The browser never gets your
+API key, nor the email and the id you gave Mesub.
 
 | Route                                                        | What it does                                |
 | ------------------------------------------------------------ | ------------------------------------------- |
@@ -662,76 +239,18 @@ What they serve, under your mount point:
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
 
-`GET /subscriptions/:id` answers the subscription, what Mesub pulls next, its
-own pull attempts, newest first, and what it paid since it began:
-
-```json
-{
-    "subscription": { "id": "cmg1...", "status": "unpaid", "plan": "pro", "...": "..." },
-    "upcoming": [
-        {
-            "kind": "retry",
-            "due_at": "2026-10-03T09:00:00.000Z",
-            "amount": "9990000",
-            "amount_display": "9.99",
-            "retry_number": 2,
-            "retries_allowed": 3
-        }
-    ],
-    "payments": [
-        {
-            "attempted_at": "2026-10-02T09:00:04.512Z",
-            "outcome": "SKIPPED",
-            "amount": "9990000",
-            "reason": "insufficient-balance",
-            "signature": null,
-            "retry": true,
-            "retry_number": 1,
-            "retries_allowed": 3,
-            "period_start": "2026-10-01T09:00:00.000Z"
-        }
-    ],
-    "paid": { "count": 14, "amount": "139860000" },
-    "payments_error": null
-}
-```
-
-- `upcoming` holds one entry at most: the next `charge` of a running
-  subscription or the next `retry` of a late one, at the plan's price (null
-  when the plan could not be read). On a retry, `retry_number` and
-  `retries_allowed` say "next try 2 / 3"; they are null on a charge, and when
-  Mesub does not say.
-- `payments` is this subscription's own attempts, the first page: twenty at
-  most. Each is what `subscriptions.attempts` answers (see
-  [A subscription's payments](#a-subscriptions-payments)), without its `id`.
-  `outcome` may be one newer than this release, handed on as is.
-- `paid` is Mesub's own count over all of the subscription's attempts, not a
-  sum of those listed: how many were paid, and how much, in the mint's
-  smallest unit.
-- `payments` and `paid` are null, with a `payments_error` of
-  `{ code, message }`, when they could not be read: the subscription is still
-  answered, with a 200, and a refusal of Mesub's is named by its own code
-  (`rate_limited`, ...).
-- A Mesub that does not serve the attempts route yet is read the older way:
-  the last five attempts at most, with `retry`, `retry_number`,
-  `retries_allowed` and `period_start` null, and `paid: null`, since five
-  attempts are no total. There, a subscription the wallet came back over
-  answers `payments: null` with `not_the_current_subscription`, and a plan
-  without a slug `plan_without_slug`.
+A refusal is `{ error: { code, message } }`. The widget's side:
+[React widget](https://docs.mesub.io/docs/react).
 
 ## Webhooks
 
-Mesub posts an event to your endpoint when a subscription changes, signed
-the [Standard Webhooks](https://www.standardwebhooks.com) way. Register the
-endpoint and pick its events in the dashboard; its signing secret goes in
-`MESUB_WEBHOOK_SECRET` (or `new Mesub({ webhookSecret })`, or `{ secret }`
-per call when you have several endpoints).
-
-The signature is over the exact bytes Mesub sent: verify the raw body, never
-one a JSON parser read and wrote again. With Express, mount `express.raw` on
-the route, before any `app.use(express.json())` reaches it:
+Mesub posts an event to your endpoint when a subscription changes, signed the
+[Standard Webhooks](https://www.standardwebhooks.com) way. Verify the raw body,
+never one a JSON parser read and wrote again:
 
 ```ts
+import { MesubError } from '@mesub/node';
+
 app.post('/webhooks/mesub', express.raw({ type: 'application/json' }), async (req, res) => {
     let event;
     try {
@@ -742,81 +261,64 @@ app.post('/webhooks/mesub', express.raw({ type: 'application/json' }), async (re
     }
 
     if (await alreadyHandled(event.id)) return res.status(200).end();
-
-    switch (event.type) {
-        case 'subscription.renewed':
-            // event.data is the subscription; event.data.detail what was paid
-            break;
-        case 'subscription.payment_failed':
-            // event.data.detail.reason, retries_left, next_retry_at
-            break;
-        // ...
-    }
+    // event.type, event.data (the subscription), event.data.detail
     res.status(200).end();
 });
 ```
 
-In a Next route handler, `verifyWebhook` is the same check without a
-client: `await verifyWebhook(await request.text(), request.headers)`.
+In a Next route handler: `await verifyWebhook(await request.text(),
+request.headers)`. A delivery can arrive twice or out of order: drop an
+`event.id` you already handled, and ask `hasAccess` before granting or
+revoking. The events, their bodies and how to test:
+[Webhooks](https://docs.mesub.io/docs/webhooks).
 
-- **Events**: `subscription.created` (first payment landed),
-  `subscription.renewed`, `subscription.payment_failed`,
-  `subscription.stopped` (no more pulls), `subscription.cancelled`,
-  `subscription.resumed`, `subscription.ended` (the plan ended or was
-  deleted, or the wallet closed its delegation: `data.end_reason` says
-  which), `subscription.expired` (a
-  checkout nobody signed), and `test`, sent from the dashboard with a
-  made-up subscription. Keep a default branch: a newer type is handed back
-  too.
-- **`data`** is the subscription as `subscriptions.retrieve` answers it, plus
-  `detail`, the event's own. It is taken at the first attempt, so it may be
-  newer than the event: `created_at` is when the event happened.
-- **Duplicates**: a delivery without a 2xx in 10 s is sent again for about 3
-  days, under the same `event.id` (the `webhook-id` header): drop one you
-  have already handled. A redirect is a failure.
-- **Order** is not guaranteed: a retry can land after a later event. Before
-  granting or revoking, ask `hasAccess`; `webhooks.verify` already dropped
-  the cached no of a subscription that grants access.
-- **Failures**: `invalid_webhook` when the signature, a header or the
-  timestamp (5 minutes either way, see `tolerance`) is wrong; answer 400.
-  `unexpected` for a body Mesub signed that this release cannot read.
+## Errors
 
-## When Mesub does not answer
+Every failure is a `MesubError` with a `status` (the HTTP status, or `null`)
+and a stable `code` to branch on:
 
-- **`hasAccess`** never locks out a paying subscriber for an outage, nor lets a
-  stranger in: after its retries it serves the last answer it knew for that
-  customer and plan, even stale (for up to 24 hours, see `maxStaleMs`), and
-  `false` for one it never saw. `access` throws instead, since it is for
-  screens.
-- **The guards** (`requirePlan`, `withMesub`, `RequirePlan`) never hold a
-  request longer than `guardTimeout`, 2 s by default, for the access check:
-  retries happen only while they fit, a `Retry-After` that would outlast it
-  is not waited, and a 429 is never retried. When it runs out, or Mesub fails
-  (5xx, 429, network), the guard answers from the last answer it knew, like
-  `hasAccess`, or 503 with `Retry-After: 30` for a customer it never saw,
-  since nobody knows yet whether they pay: 402 only ever means Mesub said no.
-  The access check is the only call a guard makes to Mesub: who is asking
-  comes from your own login.
-- **Many requests at once** for a customer not in the cache send Mesub one
-  request, not one each: 50 checks of the same wallet on the same plan wait
-  for the same answer, or the same error. The guards share theirs with each
-  other, and `access`, `hasAccess` and `accessList` called from your code
-  with each other, since a guard's request gives up sooner.
-- A bad key, an unknown plan or a malformed wallet always throws, it is never
-  turned into `false`.
+| `code`            | Meaning                                                                 |
+| ----------------- | ----------------------------------------------------------------------- |
+| `invalid_request` | 400, e.g. a wallet that is not an address                               |
+| `unauthorized`    | 401, an API key Mesub never issued                                      |
+| `forbidden`       | 403, e.g. signed terms that expired                                     |
+| `plan_not_found`  | 404, no plan of yours under that slug                                   |
+| `not_found`       | any other 404 Mesub answered, e.g. an unknown subscription id           |
+| `conflict`        | 409, e.g. a wallet already subscribed                                   |
+| `rate_limited`    | 429, after the retries                                                  |
+| `unavailable`     | 5xx, a timeout or a network error, after the retries                    |
+| `invalid_webhook` | a webhook that fails verification: signature, headers or timestamp      |
+| `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
 
-Reads from Mesub time out after 5 s and are retried twice, on network errors
-and on any error Mesub marks `retryable` (a 429 rate limit, a 5xx), honouring
-`Retry-After`; an error without Mesub's flag is retried on 408, 429 and 5xx,
-never on a 409. A guard never retries a 429. `create` is sent once and never
-retried, whatever happened: one that got no answer may still have reserved,
-and calling it again for the same plan and wallet answers that same
-subscription. A full cap of subscriptions waiting for a signature (`pending_cap_reached`, a 429) frees up over an hour:
-the error's `retryAfter` says when. What `submit` does when no answer comes
-back is in [Subscribe from your server](#subscribe-from-your-server).
-These are HTTP retries of the SDK's own calls, unrelated to a plan's pull
-retries. `access` and `hasAccess`, called from your own code, keep exactly
-that: `guardTimeout` binds the guards only.
+It also carries `apiCode`, Mesub's own finer code (`already_subscribed`,
+`close_too_early`, ...), `retryable`, `retryAfter` in milliseconds, and the
+parsed `body`. New codes are added: keep a default branch. Every code:
+[API reference](https://docs.mesub.io/docs/api).
+
+Reads time out after 5 s and are retried twice. `create` and the six manage
+calls are sent once and never retried.
+
+## Test your integration
+
+`@mesub/node/testing` is a fake Mesub for your own tests: no network, no Mesub
+account, and nothing of it in your production bundle.
+
+```ts
+import { FakeMesub } from '@mesub/node/testing';
+
+const fake = new FakeMesub();
+const mesub = fake.client(); // a real Mesub, wired to the fake
+
+fake.grant({ external_id: 'user_42' }, 'pro');
+await mesub.hasAccess({ external_id: 'user_42' }, 'pro'); // true
+
+fake.fail('outage'); // every call answers 503, until fail(null)
+const { body, headers } = await fake.webhook('subscription.renewed'); // signed
+fake.reset(); // between tests
+```
+
+Guards, webhooks, subscribing and managing against it:
+[Test your integration](https://docs.mesub.io/docs/testing).
 
 ## Options
 
@@ -838,8 +340,7 @@ new Mesub({
 They are checked once, by `new Mesub()`, which throws a `TypeError` naming
 the option: a `baseUrl` that is not https (plain http only to `localhost` or
 `127.0.0.1`: every call carries the key), a timeout that is not a positive
-number of milliseconds, `maxRetries` or `maxStaleMs` below 0, or the
-publishable `PUB_` key where the API key (`SUB_`) goes. On an edge runtime
+number of milliseconds, or `maxRetries` or `maxStaleMs` below 0. On an edge runtime
 without `process.env` (Cloudflare Workers), pass `apiKey` yourself.
 
 Behind a proxy, `baseUrl` may carry a path: every call goes under it
@@ -879,8 +380,7 @@ const redisStore: CacheStore<AccessAnswer | AccessList> = {
 const mesub = new Mesub({ cache: redisStore });
 ```
 
-`delete` is what drops a cached no once a subscription lands (see
-[Subscribe from your server](#subscribe-from-your-server)). It is optional:
+`delete` is what drops a cached no once a subscription lands. It is optional:
 a store without it gets that answer rewritten as stale instead, which also
 makes the next call ask Mesub.
 
@@ -902,95 +402,6 @@ release was written against, exported as `API_VERSION`. It is pinned per
 release and cannot be set, so Mesub can change an answer for newer releases
 without breaking one already installed: upgrading the package is what moves
 you to a newer version. Mesub does not read it yet.
-
-## Errors
-
-Every failure is a `MesubError` with a `status` (the HTTP status, or `null`)
-and a stable `code` to branch on:
-
-| `code`            | Meaning                                                                 |
-| ----------------- | ----------------------------------------------------------------------- |
-| `invalid_request` | 400, e.g. a wallet that is not an address                               |
-| `unauthorized`    | 401, an API key Mesub never issued                                      |
-| `forbidden`       | 403, e.g. signed terms that expired                                     |
-| `plan_not_found`  | 404, no plan of yours under that slug                                   |
-| `not_found`       | any other 404 Mesub answered, e.g. an unknown subscription id           |
-| `conflict`        | 409, e.g. a wallet already subscribed                                   |
-| `rate_limited`    | 429, after the retries                                                  |
-| `unavailable`     | 5xx, a timeout or a network error, after the retries                    |
-| `invalid_webhook` | a webhook that fails verification: signature, headers or timestamp      |
-| `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
-
-It also carries what Mesub answered:
-
-- `apiCode`: Mesub's own code, finer than `code` (`subscription_not_found`,
-  `already_subscribed`, `pending_cap_reached`, ...), or `null` when no Mesub
-  error came back. A code is never renamed nor reused, but new ones are added:
-  keep a default branch.
-- `retryable`: whether the same call, sent again unchanged, may succeed later.
-  Mesub's own flag when it sent one, what the status says otherwise.
-- `retryAfter`: how long Mesub asked to wait before that, in milliseconds,
-  from the response's `Retry-After` (on a 429, or a 503 such as
-  `network_unavailable`), or `null` when it sent none.
-- `body`: the error body, parsed when it is JSON.
-
-A `submit` whose outcome Mesub never told throws a `MesubSubmitError`, a
-`MesubError` that also carries the `subscription` read back and its `sends`:
-see [Subscribe from your server](#subscribe-from-your-server).
-
-## Test your integration
-
-`@mesub/node/testing` is a fake Mesub for your own tests: it answers what the
-SDK asks (`/v1/access`, `/v1/plans`, `/v1/subscriptions`) from what each
-test sets, through a `fetch` handed to the client. No network,
-no Mesub account, and nothing of it in your production bundle.
-
-```ts
-import { FakeMesub } from '@mesub/node/testing';
-
-const fake = new FakeMesub(); // or { plans: ['pro'] }: any other slug is plan_not_found
-const mesub = fake.client(); // a real Mesub, wired to the fake
-
-fake.grant(wallet, 'pro'); // active and paid
-fake.grant({ external_id: 'user_42' }, 'pro', { wallet }); // by your own id
-fake.deny(wallet, 'team', { status: 'stopped' }); // or setAccess(...) for any answer
-
-await mesub.hasAccess(wallet, 'pro'); // true
-
-// A guard, end to end: the test says who is signed in.
-const customer = () => ({ external_id: 'user_42' });
-app.get('/api/reports', requirePlan('pro', { client: mesub, customer }), handler);
-await request(app).get('/api/reports'); // 200
-
-fake.fail('outage'); // every access and subscriptions call answers 503, until fail(null)
-fake.fail({ status: 429, code: 'rate_limited', retryAfter: 2 });
-fake.requests; // every call received: method, path, query, headers, body
-fake.reset(); // between tests
-
-// A webhook, signed with fake.webhookSecret, which fake.client() verifies with.
-const { body, headers } = await fake.webhook('subscription.renewed', {
-    subscription: { external_id: 'user_42' },
-});
-await request(app).post('/webhooks/mesub').set(headers).type('json').send(body);
-```
-
-Its answers are stale at once (`revalidate_after: 0`), so a change shows on
-the next call while the outage fallback still has them; pass
-`revalidate_after` to test the cache. A customer is answered as named: a
-wallet granted is not found by its external id. `subscriptions.create` then
-`submit` land at once and grant the plan; `addSubscription` adds one for
-`retrieve` and `list`, and `setAttempts(id, [...])` gives it pull attempts,
-answered by `subscriptions.attempts` with their `paid` total, by `access`
-with `{ attempts: true }` (the five newest) and by the widget routes;
-`new FakeMesub({ attemptsRoute: false })` acts as a Mesub that does not serve
-`subscriptions.attempts` yet. `cancel`, `resume` and `close` answer a made-up
-transaction, and their confirms land at once with any `signature`: the
-subscription and its access answers move as Mesub's would, and a step its
-status does not allow is refused with Mesub's code (`close_too_early`,
-`nothing_to_confirm`, ...). Pass `fake.fetch` to your own `new Mesub()` with
-`fake.apiKey` and `fake.baseUrl` if you build the client yourself, and
-`fake.webhookSecret` as `webhookSecret`. `signWebhook(body, { secret })`
-signs a body of your own.
 
 ## Requirements
 
