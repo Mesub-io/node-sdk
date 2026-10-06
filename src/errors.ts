@@ -37,7 +37,11 @@ export interface MesubErrorOptions {
 /** Every failure of a call to the Mesub API, after retries. */
 export class MesubError extends Error {
     override readonly name = 'MesubError';
-    /** The HTTP status, or `null` when no response came back (network error, timeout). */
+    /**
+     * The HTTP status, or `null` when no response came back (network error,
+     * timeout). On the copy an Express middleware hands to `next(err)` for a
+     * 4xx of Mesub's, 500: Mesub's own is on `cause`.
+     */
     readonly status: number | null;
     readonly code: MesubErrorCode;
     /**

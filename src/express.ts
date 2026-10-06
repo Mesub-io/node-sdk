@@ -27,6 +27,8 @@ import {
     type WidgetRoutesOptions,
 } from './routes.js';
 
+import { MesubError } from './errors.js';
+
 export { MesubError } from './errors.js';
 export type {
     WidgetPayment,
@@ -37,6 +39,28 @@ export type {
 export type { CustomerOption, Denial, DenialReason, MesubAccess, PlanOption } from './guard.js';
 export type { Asked } from './customer.js';
 export type { Customer } from './answer.js';
+
+/**
+ * What `next()` is handed for a thrown error. Express's own handler answers
+ * an error's `status` when it is 4xx or 5xx, so Mesub's 401 to a bad API key
+ * would reach the browser as "nobody is signed in". A MesubError of a 4xx
+ * goes as a copy of status 500, the original as its `cause`; anything else
+ * as it is.
+ */
+function forNext(error: unknown): unknown {
+    if (!(error instanceof MesubError) || error.status === null) return error;
+    if (error.status < 400 || error.status >= 500) return error;
+
+    return new MesubError(error.message, {
+        status: 500,
+        code: error.code,
+        apiCode: error.apiCode,
+        retryable: error.retryable,
+        body: error.body,
+        retryAfter: error.retryAfter,
+        cause: error,
+    });
+}
 
 /** What `requirePlan` leaves on `res.locals.mesub` for the route. */
 export type MesubLocals = MesubAccess;
@@ -68,7 +92,9 @@ export interface RequirePlanOptions {
  * Who is asking is who `customer` says, from your own auth. Refusals answer
  * 401 (nobody signed in), 402 (Mesub said no) or 503 with Retry-After (Mesub
  * unreachable, with no answer known for that subscriber). Integration errors
- * go to `next(err)`.
+ * go to `next(err)`: one Mesub answered with a 4xx (a bad API key, an unknown
+ * plan) as a MesubError of status 500, the original as its `cause`, so that
+ * Express answers 500 without an error handler of yours.
  */
 export function requirePlan(
     plan: PlanOption<Request>,
@@ -106,7 +132,7 @@ export function requirePlan(
 
             res.status(denial.status).json(denialBody(outcome));
         } catch (error) {
-            next(error);
+            next(forNext(error));
         }
     };
 }
@@ -140,7 +166,8 @@ async function jsonBody(req: Request): Promise<unknown> {
  *
  * `customer` says who is asking from your own verified auth, so put your
  * login before it. A request it cannot answer is answered 404 here, never
- * handed to `next()`; an integration error goes to `next(err)`.
+ * handed to `next()`; an integration error goes to `next(err)`, Mesub's 4xx
+ * as a MesubError of status 500 as on `requirePlan`.
  */
 export function mesubRoutes(options: WidgetRoutesOptions<Request>): RequestHandler {
     checkWidgetOptions(options);
@@ -186,7 +213,7 @@ export function mesubRoutes(options: WidgetRoutesOptions<Request>): RequestHandl
             res.setHeader('Cache-Control', 'no-store');
             res.status(answer.status).json(answer.body);
         } catch (error) {
-            next(error);
+            next(forNext(error));
         }
     };
 }

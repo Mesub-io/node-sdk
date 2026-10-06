@@ -13,6 +13,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import type { AccessAnswer } from '../src/answer.js';
+import { mesubRoutes } from '../src/express.js';
 import { Mesub, type MesubOptions } from '../src/index.js';
 import {
     MesubAccess,
@@ -22,6 +23,7 @@ import {
     RequirePlan,
     type RequirePlanOptions,
 } from '../src/nest.js';
+import { FakeMesub } from '../src/testing.js';
 
 const BASE = 'https://api.mesub.test';
 const WALLET = 'SysvarRent111111111111111111111111111111111';
@@ -643,5 +645,28 @@ describe('RequirePlan', () => {
             expect(response.status).toBe(200);
             expect(response.body).toEqual({ wallet: WALLET });
         });
+    });
+});
+
+// #120: mounted with `app.use`, the widget routes' errors still reach Nest's own filter.
+describe('mesubRoutes under Nest', () => {
+    it.each([
+        ['GET', '/plans/pro'],
+        ['GET', '/subscriptions'],
+    ])('answers 500 to %s %s when Mesub refuses the API key', async (_method, path) => {
+        const fake = new FakeMesub({ plans: ['pro'] });
+        const module = await Test.createTestingModule({}).compile();
+        const nest = module.createNestApplication({ logger: false });
+        nest.use(
+            '/api/mesub',
+            mesubRoutes({ client: fake.client(), customer: () => ({ external_id: 'user_ada' }) }),
+        );
+        await nest.init();
+        apps.push(nest);
+        fake.fail({ status: 401, code: 'invalid_api_key' });
+
+        const response = await request(nest.getHttpServer()).get(`/api/mesub${path}`);
+
+        expect(response.status).toBe(500);
     });
 });

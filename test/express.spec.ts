@@ -832,5 +832,98 @@ describe('requirePlan', () => {
             expect(response.status).toBe(500);
             expect(response.body).toEqual({ forwarded: code });
         });
+
+        /** The same route with no error handler of the app's own: Express's answers. */
+        function bare(client: Mesub, options: Partial<Omit<RequirePlanOptions, 'client'>> = {}) {
+            const server = express();
+            server.get('/pro', requirePlan('pro', { customer: session, ...options, client }));
+            return server;
+        }
+
+        /** The same route, keeping what its error handler was handed. */
+        function caught(client: Mesub, options: Partial<Omit<RequirePlanOptions, 'client'>> = {}) {
+            const seen: unknown[] = [];
+            const server = bare(client, options);
+            server.use(
+                (
+                    error: unknown,
+                    _req: ExpressRequest,
+                    res: ExpressResponse,
+                    _next: NextFunction,
+                ) => {
+                    seen.push(error);
+                    res.status(500).end();
+                },
+            );
+            return { server, seen };
+        }
+
+        // #120: Express's own handler answers an error's `status`, and a 401 reads as "not signed in".
+        it.each([
+            ['a bad API key', 401, 'invalid_api_key'],
+            ['an unknown plan', 404, 'plan_not_found'],
+        ])('answers 500 on %s with no error handler', async (_label, status, code) => {
+            const { client } = mesub({
+                access: () =>
+                    Response.json({ message: 'nope', statusCode: status, code }, { status }),
+            });
+
+            const response = await request(bare(client)).get('/pro').set(SIGNED_IN);
+
+            expect(response.status).toBe(500);
+            expect(response.body).not.toHaveProperty('access');
+        });
+
+        it('hands the error handler a MesubError of status 500, the original as its cause', async () => {
+            const { client } = mesub({
+                access: () =>
+                    Response.json(
+                        { message: 'nope', statusCode: 401, code: 'invalid_api_key' },
+                        { status: 401, headers: { 'Retry-After': '7' } },
+                    ),
+            });
+            const { server, seen } = caught(client);
+
+            await request(server).get('/pro').set(SIGNED_IN).expect(500);
+
+            const [error] = seen as [MesubError];
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({
+                status: 500,
+                code: 'unauthorized',
+                apiCode: 'invalid_api_key',
+                retryable: false,
+                retryAfter: 7000,
+                body: { code: 'invalid_api_key' },
+            });
+            expect(error.cause).toBeInstanceOf(MesubError);
+            expect(error.cause).toMatchObject({
+                status: 401,
+                code: 'unauthorized',
+                apiCode: 'invalid_api_key',
+            });
+        });
+
+        it.each([
+            ['a MesubError of a 5xx', new MesubError('down', { status: 503, code: 'unavailable' })],
+            [
+                'a MesubError of no status',
+                new MesubError('cut', { status: null, code: 'unavailable' }),
+            ],
+            ["an error that is not Mesub's", new TypeError('yours')],
+            ['an error of yours with a status', Object.assign(new Error('gone'), { status: 410 })],
+        ])('hands %s to next(err) as it is', async (_label, thrown) => {
+            const { client } = mesub();
+            const { server, seen } = caught(client, {
+                customer: () => {
+                    throw thrown;
+                },
+            });
+
+            await request(server).get('/pro').expect(500);
+
+            expect(seen).toEqual([thrown]);
+            expect(seen[0]).toBe(thrown);
+        });
     });
 });
