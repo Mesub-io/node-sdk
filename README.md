@@ -130,9 +130,9 @@ Everything else, the answer's fields, the errors, who to ask about:
 `hasAccess` and the guards do not lock out a paying subscriber for an outage,
 nor let a stranger in: they serve the last answer they knew for that customer
 and plan, for up to 24 hours (`maxStaleMs`), and `false` or a 503 for one they
-never saw. A cached yes is never served past its `access_until`, so nobody
-outlives a plan's end during an outage; the price is that a subscriber whose
-period turns over while Mesub is down is refused until it answers again.
+never saw. An answer with no charge or retry ahead (cancelled, parked, or in
+a plan's last period) stops at its `access_until`; one with a renewal ahead
+keeps the fallback, as it was likely paid while Mesub was down.
 `access` throws instead. A guard never holds a request longer than
 `guardTimeout`, 2 s by default. A bad key or an unknown plan always throws: a
 broken integration is never read as "not subscribed".

@@ -26,11 +26,8 @@ The first version published to npm. Requires Node 22 or later.
   store without it gets an answer it should drop rewritten as stale instead
   (#70).
 - When Mesub is down, the last answer is served for up to `maxStaleMs`
-  (24 hours by default), never past its `access_until` (#26, #56). That holds
-  for every answer now: one with a charge or a retry still ahead used to keep
-  its yes past `access_until`, and could outlive a plan's end. A subscriber
-  whose period turns over during an outage is refused until Mesub answers
-  again (#124).
+  (24 hours by default), never past its `access_until` (#26, #56) unless a
+  renewal is ahead. A plan's last period has none, so it stops there (#124).
 - A plan with an end date: nobody has access past it, and `access_until` is
   never later than it. In the last period `next_charge_at` is null, and
   `next_retry_at` on a late one, with `next_retry_number` and
