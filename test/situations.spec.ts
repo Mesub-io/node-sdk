@@ -16,6 +16,8 @@ const NOW = new Date('2026-10-05T12:00:00.000Z');
 const UNTIL = '2026-11-01T12:00:00.000Z';
 const RETRY = '2026-10-06T12:00:00.000Z';
 const DEADLINE = '2026-10-31T11:58:00.000Z';
+/** Where a plan with an end stops access, inside the period paid for. */
+const PLAN_END = '2026-10-20T00:00:00.000Z';
 
 function subscription(over: Partial<ServerSubscription> = {}): ServerSubscription {
     return {
@@ -96,6 +98,22 @@ const CASES = {
         subscriber: `Active until ${UNTIL}. No further payment is scheduled.`,
         merchant: `Not billed: this subscription's terms were never signed through Mesub, so Mesub never takes a payment for it. Access ends on ${UNTIL}.`,
         actions: [],
+    },
+    active_last_period: {
+        input: subscription({ next_charge_at: null, access_until: PLAN_END }),
+        subscriber: `Active until ${PLAN_END}: Pro is ending, and no further payment will be taken.`,
+        merchant: `Active and paid up, in its last period: the plan is ending, so no further payment is taken. Access ends on ${PLAN_END}.`,
+        actions: ['subscriber:cancel'],
+    },
+    unpaid_last_period: {
+        input: subscription({
+            ...LATE,
+            late_reason: 'insufficient_balance',
+            access_until: PLAN_END,
+        }),
+        subscriber: `Your payment of 9.99 USDC is late, and Mesub will not try again on its own: Pro is ending. You keep access until ${PLAN_END}.`,
+        merchant: `Payment late, with no retry ahead: the plan ends before the next one. Access continues until ${PLAN_END}, and the subscription ends with the plan.`,
+        actions: ['subscriber:cancel', 'merchant:retry'],
     },
     unpaid_insufficient_balance_retries: {
         input: subscription({
@@ -423,11 +441,95 @@ describe('explain', () => {
             const old = answer({
                 ...LATE,
                 late_reason: 'insufficient_balance',
+                next_retry_at: RETRY,
             }) as Partial<AccessAnswer>;
             delete old.paused;
             delete old.retry_deadline;
 
             expect(explain(old as AccessAnswer).key).toBe('unpaid_insufficient_balance_retries');
+        });
+    });
+
+    describe('on a plan with an end', () => {
+        it('never announces a payment once no charge is ahead', () => {
+            const last = explain(answer({ next_charge_at: null, access_until: PLAN_END }), {
+                names: NAMES,
+            });
+
+            expect(last.key).toBe('active_last_period');
+            expect(last.subscriber + last.merchant).not.toMatch(/next payment/i);
+            expect(last.access).toBe(`Access until ${PLAN_END}`);
+            expect(last.missing).toEqual([]);
+        });
+
+        it.each([['approval_revoked'], ['authority_closed'], [null]] as const)(
+            'reads a late one no retry is ahead for as its last period (%s)',
+            (reason) => {
+                const late = { ...LATE, late_reason: reason, access_until: PLAN_END } as const;
+
+                expect(situationOf(answer(late))).toBe('unpaid_last_period');
+                expect(situationOf(subscription(late))).toBe('unpaid_last_period');
+            },
+        );
+
+        it('keeps a late one with a retry ahead as it was', () => {
+            const late = {
+                ...LATE,
+                late_reason: 'insufficient_balance',
+                next_retry_at: RETRY,
+                access_until: PLAN_END,
+            } as const;
+
+            expect(situationOf(answer(late))).toBe('unpaid_insufficient_balance_retries');
+        });
+
+        // The minutes between the plan's end and the job that ends the row.
+        it.each([
+            ['active', { status: 'active' }],
+            ['unpaid', { ...LATE, late_reason: 'insufficient_balance' }],
+        ] as const)('reads %s with no access as ended, never as paying', (_, over) => {
+            const explained = explain(answer({ ...over, ...OVER }), { names: NAMES });
+
+            expect(explained.key).toBe('ended_plan_ended');
+            expect(explained.subscriber).toBe(
+                'Pro reached its end date, so your subscription has ended and nothing more will be taken.',
+            );
+            expect(explained.access).toBe('No access');
+            expect(explained.actions).toEqual([]);
+            expect(situationOf(subscription({ ...over, ...OVER }))).toBe('ended_plan_ended');
+        });
+
+        it('reads a paid up cancellation the end cut short as ended, not as behind', () => {
+            const cut = subscription({ status: 'cancelled', ...OVER });
+
+            expect(situationOf(cut)).toBe('cancelled_ended');
+            expect(explain(cut, { names: NAMES }).subscriber).not.toMatch(/missed/);
+        });
+
+        it('keeps a late Free one, whose access is off before any end, as it was', () => {
+            const free = answer({
+                ...LATE,
+                ...OVER,
+                late_reason: 'insufficient_balance',
+                retry_deadline: PLAN_END,
+            });
+
+            expect(situationOf(free)).toBe('unpaid_insufficient_balance_free');
+        });
+
+        // Late on a tier that retries, then moved down to Free: the retry is still dated.
+        it('keeps a late one without access as late while a retry is dated', () => {
+            const late = { ...LATE, ...OVER, late_reason: 'insufficient_balance' } as const;
+
+            expect(situationOf(answer({ ...late, next_retry_at: RETRY }))).toBe(
+                'unpaid_insufficient_balance_retries',
+            );
+        });
+
+        it('keeps an answer with no date at all as active', () => {
+            expect(situationOf(answer({ next_charge_at: null, access_until: null }))).toBe(
+                'active',
+            );
         });
     });
 

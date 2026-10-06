@@ -2,7 +2,7 @@ import express from 'express';
 import request from 'supertest';
 
 import { requirePlan } from '../src/express.js';
-import { Mesub, MesubError } from '../src/index.js';
+import { Mesub, MesubError, explain } from '../src/index.js';
 import { FakeMesub } from '../src/testing.js';
 
 const WALLET = 'SysvarRent111111111111111111111111111111111';
@@ -439,6 +439,221 @@ describe('FakeMesub', () => {
         expect(await codeOf(mesub.subscriptions.retrieve('sub_nope'))).toBe(
             'subscription_not_found',
         );
+    });
+
+    describe('a plan with an end', () => {
+        const HOUR = 3600 * 1000;
+        const soon = () => new Date(Date.now() + HOUR).toISOString();
+
+        afterEach(() => {
+            vi.useRealTimers();
+        });
+
+        it('grants a last period: access until the end, and no charge ahead', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const end = soon();
+
+            fake.grantLastPeriod(WALLET, 'pro', end);
+            const answer = await mesub.access(WALLET, 'pro');
+
+            expect(answer).toMatchObject({
+                access: true,
+                status: 'active',
+                payment_status: 'paid',
+                access_until: end,
+                next_charge_at: null,
+                next_retry_at: null,
+            });
+            expect(explain(answer).key).toBe('active_last_period');
+            await expect(mesub.plans.retrieve('pro')).resolves.toMatchObject({ ends_at: end });
+        });
+
+        it('takes the end as a Date, and other fields on top', async () => {
+            const fake = new FakeMesub();
+            const end = new Date(Date.now() + HOUR);
+
+            const answer = fake.grantLastPeriod({ external_id: 'user_42' }, 'pro', end, {
+                status: 'unpaid',
+                payment_status: 'late',
+                late_reason: 'insufficient_balance',
+            });
+
+            expect(answer.access_until).toBe(end.toISOString());
+            expect(explain(answer).key).toBe('unpaid_last_period');
+        });
+
+        it('refuses everyone from the end on, whatever the status still reads', async () => {
+            vi.useFakeTimers({ toFake: ['Date'] });
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const end = soon();
+            fake.grantLastPeriod(WALLET, 'pro', end);
+
+            vi.setSystemTime(Date.parse(end) - 1);
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+
+            vi.setSystemTime(Date.parse(end));
+            const after = await mesub.access(WALLET, 'pro');
+            expect(after).toMatchObject({ access: false, status: 'active', access_until: null });
+            expect(explain(after).key).toBe('ended_plan_ended');
+            await expect(mesub.accessList(WALLET)).resolves.toMatchObject({
+                plans: [{ plan: 'pro', access: false }],
+            });
+        });
+
+        it('never serves an access_until, a charge or a retry past the end of a plan', async () => {
+            const end = soon();
+            const later = new Date(Date.now() + 30 * 24 * HOUR).toISOString();
+            const fake = new FakeMesub({ plans: [{ slug: 'pro', ends_at: end }, 'team'] });
+            const mesub = fake.client();
+
+            fake.grant(WALLET, 'pro', { access_until: later, next_charge_at: later });
+            fake.grant(WALLET, 'team', { access_until: later, next_charge_at: later });
+            const held = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                access_until: later,
+                next_charge_at: later,
+            });
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: true,
+                access_until: end,
+                next_charge_at: null,
+            });
+            await expect(mesub.subscriptions.retrieve(held.id)).resolves.toMatchObject({
+                access: true,
+                access_until: end,
+                next_charge_at: null,
+            });
+            // A plan with no end keeps its dates.
+            await expect(mesub.access(WALLET, 'team')).resolves.toMatchObject({
+                access_until: later,
+                next_charge_at: later,
+            });
+        });
+
+        it('ends a plan: everything held on it ends with plan_ended', async () => {
+            const fake = new FakeMesub({ plans: ['pro', 'team'] });
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro');
+            fake.grant(WALLET, 'team');
+            fake.grant(OTHER, 'pro', { status: 'cancelled', access_until: soon() });
+            const held = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+            const before = Date.now();
+
+            fake.endPlan('pro');
+
+            const answer = await mesub.access(WALLET, 'pro');
+            expect(answer).toMatchObject({
+                access: false,
+                status: 'ended',
+                end_reason: 'plan_ended',
+                payment_status: 'none',
+                access_until: null,
+                next_charge_at: null,
+            });
+            expect(explain(answer).key).toBe('ended_plan_ended');
+            // One that had cancelled ends as cancelled.
+            await expect(mesub.access(OTHER, 'pro')).resolves.toMatchObject({
+                access: false,
+                status: 'ended',
+                end_reason: 'cancelled',
+            });
+            await expect(mesub.subscriptions.retrieve(held.id)).resolves.toMatchObject({
+                access: false,
+                status: 'ended',
+                end_reason: 'plan_ended',
+            });
+            await expect(mesub.hasAccess(WALLET, 'team')).resolves.toBe(true);
+
+            const plan = await mesub.plans.retrieve('pro');
+            expect(plan.available).toBe(false);
+            expect(Date.parse(plan.ends_at!)).toBeGreaterThanOrEqual(before);
+            await expect(mesub.plans.retrieve('team')).resolves.toMatchObject({
+                available: true,
+                ends_at: null,
+            });
+        });
+
+        it('leaves a visitor and a stopped one as they were when a plan ends', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.deny(WALLET, 'pro', { status: 'stopped' });
+
+            fake.endPlan('pro', '2026-01-01T00:00:00.000Z');
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                status: 'stopped',
+                end_reason: null,
+            });
+            await expect(mesub.access(OTHER, 'pro')).resolves.toMatchObject({ status: 'none' });
+            await expect(mesub.plans.retrieve('pro')).resolves.toMatchObject({
+                ends_at: '2026-01-01T00:00:00.000Z',
+                available: false,
+            });
+        });
+
+        it('takes nobody new on a plan that ended', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.endPlan('pro');
+
+            expect(await codeOf(mesub.subscriptions.create({ plan: 'pro', wallet: WALLET }))).toBe(
+                'plan_ended',
+            );
+        });
+
+        it('lands a subscription in its last period when the plan ends inside it', async () => {
+            const end = new Date(Date.now() + 24 * HOUR).toISOString();
+            const fake = new FakeMesub({ plans: [{ slug: 'pro', ends_at: end }] });
+            const mesub = fake.client();
+
+            const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+            const { subscription } = await mesub.subscriptions.submit(created.subscription.id, {
+                transaction: created.transaction,
+                terms_signature: 'signed',
+            });
+
+            expect(subscription).toMatchObject({
+                access: true,
+                access_until: end,
+                next_charge_at: null,
+            });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: true,
+                access_until: end,
+                next_charge_at: null,
+            });
+        });
+
+        it('forgets an end on reset', async () => {
+            const fake = new FakeMesub();
+            fake.endPlan('pro');
+            fake.reset();
+
+            await expect(fake.client().plans.retrieve('pro')).resolves.toMatchObject({
+                ends_at: null,
+                available: true,
+            });
+        });
+
+        // The outage fallback, end to end: what the README promises.
+        it('keeps the outage fallback from outliving the end', async () => {
+            vi.useFakeTimers({ toFake: ['Date'] });
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const end = soon();
+            fake.grantLastPeriod(WALLET, 'pro', end);
+            await mesub.hasAccess(WALLET, 'pro');
+
+            fake.fail('outage');
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+
+            vi.setSystemTime(Date.parse(end) + 1);
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        });
     });
 
     describe('cancel, resume and close', () => {

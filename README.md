@@ -112,16 +112,28 @@ A customer is named by exactly one of `external_id` (your own id for them),
 function of the request. `access` returns the whole answer for a screen, and
 `accessList` every plan a customer has anything on.
 
+A guard reads `access`, never `status`. Access never runs past
+`access_until`, and on a plan with an end date (`ends_at` on the plan)
+`access_until` is never later than that end: nobody has access past it, the
+last period being charged in full all the same. In that last period the
+answer has no `next_charge_at`, and a late one no `next_retry_at`, since no
+pull is left to run. For a few minutes past the end, `status` can still read
+`active` or `unpaid` with `access: false`, until Mesub ends the subscription
+(`ended`, `end_reason: 'plan_ended'`).
+
 Everything else, the answer's fields, the errors, who to ask about:
 [Check access](https://docs.mesub.io/docs/access). What each status means:
 [Lifecycle](https://docs.mesub.io/docs/lifecycle).
 
 ## When Mesub does not answer
 
-`hasAccess` and the guards never lock out a paying subscriber for an outage,
+`hasAccess` and the guards do not lock out a paying subscriber for an outage,
 nor let a stranger in: they serve the last answer they knew for that customer
 and plan, for up to 24 hours (`maxStaleMs`), and `false` or a 503 for one they
-never saw. `access` throws instead. A guard never holds a request longer than
+never saw. An answer with no charge or retry ahead (cancelled, parked, or in
+a plan's last period) stops at its `access_until`; one with a renewal ahead
+keeps the fallback, as it was likely paid while Mesub was down.
+`access` throws instead. A guard never holds a request longer than
 `guardTimeout`, 2 s by default. A bad key or an unknown plan always throws: a
 broken integration is never read as "not subscribed".
 
@@ -134,7 +146,8 @@ const pro = await mesub.plans.retrieve('pro');
 ```
 
 `available` is false on a plan that is ending and when your project is full:
-show "Subscribe" only when it is true. Nothing is cached.
+show "Subscribe" only when it is true. `ends_at` is when a plan ends, null
+for one with no end. Nothing is cached.
 
 ## Subscribe from your server
 
@@ -368,6 +381,9 @@ const mesub = fake.client(); // a real Mesub, wired to the fake
 
 fake.grant({ external_id: 'user_42' }, 'pro');
 await mesub.hasAccess({ external_id: 'user_42' }, 'pro'); // true
+
+fake.grantLastPeriod({ external_id: 'user_7' }, 'pro', endsAt); // access until the plan ends
+fake.endPlan('pro'); // the end passed: what is held on it ends with plan_ended
 
 fake.fail('outage'); // every call answers 503, until fail(null)
 const { body, headers } = await fake.webhook('subscription.renewed'); // signed

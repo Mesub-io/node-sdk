@@ -73,11 +73,17 @@ export interface PaymentFailedDetail {
     /** The period it was for; null when unknown. */
     period_start: string | null;
     period_end: string | null;
-    /** When Mesub retries; null when it will not, or on Free, where retries are by hand. */
+    /**
+     * When Mesub retries; null when it will not (the plan ends before the
+     * retry, among others), or on Free, where retries are by hand.
+     */
     next_retry_at: string | null;
-    /** Free only: when hand retries close. */
+    /** Free only: when hand retries close, the plan's end when that comes first. */
     retry_deadline: string | null;
-    /** Pulls still to come before the subscription stops, the next one included. */
+    /**
+     * Pulls still to come before the subscription stops, the next one
+     * included; 0 with `next_retry_at` null when the plan ends before any.
+     */
     retries_left: number;
     /** Who retries: Mesub on its schedule, or you by hand (Free). Null once none is left. */
     retry_mode: 'scheduled' | 'manual' | null;

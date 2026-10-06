@@ -40,7 +40,9 @@ export interface FakeMesubOptions {
      * By default every slug exists. A slug alone, or the fields `plans.list`
      * and `plans.retrieve` should answer for it: the rest is filled in.
      * Name them to test the widget routes, which read `plans.list`: left
-     * out, the list is empty.
+     * out, the list is empty. A plan given an `ends_at` is served as Mesub
+     * serves one: no `access_until` later than it, no pull dated from it
+     * on, and no access once it has passed.
      */
     plans?: Array<string | (Partial<Plan> & { slug: string })>;
     /** What `webhook()` signs with, and `client()` verifies with. Defaults to a fixed `whsec_` secret. */
@@ -155,7 +157,8 @@ const REASONS: Record<number, string> = {
 /**
  * A fake Mesub API. Each test sets what a customer has with `grant`, `deny`
  * or `setAccess`, gets a client wired to it with `client()`, and makes it
- * fail with `fail()`.
+ * fail with `fail()`. A plan with an end is `grantLastPeriod`, `endPlan`, or
+ * an `ends_at` in `plans`.
  */
 export class FakeMesub {
     readonly baseUrl: string;
@@ -169,6 +172,8 @@ export class FakeMesub {
     readonly #plans: Set<string> | null;
     readonly #planList: Plan[];
     readonly #answers = new Map<string, AccessAnswer>();
+    /** The ends `grantLastPeriod` and `endPlan` gave a plan, by slug: they win over `plans`. */
+    readonly #ends = new Map<string, string>();
     #subscriptions: ServerSubscription[] = [];
     /** The subscriptions a cancel, resume or close transaction was built for, by id. */
     readonly #built = new Map<string, Set<FakeAction>>();
@@ -226,6 +231,44 @@ export class FakeMesub {
     /** That customer has no access to that plan: `status` says why, `none` by default. */
     deny(customer: Customer | string, plan: string, fields: FakeAccess = {}): AccessAnswer {
         return this.setAccess(customer, plan, { ...fields, access: false });
+    }
+
+    /**
+     * That customer is in the last period of a plan that ends at `endsAt`:
+     * active and paid, access until the end and no charge ahead, unless
+     * `fields` say otherwise. The plan gets that `ends_at`, and from then on
+     * the fake refuses everyone on it, as Mesub does, whatever `status` reads.
+     */
+    grantLastPeriod(
+        customer: Customer | string,
+        plan: string,
+        endsAt: string | Date,
+        fields: FakeAccess = {},
+    ): AccessAnswer {
+        const end = new Date(endsAt).toISOString();
+
+        this.#ends.set(plan, end);
+        return this.grant(customer, plan, { access_until: end, ...fields });
+    }
+
+    /**
+     * That plan reached its end, at `at` or now: it takes nobody new, and
+     * what the fake holds on it is ended as Mesub ends it, `plan_ended` for a
+     * running or late one, `cancelled` for one that had cancelled. Before
+     * this is called, a plan past its `ends_at` already refuses everyone,
+     * with `status` unchanged: the minutes Mesub takes to end the rows.
+     */
+    endPlan(plan: string, at: string | Date = new Date()): void {
+        this.#ends.set(plan, new Date(at).toISOString());
+
+        for (const [key, answer] of this.#answers) {
+            if (answer.plan === plan) this.#answers.set(key, { ...answer, ...endedBy(answer) });
+        }
+        for (const subscription of this.#subscriptions) {
+            if (subscription.plan !== plan) continue;
+            const ended = endedBy(subscription);
+            Object.assign(subscription, ended, 'status' in ended && NO_RETRY);
+        }
     }
 
     /**
@@ -335,6 +378,7 @@ export class FakeMesub {
     /** Forgets every answer, subscription, failure and request. */
     reset(): void {
         this.#answers.clear();
+        this.#ends.clear();
         this.#subscriptions = [];
         this.#built.clear();
         this.#attempts.clear();
@@ -369,6 +413,25 @@ export class FakeMesub {
             confirmed_at: now,
             ...fields,
         };
+    }
+
+    /** A plan's end: the one a test gave it, else its `ends_at` in `plans`. */
+    #endOf(slug: string | null): string | null {
+        if (slug === null) return null;
+
+        return (
+            this.#ends.get(slug) ??
+            this.#planList.find((each) => each.slug === slug)?.ends_at ??
+            null
+        );
+    }
+
+    /** A plan as served: with its end, and taking nobody new once past it. */
+    #served(plan: Plan): Plan {
+        const ends_at = this.#endOf(plan.slug);
+        const over = ends_at !== null && Date.parse(ends_at) <= Date.now();
+
+        return { ...plan, ends_at, available: plan.available && !over };
     }
 
     #nextId(): string {
@@ -406,7 +469,7 @@ export class FakeMesub {
         }
 
         if (method === 'GET' && path === '/v1/plans') {
-            return Response.json({ plans: this.#planList });
+            return Response.json({ plans: this.#planList.map((plan) => this.#served(plan)) });
         }
         const slug = /^\/v1\/plans\/([^/]+)$/.exec(path)?.[1];
         if (method === 'GET' && slug !== undefined) {
@@ -416,7 +479,7 @@ export class FakeMesub {
                 (this.#plans === null ? fakePlan(slug) : undefined);
 
             return plan
-                ? Response.json(plan)
+                ? Response.json(this.#served(plan))
                 : error(404, 'plan_not_found', `No plan under slug ${slug}`);
         }
 
@@ -437,7 +500,9 @@ export class FakeMesub {
             if (!subscription) {
                 return error(404, 'subscription_not_found', 'No subscription under that id.');
             }
-            if (method === 'GET' && !step) return Response.json(subscription);
+            if (method === 'GET' && !step) {
+                return Response.json(bounded(subscription, this.#endOf(subscription.plan)));
+            }
             if (step === 'attempts') {
                 return method === 'GET'
                     ? this.#attemptsOf(subscription, query)
@@ -467,7 +532,9 @@ export class FakeMesub {
         if (plan === undefined) {
             const plans = [...this.#answers.entries()]
                 .filter(([key]) => key.startsWith(keyOf(asked, '')))
-                .map(([, answer]) => withAttempts(answer, attempts));
+                .map(([, answer]) =>
+                    withAttempts(bounded(answer, this.#endOf(answer.plan)), attempts),
+                );
             const soonest = Math.min(...plans.map((answer) => answer.revalidate_after));
 
             return Response.json({ plans, revalidate_after: plans.length ? soonest : 0 });
@@ -477,7 +544,7 @@ export class FakeMesub {
         }
 
         const answer = this.#answers.get(keyOf(asked, plan)) ?? nothing(asked, plan);
-        return Response.json(withAttempts(answer, attempts));
+        return Response.json(withAttempts(bounded(answer, this.#endOf(plan)), attempts));
     }
 
     #list(query: Record<string, string>): Response {
@@ -494,7 +561,7 @@ export class FakeMesub {
         if (after !== undefined) data = data.slice(data.findIndex((s) => s.id === after) + 1);
 
         const page: ServerSubscriptionList = {
-            data: data.slice(0, limit),
+            data: data.slice(0, limit).map((s) => bounded(s, this.#endOf(s.plan))),
             has_more: data.length > limit,
         };
         return Response.json(page);
@@ -543,6 +610,11 @@ export class FakeMesub {
         }
         if (this.#plans && !this.#plans.has(plan)) {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
+        }
+
+        const planEnd = this.#endOf(plan);
+        if (planEnd !== null && Date.parse(planEnd) <= Date.now()) {
+            return error(409, 'plan_ended', 'This plan has ended.');
         }
 
         const contact = {
@@ -609,15 +681,18 @@ export class FakeMesub {
 
         const now = new Date();
         const end = new Date(now.getTime() + PERIOD_MS).toISOString();
+        // A plan that ends inside the period: access to its end, and no second charge.
+        const dates = bounded(
+            { access: true, access_until: end, next_charge_at: end, next_retry_at: null },
+            this.#endOf(subscription.plan),
+        );
         Object.assign(subscription, {
             status: 'active',
-            access: true,
             payment_status: 'paid',
             current_period_start: now.toISOString(),
             current_period_end: end,
-            next_charge_at: end,
-            access_until: end,
             confirmed_at: now.toISOString(),
+            ...dates,
         } satisfies Partial<ServerSubscription>);
 
         const plan = subscription.plan ?? '';
@@ -626,8 +701,8 @@ export class FakeMesub {
             subscribed_since: now.toISOString(),
             first_subscribed_at: now.toISOString(),
             current_period_end: end,
-            access_until: end,
-            next_charge_at: end,
+            access_until: dates.access_until,
+            next_charge_at: dates.next_charge_at,
         };
         this.grant({ wallet: subscription.wallet }, plan, fields);
         if (subscription.external_id) {
@@ -752,6 +827,57 @@ export class FakeMesub {
             });
         }
     }
+}
+
+/** What an access answer and a subscription both say of access and of the pulls ahead. */
+type Dated = Pick<AccessAnswer, 'access' | 'access_until' | 'next_charge_at' | 'next_retry_at'>;
+
+/**
+ * A row as Mesub serves it on a plan that ends at `end`: no access from the
+ * end on, whatever its status, and before it no `access_until` later than
+ * the end and no pull dated at or after it. The real margin (a pull due in
+ * the two minutes before the end is not served either) is left out.
+ */
+function bounded<T extends Dated>(row: T, end: string | null): T {
+    if (end === null || !row.access) return row;
+
+    const at = Date.parse(end);
+    const none = { next_charge_at: null, next_retry_at: null };
+    if (at <= Date.now()) return { ...row, ...none, access: false, access_until: null };
+
+    const ahead = (date: string | null) => (date !== null && Date.parse(date) < at ? date : null);
+
+    return {
+        ...row,
+        access_until:
+            row.access_until !== null && Date.parse(row.access_until) > at ? end : row.access_until,
+        next_charge_at: ahead(row.next_charge_at),
+        next_retry_at: ahead(row.next_retry_at),
+    };
+}
+
+/** What only a subscription carries of a retry, gone with the retry. */
+const NO_RETRY = { next_retry_number: null, retries_allowed: null } as const;
+
+/** What a plan's end makes of a row held on it; nothing of one that was over already. */
+function endedBy(row: {
+    status: ServerSubscription['status'] | AccessAnswer['status'];
+}): Partial<Omit<AccessAnswer, 'status'>> & { status?: 'ended' } {
+    const running = row.status === 'active' || row.status === 'unpaid';
+    if (!running && row.status !== 'cancelled') return {};
+
+    return {
+        status: 'ended',
+        end_reason: running ? 'plan_ended' : 'cancelled',
+        late_reason: null,
+        paused: false,
+        access: false,
+        payment_status: 'none',
+        access_until: null,
+        next_charge_at: null,
+        next_retry_at: null,
+        retry_deadline: null,
+    };
 }
 
 /** What stops, takes back or closes a subscription in the fake. */

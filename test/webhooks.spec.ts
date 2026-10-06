@@ -266,6 +266,46 @@ describe('verifyWebhook', () => {
         expect(event.data.detail.retries_left).toBe(2);
     });
 
+    // A plan that ends before the next pull (Mesub-io/backend#362): the
+    // schedule has none left, and on Free hand retries close with the plan.
+    it.each([
+        [
+            'no retry of the schedule is left',
+            { next_retry_at: null, retry_deadline: null, retries_left: 0, retry_mode: null },
+        ],
+        [
+            'hand retries close at the plan end',
+            {
+                next_retry_at: null,
+                retry_deadline: '2026-01-20T00:00:00.000Z',
+                retries_left: 3,
+                retry_mode: 'manual',
+            },
+        ],
+    ])('reads a payment_failed on a plan that is ending: %s', async (_label, next) => {
+        const detail = { ...DETAILS['subscription.payment_failed'], ...next };
+        const raw = body('subscription.payment_failed', detail);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.data.detail).toEqual(detail);
+    });
+
+    it('still refuses a payment_failed whose retries_left is missing or null', async () => {
+        for (const retries_left of [undefined, null]) {
+            const raw = body('subscription.payment_failed', {
+                ...DETAILS['subscription.payment_failed'],
+                retries_left,
+            });
+
+            await expect(
+                verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+            ).rejects.toMatchObject({ code: 'unexpected' });
+        }
+    });
+
     it('reads a renewal_upcoming event, and types its detail', async () => {
         const raw = body('subscription.renewal_upcoming', DETAILS['subscription.renewal_upcoming']);
         const event: WebhookEvent = await verifyWebhook(

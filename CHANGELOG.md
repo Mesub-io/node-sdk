@@ -26,7 +26,15 @@ The first version published to npm. Requires Node 22 or later.
   store without it gets an answer it should drop rewritten as stale instead
   (#70).
 - When Mesub is down, the last answer is served for up to `maxStaleMs`
-  (24 hours by default), never past its `access_until` (#26, #56).
+  (24 hours by default), never past its `access_until` (#26, #56) unless a
+  renewal is ahead. A plan's last period has none, so it stops there (#124).
+- A plan with an end date: nobody has access past it, and `access_until` is
+  never later than it. In the last period `next_charge_at` is null, and
+  `next_retry_at` on a late one, with `next_retry_number` and
+  `retries_allowed`; `retry_deadline` can be the plan's end. For a few minutes
+  past the end `status` can still read `active` or `unpaid` with
+  `access: false`: a guard reads `access`, never `status`. Nothing changes in
+  what is accepted: these fields were nullable already (#124).
 - The answer carries `paused` (a seat parked over the project's cap: status
   unchanged, nothing charged, access to the end of the paid period) and
   `end_reason`, why an `ended` one ended: `cancelled`, `plan_removed`,
@@ -153,6 +161,13 @@ The first version published to npm. Requires Node 22 or later.
   newer than this release gives `unknown`, never an error. `SITUATIONS` is
   the table, also served by `@mesub/node/situations`, which imports nothing
   of Node so a page can use it (#116).
+- Two situations for a plan with an end, read from what the end leaves on
+  the answer: `active_last_period` (access with no charge ahead, where
+  `active` announced a next payment with no date) and `unpaid_last_period`
+  (late, on a tier that retries, with no retry ahead). In the minutes past
+  the end, `active` or `unpaid` without access reads `ended_plan_ended`, and
+  a paid up cancellation cut short reads `cancelled_ended`, not
+  `cancelled_no_access` (#124).
 
 ### Routes for the React widget
 
@@ -238,6 +253,11 @@ answer this request.`: never the SDK's own message, which may name your
 - `FakeMesub` answers cancel, resume and close and their confirms, which
   land at once: the subscription and its access answers move, and a step the
   status does not allow is refused with Mesub's code (#50).
+- `FakeMesub` models a plan with an end: `grantLastPeriod(customer, plan,
+endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
+  held on it with `plan_ended`, and an `ends_at` in `plans`. Past its end a
+  plan refuses everyone and takes no new subscriber (`plan_ended`), and
+  before it no `access_until` or pull is served later than it (#124).
 - `FakeMesub` keeps one checkout per customer on a wallet, as Mesub does
   since Mesub-io/backend#311: `create` again for the same plan, wallet and
   customer (`external_id`, else `email`) answers the same subscription,

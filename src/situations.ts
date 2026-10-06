@@ -123,6 +123,14 @@ export const SITUATIONS = {
         merchant: 'Active and paid up. Next payment of {amount} on {next_charge_at}.',
         actions: [CANCEL_PAID],
     },
+    // The plan ends before another charge: the last period, paid in full.
+    active_last_period: {
+        subscriber:
+            'Active until {access_until}: {plan_name} is ending, and no further payment will be taken.',
+        merchant:
+            'Active and paid up, in its last period: the plan is ending, so no further payment is taken. Access ends on {access_until}.',
+        actions: [CANCEL_PAID],
+    },
     active_unbilled: {
         subscriber: 'Active until {access_until}. No further payment is scheduled.',
         merchant:
@@ -131,6 +139,14 @@ export const SITUATIONS = {
     },
 
     // Late (`unpaid`)
+    // The plan ends before the next retry: none is scheduled, whatever the reason.
+    unpaid_last_period: {
+        subscriber:
+            'Your payment of {amount} is late, and Mesub will not try again on its own: {plan_name} is ending. You keep access until {access_until}.',
+        merchant:
+            'Payment late, with no retry ahead: the plan ends before the next one. Access continues until {access_until}, and the subscription ends with the plan.',
+        actions: [CANCEL_BEHIND, RETRY],
+    },
     unpaid_insufficient_balance_retries: {
         subscriber:
             'Your payment of {amount} is late because your wallet held too little, and nothing was taken. Add {amount} before {next_retry_at}, with nothing to sign: Mesub tries again then, and your subscription stops if no payment goes through by {access_until}.',
@@ -427,10 +443,20 @@ function isFree(input: Explainable): boolean {
     return input.retry_deadline != null;
 }
 
+/** Billed and running: neither parked nor one Mesub never pulls, which `payment_status` says. */
+function isBilled(input: Explainable): boolean {
+    return input.payment_status !== 'none';
+}
+
 /**
  * Which situation an answer is in, in the canonical order: status first,
  * then paused, then the end or late reason. Never throws: a status or a
  * reason this release does not know is `unknown`.
+ *
+ * A plan's end is read from what it leaves on the answer, which carries no
+ * `ends_at`: access with no charge or retry ahead is the last period, and a
+ * running status without access is the minutes between the end and the job
+ * that ends the row. That one reads as ended already.
  */
 export function situationOf(input: Explainable): SituationKey {
     const status: string = input.status;
@@ -452,21 +478,32 @@ export function situationOf(input: Explainable): SituationKey {
                 : 'unknown';
         }
         case 'cancelled':
-            return input.access ? 'cancelled_with_access' : 'cancelled_no_access';
+            if (input.access) return 'cancelled_with_access';
+            // Paid up and cut short by the plan's end: it ends as cancelled.
+            return input.payment_status === 'paid' ? 'cancelled_ended' : 'cancelled_no_access';
         case 'unpaid': {
             const reason: string | null = input.late_reason ?? null;
+            const named = reason !== null && reason !== 'insufficient_balance';
+            if (named && !Object.hasOwn(LATE_REASONS, reason)) return 'unknown';
+            // On Free a late one has no access and no retry of Mesub's, end or not.
+            if (!isFree(input) && isBilled(input) && input.next_retry_at == null) {
+                if (!input.access) return 'ended_plan_ended';
+                if (input.access_until != null) return 'unpaid_last_period';
+            }
             if (reason === null) return 'unpaid_unknown';
             if (reason === 'insufficient_balance') {
                 return isFree(input)
                     ? 'unpaid_insufficient_balance_free'
                     : 'unpaid_insufficient_balance_retries';
             }
-            return Object.hasOwn(LATE_REASONS, reason)
-                ? LATE_REASONS[reason as keyof typeof LATE_REASONS]
-                : 'unknown';
+            return LATE_REASONS[reason as keyof typeof LATE_REASONS];
         }
         case 'active':
-            return input.payment_status === 'none' ? 'active_unbilled' : 'active';
+            if (!isBilled(input)) return 'active_unbilled';
+            if (!input.access) return 'ended_plan_ended';
+            return input.access_until != null && input.next_charge_at == null
+                ? 'active_last_period'
+                : 'active';
         case 'stopped':
             return 'stopped';
         default:

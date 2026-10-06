@@ -61,24 +61,31 @@ export interface ServerSubscription {
     /** The period paid for last; null before the first. */
     current_period_start: string | null;
     current_period_end: string | null;
-    /** The next charge on a running one, the next retry on a late one: never both. */
+    /**
+     * The next charge on a running one, the next retry on a late one: never
+     * both, and neither once the plan's end leaves no pull to run.
+     */
     next_charge_at: string | null;
     next_retry_at: string | null;
     /**
      * Free only, as `/v1/access` answers it (Mesub-io/backend#191): when hand
-     * retries close; past it the subscription stops. Read as null from a back
-     * that predates it.
+     * retries close, the plan's end when that comes first; past it the
+     * subscription stops. Read as null from a back that predates it.
      */
     retry_deadline: string | null;
     /**
      * The retry due at `next_retry_at` and how many the missed period gets
      * (Mesub-io/backend#289): 2 and 3 before the second retry of three. Both
      * null unless Mesub retries on its own: not late, paused, stopped, on
-     * Free. Read as null from a back that predates them.
+     * Free, or on a plan that ends before the retry. Read as null from a
+     * back that predates them.
      */
     next_retry_number: number | null;
     retries_allowed: number | null;
-    /** When access ends unless a pull renews it; null while `access` is false. */
+    /**
+     * When access ends unless a pull renews it; null while `access` is false.
+     * Never later than the plan's end.
+     */
     access_until: string | null;
     created_at: string;
     confirmed_at: string | null;
