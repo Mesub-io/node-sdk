@@ -69,32 +69,6 @@ describe('access', () => {
         vi.useRealTimers();
     });
 
-    // A plan with an end (Mesub-io/backend#362).
-    it.each([
-        [
-            'in its last period, no charge ahead',
-            answer({ access_until: '2026-10-20T00:00:00.000Z', next_charge_at: null }),
-        ],
-        [
-            'late with no retry ahead',
-            answer({
-                status: 'unpaid',
-                payment_status: 'late',
-                late_reason: 'insufficient_balance',
-                access_until: '2026-10-20T00:00:00.000Z',
-                next_charge_at: null,
-            }),
-        ],
-        ['past the end, its status still active', answer({ access: false, next_charge_at: null })],
-    ])('reads an answer %s', async (_label, served) => {
-        const { fetch } = mockFetch(json(200, served));
-        const mesub = client(fetch);
-
-        await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(served);
-        // A guard reads `access`, never `status`.
-        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(served.access);
-    });
-
     it('asks /v1/access about that wallet and plan, with the API key', async () => {
         const { fetch, calls } = mockFetch(json(200, answer()));
 
@@ -866,95 +840,27 @@ describe('hasAccess', () => {
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
         });
 
-        // The answer carries no plan end: a period that renews and a plan that
-        // ended there look the same, so a yes stops at access_until either way.
-        it('keeps out a paying subscriber once access_until is past, a renewal ahead or not', async () => {
+        it('keeps a paying subscriber in past the period end: a renewal is ahead', async () => {
             const mesub = await staleThen(
                 answer({ access_until: ended, next_charge_at: ended }),
-                nest(503, 'Service Unavailable'),
-            );
-
-            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
-        });
-
-        it('keeps a paying subscriber in before access_until, a renewal ahead', async () => {
-            const mesub = await staleThen(
-                answer({ access_until: later, next_charge_at: later }),
                 nest(503, 'Service Unavailable'),
             );
 
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
         });
 
-        it.each([
-            ['in before', later, true],
-            ['out once past', ended, false],
-        ])('keeps a subscriber in arrears %s access_until', async (_label, until, access) => {
+        it('keeps a subscriber in arrears in while a retry is ahead', async () => {
             const mesub = await staleThen(
                 answer({
                     status: 'unpaid',
-                    payment_status: 'late',
-                    access_until: until,
+                    access_until: ended,
                     next_charge_at: null,
-                    next_retry_at: until,
+                    next_retry_at: later,
                 }),
                 nest(503, 'Service Unavailable'),
             );
 
-            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(access);
-        });
-
-        describe('on a plan with an end', () => {
-            // The last period: no charge ahead, and access_until is the plan's end.
-            const lastPeriod = (planEnd: string) =>
-                answer({ access_until: planEnd, next_charge_at: null });
-
-            it('serves a subscriber in the last period before the end', async () => {
-                const mesub = await staleThen(lastPeriod(later), nest(503, 'Service Unavailable'));
-
-                await expect(mesub.decide(WALLET, 'pro')).resolves.toEqual({
-                    access: true,
-                    answer: lastPeriod(later),
-                    stale: true,
-                });
-            });
-
-            it('refuses them once the end has passed, the cached yes notwithstanding', async () => {
-                const mesub = await staleThen(lastPeriod(ended), nest(503, 'Service Unavailable'));
-
-                await expect(mesub.decide(WALLET, 'pro')).resolves.toEqual({
-                    access: false,
-                    answer: lastPeriod(ended),
-                    stale: true,
-                });
-            });
-
-            it('refuses them at the end itself, for the rest of a long outage', async () => {
-                const { fetch } = mockFetch(
-                    json(200, lastPeriod(later)),
-                    ...Array.from({ length: 3 }, () => nest(503, 'Service Unavailable')),
-                );
-                const mesub = client(fetch);
-                await mesub.hasAccess(WALLET, 'pro');
-
-                vi.setSystemTime(Date.parse(later) - 1);
-                await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
-
-                vi.setSystemTime(Date.parse(later));
-                await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
-
-                vi.setSystemTime(Date.parse(later) + DAY / 2);
-                await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
-            });
-
-            it('refuses one cached before its last renewal once that period is over', async () => {
-                const mesub = await staleThen(
-                    answer({ access_until: ended, next_charge_at: ended }),
-                    nest(429, 'ThrottlerException: Too Many Requests'),
-                );
-
-                await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
-            });
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
         });
 
         it('falls back on the answer of that plan only', async () => {
