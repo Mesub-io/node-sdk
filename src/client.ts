@@ -58,7 +58,8 @@ export interface MesubOptions {
     /**
      * How long an answer is kept once stale, for the outage fallback of
      * `hasAccess` and the guards, in milliseconds. Defaults to 24 hours. 0
-     * turns the fallback off: an outage then keeps everyone out.
+     * turns the fallback off: an outage then keeps everyone out. A yes is
+     * never served past the answer's `access_until`, however long this is.
      */
     maxStaleMs?: number;
     /**
@@ -376,7 +377,8 @@ export class Mesub {
      *
      * When Mesub is unavailable after the retries (`unavailable` or
      * `rate_limited`), it answers the last answer it knew, even stale, and
-     * `false` for a customer it never saw. Any other error is thrown, never
+     * `false` for a customer it never saw or once that answer's
+     * `access_until` has passed. Any other error is thrown, never
      * turned into `false`: a bad key or an unknown plan is a broken
      * integration, not a denial.
      */
@@ -523,12 +525,13 @@ function hex(bytes: ArrayBuffer): string {
 }
 
 /**
- * A stale answer's access, past what it paid for (#35): an answer with no
- * charge or retry ahead (cancelled, parked) ends at `access_until`. One with a
- * renewal ahead keeps the fallback: it was likely paid while Mesub was down.
+ * A stale answer's access, never past its `access_until` (#35, #124): Mesub
+ * never dates it later than the plan's end, where access stops for everyone,
+ * and the answer carries no other trace of that end. So a renewal due
+ * during the outage is not presumed paid: the plan may have ended there.
+ * Only an answer with no date keeps its yes for the whole fallback.
  */
 function stillGrants(answer: AccessAnswer, now: number = Date.now()): boolean {
     if (!answer.access || !answer.access_until) return answer.access;
-    if (answer.next_charge_at || answer.next_retry_at) return true;
     return Date.parse(answer.access_until) > now;
 }
