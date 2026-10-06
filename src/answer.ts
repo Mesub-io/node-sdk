@@ -11,6 +11,9 @@
  *
  * `cancelled` only while the cancellation runs: once its end date passed it
  * reads `ended`, with `end_reason` `cancelled` (Mesub-io/backend#236).
+ *
+ * For a few minutes past a plan's end, `active` or `unpaid` is still read
+ * with `access` false, until Mesub ends the row: a guard reads `access`.
  */
 export type SubscriptionStatus =
     | 'pending'
@@ -65,7 +68,10 @@ export interface AccessAnswer {
      */
     wallet: string | null;
     plan: string;
-    /** The only field a guard needs. */
+    /**
+     * The only field a guard needs. False from the plan's end on, for a plan
+     * that has one, whatever `status` still reads.
+     */
     access: boolean;
     status: SubscriptionStatus;
     /**
@@ -88,14 +94,25 @@ export interface AccessAnswer {
     first_subscribed_at: string | null;
     current_period_end: string | null;
     cancelled_at: string | null;
+    /**
+     * When access ends unless a pull renews it; null while `access` is false.
+     * Never later than the plan's end, where access stops for everyone, the
+     * last period being charged in full all the same.
+     */
     access_until: string | null;
+    /**
+     * A pull Mesub will run: the next charge, or the next retry on a late
+     * one, never both. Neither once the plan's end leaves no pull to run
+     * (Mesub-io/backend#362): the last period has no `next_charge_at`.
+     */
     next_charge_at: string | null;
     next_retry_at: string | null;
     /**
      * Free only (Mesub-io/backend#191): when hand retries of a missed pull
-     * close, two minutes before the end of its period; past it the
-     * subscription stops. Null on every other tier, whose retries are in
-     * `next_retry_at`. Read as null from a back that predates it. Like
+     * close, two minutes before the end of its period, or the plan's end
+     * when that comes first; past it the subscription stops. Null on every
+     * other tier, whose retries are in `next_retry_at`. Read as null from a
+     * back that predates it. Like
      * `paused` and `end_reason`, undefined only on an answer cached by an
      * older SDK.
      */

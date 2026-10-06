@@ -1208,6 +1208,32 @@ describe('subscriptions.retrieve', () => {
         });
     });
 
+    // A plan with an end (Mesub-io/backend#362): no pull is dated once the
+    // end leaves none to run, and for minutes past it the status still runs.
+    it.each([
+        ['in its last period', subscription({ next_charge_at: null })],
+        [
+            'late with no retry ahead',
+            subscription({
+                status: 'unpaid',
+                payment_status: 'late',
+                late_reason: 'insufficient_balance',
+                next_charge_at: null,
+                next_retry_at: null,
+                next_retry_number: null,
+                retries_allowed: null,
+            }),
+        ],
+        [
+            'past the end and not ended yet',
+            subscription({ access: false, access_until: null, next_charge_at: null }),
+        ],
+    ])('takes a subscription %s', async (_label, held) => {
+        const { fetch } = mockFetch(json(200, held));
+
+        await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(held);
+    });
+
     it('takes an end_reason it does not know, and an ended one with none', async () => {
         const unknown = subscription({
             status: 'ended',

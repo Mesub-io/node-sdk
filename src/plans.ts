@@ -27,7 +27,10 @@ export interface Plan {
     status: PlanStatus;
     /** Whether it takes new subscribers now: show "Subscribe" only when true. */
     available: boolean;
-    /** When the plan stops charging; null when it has no end. */
+    /**
+     * When the plan ends, null when it has no end: nobody has access past
+     * it, and the last period before it is charged in full.
+     */
     ends_at: string | null;
 }
 
