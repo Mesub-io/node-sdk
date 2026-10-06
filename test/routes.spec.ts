@@ -1958,6 +1958,69 @@ describe('mesubRoutes for Express', () => {
         },
     );
 
+    // #120: with no error handler of the app's own, Express must not answer Mesub's status.
+    describe('with no error handler', () => {
+        function bare() {
+            const fake = new FakeMesub({ plans: ['pro'] });
+            const server = express();
+            server.use(
+                '/api/mesub',
+                mesubRoutes({
+                    client: fake.client(),
+                    customer: () => ({ external_id: 'user_ada' }),
+                }),
+            );
+
+            return { fake, server };
+        }
+
+        it.each([
+            ['GET', '/plans/pro'],
+            ['GET', '/subscriptions'],
+            ['POST', '/subscriptions'],
+        ] as const)('answers 500 to %s %s when Mesub refuses the API key', async (method, path) => {
+            const { fake, server } = bare();
+            fake.fail({ status: 401, code: 'invalid_api_key' });
+
+            const asked = request(server);
+            const response = await (method === 'GET'
+                ? asked.get(`/api/mesub${path}`)
+                : asked.post(`/api/mesub${path}`).send({ plan: 'pro', wallet: WALLET }));
+
+            expect(response.status).toBe(500);
+            expect(response.body).not.toHaveProperty('error');
+        });
+
+        it('hands an error handler a MesubError of status 500, the original as its cause', async () => {
+            const { fake, server } = bare();
+            const seen: unknown[] = [];
+            server.use(
+                (
+                    error: unknown,
+                    _req: express.Request,
+                    res: express.Response,
+                    _next: express.NextFunction,
+                ) => {
+                    seen.push(error);
+                    res.status(500).end();
+                },
+            );
+            fake.fail({ status: 401, code: 'invalid_api_key' });
+
+            await request(server).get('/api/mesub/subscriptions').expect(500);
+
+            const [error] = seen as [MesubError];
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({
+                status: 500,
+                code: 'unauthorized',
+                apiCode: 'invalid_api_key',
+            });
+            expect(error.cause).toBeInstanceOf(MesubError);
+            expect(error.cause).toMatchObject({ status: 401, apiCode: 'invalid_api_key' });
+        });
+    });
+
     it('answers 404 itself to a path it does not serve, never through next()', async () => {
         const { server } = app(() => ({ external_id: 'user_ada' }));
         const after = vi.fn((_req: express.Request, res: express.Response) => {

@@ -279,6 +279,13 @@ rotated) is thrown to your framework, which logs it and answers 500, never
 handed to the browser as a 401. The widget's side:
 [React widget](https://docs.mesub.io/docs/react).
 
+Under Express, `requirePlan` and `mesubRoutes` hand such an error to
+`next(err)`, and Express's own handler answers an error's `status`. So one
+Mesub answered with a 4xx (a refused key, an unknown plan) reaches your error
+handler as a `MesubError` with the same `code` and `apiCode` and a `status`
+of 500, the original, with Mesub's status, as its `cause`: with no error
+handler of yours, Express answers 500.
+
 ## Webhooks
 
 Mesub posts an event to your endpoint when a subscription changes, signed the

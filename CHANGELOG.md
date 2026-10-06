@@ -102,6 +102,12 @@ The first version published to npm. Requires Node 22 or later.
   an integration error goes, `next(err)` under Express 4 as under 5, thrown
   in Next and Nest. In Nest, an exception it throws after an `await` is the
   one answered, not the default refusal (#73).
+- Under Express, an integration error Mesub answered with a 4xx (a refused
+  API key, an unknown plan) reaches `next(err)` as a `MesubError` of status
+  500 with the same `code` and `apiCode`, the original as its `cause`.
+  Express's own error handler answers an error's `status`: without a handler
+  of yours, `requirePlan` and `mesubRoutes` answered Mesub's 401 or 404
+  (#120).
 
 ### Subscribing from your server
 
