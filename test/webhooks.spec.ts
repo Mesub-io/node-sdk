@@ -89,6 +89,13 @@ const DETAILS: Record<string, Record<string, unknown>> = {
         retry_mode: 'scheduled',
     },
     'subscription.stopped': { reason: 'grace-ended' },
+    'subscription.renewal_upcoming': {
+        can_pay: false,
+        renewal_issue: 'balance',
+        amount: '9990000',
+        mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        due_at: '2026-01-31T00:00:00.000Z',
+    },
     'subscription.cancelled': {},
     'subscription.resumed': {},
     'subscription.ended': {},
@@ -258,6 +265,38 @@ describe('verifyWebhook', () => {
         if (event.type !== 'subscription.payment_failed') throw new Error('narrowed wrong');
         expect(event.data.detail.retries_left).toBe(2);
     });
+
+    it('reads a renewal_upcoming event, and types its detail', async () => {
+        const raw = body('subscription.renewal_upcoming', DETAILS['subscription.renewal_upcoming']);
+        const event: WebhookEvent = await verifyWebhook(
+            raw,
+            backendHeaders(SECRET, 'cm1', NOW, raw),
+            { secret: SECRET },
+        );
+
+        if (event.type !== 'subscription.renewal_upcoming') throw new Error('narrowed wrong');
+        const { can_pay, renewal_issue, amount, mint, due_at } = event.data.detail;
+        expect({ can_pay, renewal_issue, amount, mint, due_at }).toEqual(
+            DETAILS['subscription.renewal_upcoming'],
+        );
+    });
+
+    it.each([null, 'frozen'])(
+        'reads a renewal_issue of %j, one newer than this release too',
+        async (issue) => {
+            const raw = body('subscription.renewal_upcoming', {
+                ...DETAILS['subscription.renewal_upcoming'],
+                can_pay: issue === null,
+                renewal_issue: issue,
+            });
+
+            const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+                secret: SECRET,
+            });
+
+            expect(event.data.detail).toMatchObject({ renewal_issue: issue });
+        },
+    );
 
     it('takes a Buffer, a Uint8Array and an ArrayBuffer as it takes a string', async () => {
         const raw = body('subscription.renewed', DETAILS['subscription.renewed']);
@@ -513,6 +552,34 @@ describe('verifyWebhook', () => {
         ['a boolean paused', body('test', {}, { ...SUBSCRIPTION, paused: 'no' as never })],
         ['a string end_reason', body('test', {}, { ...SUBSCRIPTION, end_reason: 4 as never })],
         ['a detail field', body('subscription.renewed', { amount: '1' })],
+        [
+            'a renewal_upcoming detail field',
+            body('subscription.renewal_upcoming', {
+                ...DETAILS['subscription.renewal_upcoming'],
+                can_pay: undefined,
+            }),
+        ],
+        [
+            'a boolean can_pay',
+            body('subscription.renewal_upcoming', {
+                ...DETAILS['subscription.renewal_upcoming'],
+                can_pay: 'no',
+            }),
+        ],
+        [
+            'a string renewal_issue',
+            body('subscription.renewal_upcoming', {
+                ...DETAILS['subscription.renewal_upcoming'],
+                renewal_issue: 4,
+            }),
+        ],
+        [
+            'a dated due_at',
+            body('subscription.renewal_upcoming', {
+                ...DETAILS['subscription.renewal_upcoming'],
+                due_at: 'soon',
+            }),
+        ],
         ['the detail', JSON.stringify({ type: 'test', created_at: NOW, data: SUBSCRIPTION })],
     ])('throws unexpected for a signed body missing %s', async (_what, raw) => {
         const error = await failure(
@@ -524,13 +591,13 @@ describe('verifyWebhook', () => {
     });
 
     it('hands back an event type newer than this release, its subscription checked', async () => {
-        const raw = body('subscription.renewal_upcoming', { days: 3 });
+        const raw = body('subscription.trial_ending', { days: 3 });
 
         const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
             secret: SECRET,
         });
 
-        expect(event.type).toBe('subscription.renewal_upcoming');
+        expect(event.type).toBe('subscription.trial_ending');
         expect(event.data.detail).toEqual({ days: 3 });
     });
 });
@@ -615,6 +682,25 @@ describe('mesub.webhooks.verify', () => {
         },
     );
 
+    // It announces a charge and moves no access: the cached answer, and the outage fallback, stay.
+    it('keeps the cached answer when a subscription.renewal_upcoming event comes', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        fake.grant(WALLET, 'pro', { revalidate_after: 300 });
+        await mesub.hasAccess(WALLET, 'pro');
+        await mesub.accessList(WALLET);
+        const asked = fake.requests.length;
+
+        const { body: raw, headers } = await fake.webhook('subscription.renewal_upcoming', {
+            subscription: { wallet: WALLET, plan: 'pro' },
+        });
+        await mesub.webhooks.verify(raw, headers);
+        await mesub.hasAccess(WALLET, 'pro');
+        await mesub.accessList(WALLET);
+
+        expect(fake.requests.length).toBe(asked);
+    });
+
     it('keeps the cached answer of another customer and of another plan', async () => {
         const fake = new FakeMesub();
         const mesub = fake.client();
@@ -668,6 +754,22 @@ describe('testing: signing webhooks', () => {
             );
         },
     );
+
+    it('FakeMesub.webhook makes a renewal_upcoming that can pay, due in three days', async () => {
+        const fake = new FakeMesub();
+
+        const { body: raw, headers } = await fake.webhook('subscription.renewal_upcoming');
+        const event = await fake.client().webhooks.verify(raw, headers);
+
+        expect(event.type).toBe('subscription.renewal_upcoming');
+        expect(event.data.detail).toEqual({
+            can_pay: true,
+            renewal_issue: null,
+            amount: '9990000',
+            mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+            due_at: new Date((NOW + 3 * 24 * 3600) * 1000).toISOString(),
+        });
+    });
 
     it('FakeMesub.webhook takes the subscription, detail, id and timestamp given', async () => {
         const fake = new FakeMesub({ webhookSecret: OTHER_SECRET });

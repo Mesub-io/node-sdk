@@ -89,7 +89,33 @@ export interface StoppedDetail {
     reason: string;
 }
 
+/**
+ * Why the coming charge would not pay: the wallet holds too little or has no
+ * account of the token (`balance`), or Mesub's approval can no longer move
+ * the tokens (`authority`). One newer than this release is handed back as it is.
+ */
+export type RenewalIssue = 'balance' | 'authority';
+
+/**
+ * `subscription.renewal_upcoming`: the charge due next, and whether the wallet
+ * can pay it as it stood at the event's `created_at`. A reading, not a promise.
+ */
+export interface RenewalUpcomingDetail {
+    can_pay: boolean;
+    /** Why not; null when it can. */
+    renewal_issue: RenewalIssue | null;
+    amount: string;
+    mint: string;
+    /** When the charge is due. */
+    due_at: string;
+}
+
 export type SubscriptionCreatedEvent = WebhookEventOf<'subscription.created', CreatedDetail>;
+/** Once per period, in its last quarter and three days before the charge at most. */
+export type SubscriptionRenewalUpcomingEvent = WebhookEventOf<
+    'subscription.renewal_upcoming',
+    RenewalUpcomingDetail
+>;
 export type SubscriptionRenewedEvent = WebhookEventOf<'subscription.renewed', RenewedDetail>;
 export type SubscriptionPaymentFailedEvent = WebhookEventOf<
     'subscription.payment_failed',
@@ -111,6 +137,7 @@ export type TestEvent = WebhookEventOf<'test', NoDetail>;
  */
 export type WebhookEvent =
     | SubscriptionCreatedEvent
+    | SubscriptionRenewalUpcomingEvent
     | SubscriptionRenewedEvent
     | SubscriptionPaymentFailedEvent
     | SubscriptionStoppedEvent
@@ -170,6 +197,7 @@ export class Webhooks {
      * `verifyWebhook`, with `webhookSecret` unless `options.secret` says
      * otherwise. An event whose subscription grants access also drops the
      * client's cached no for that customer, as a submit that lands does.
+     * `subscription.renewal_upcoming` drops nothing: it moves no access.
      */
     async verify(
         body: WebhookBody,
@@ -178,7 +206,10 @@ export class Webhooks {
     ): Promise<WebhookEvent> {
         const event = await verify(body, headers, options, this.#secret);
 
-        if (event.type !== 'test') await this.#received(event);
+        // A charge to come changes no answer: dropping it would cost the outage fallback.
+        const moves = event.type !== 'test' && event.type !== 'subscription.renewal_upcoming';
+
+        if (moves) await this.#received(event);
 
         return event;
     }
