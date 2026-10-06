@@ -316,6 +316,19 @@ request.headers)`. A delivery can arrive twice or out of order: drop an
 revoking. The events, their bodies and how to test:
 [Webhooks](https://docs.mesub.io/docs/webhooks).
 
+`subscription.renewal_upcoming` comes once per period, in its last quarter and
+three days before the charge at most. Its detail says whether the wallet, as
+Mesub just read it, can pay: a reading, not a promise.
+
+```ts
+if (event.type === 'subscription.renewal_upcoming' && !event.data.detail.can_pay) {
+    // renewal_issue: 'balance' (add funds) or 'authority' (the approval is gone)
+    await remind(event.data.external_id, event.data.detail.renewal_issue);
+}
+```
+
+It changes no access, so `verify` leaves the access cache as it is for it.
+
 ## Errors
 
 Every failure is a `MesubError` with a `status` (the HTTP status, or `null`)
@@ -337,7 +350,7 @@ and a stable `code` to branch on:
 It also carries `apiCode`, Mesub's own finer code (`already_subscribed`,
 `close_too_early`, ...), `retryable`, `retryAfter` in milliseconds, and the
 parsed `body`. New codes are added: keep a default branch. Every code:
-[API reference](https://docs.mesub.io/docs/api).
+[Errors](https://docs.mesub.io/reference/errors).
 
 Reads time out after 5 s and are retried twice. `create` and the six manage
 calls are sent once and never retried.

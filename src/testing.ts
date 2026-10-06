@@ -845,6 +845,15 @@ function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
     const paid = { amount: '9990000', mint: USDC, period_start: start, period_end: end };
 
     switch (type) {
+        case 'subscription.renewal_upcoming':
+            return {
+                can_pay: true,
+                renewal_issue: null,
+                amount: paid.amount,
+                mint: USDC,
+                // The check's window opens three days before the charge at most.
+                due_at: new Date(now.getTime() + 3 * 24 * 3600 * 1000).toISOString(),
+            };
         case 'subscription.renewed':
             return { ...paid, signature: 'fake_signature' };
         case 'subscription.payment_failed':

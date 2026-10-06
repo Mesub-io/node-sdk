@@ -223,6 +223,11 @@ answer this request.`: never the SDK's own message, which may name your
 - A verified event drops every access answer cached for its customer, the
   yes too: after `subscription.stopped` or `subscription.ended`, `hasAccess`
   says no at once instead of the cached yes for up to five minutes (#84).
+- `subscription.renewal_upcoming` is typed: `SubscriptionRenewalUpcomingEvent`,
+  whose detail (`RenewalUpcomingDetail`) says whether the coming charge can
+  pay and, when it cannot, why (`RenewalIssue`). Its detail is checked,
+  `fake.webhook` makes one, and verifying it drops no cached answer: it moves
+  no access (#121).
 
 ### Testing your integration
 

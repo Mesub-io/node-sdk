@@ -15,6 +15,7 @@ import type {
 import type {
     CreatedDetail,
     PaymentFailedDetail,
+    RenewalUpcomingDetail,
     RenewedDetail,
     StoppedDetail,
     WebhookEvent,
@@ -404,6 +405,13 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.created': {
         previous_id: OPTIONAL_STRING,
     } satisfies Record<keyof CreatedDetail, Field>,
+    'subscription.renewal_upcoming': {
+        can_pay: BOOLEAN,
+        renewal_issue: STRING_OR_NULL,
+        amount: STRING,
+        mint: STRING,
+        due_at: DATE,
+    } satisfies Record<keyof RenewalUpcomingDetail, Field>,
     'subscription.renewed': {
         amount: STRING,
         mint: STRING,
