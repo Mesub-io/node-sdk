@@ -10,7 +10,7 @@ import type { CallOptions } from './transport.js';
  * The routes `@mesub/react` calls on your own server, so the browser never
  * talks to Mesub nor holds a key: a plan to show, the customer's
  * subscriptions, one of them with its payments, and each step of
- * subscribing, cancelling, resuming and closing. One function, `handleWidget`; the Express and Next entries only
+ * subscribing, cancelling, resuming, closing and paying a late payment now. One function, `handleWidget`; the Express and Next entries only
  * carry a request to it.
  *
  * Who is asking comes from `customer`, your own verified auth, as on the
@@ -566,7 +566,12 @@ export async function handleWidget(
 
         if (!ID.test(id)) return NO_SUBSCRIPTION();
 
-        const known = ['submit', ...ACTIONS, ...ACTIONS.map((action) => `${action}/confirm`)];
+        const known = [
+            'submit',
+            'retry',
+            ...ACTIONS,
+            ...ACTIONS.map((action) => `${action}/confirm`),
+        ];
         if (!known.includes(step)) return NOT_FOUND();
 
         // Before anything is built or confirmed: is it theirs at all.
@@ -590,6 +595,13 @@ export async function handleWidget(
             });
 
             return { status: 201, body: { ...settled, subscription: shown(settled.subscription) } };
+        }
+
+        // Pay now (Mesub-io/backend#354): nothing to sign, the outcome comes with the pull.
+        if (step === 'retry') {
+            const retried = await client.subscriptions.retry(id);
+
+            return { status: 202, body: { subscription: shown(retried) } };
         }
 
         const [action, confirm] = step.split('/') as [Action, 'confirm' | undefined];

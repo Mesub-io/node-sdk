@@ -620,6 +620,29 @@ export class Subscriptions {
         return this.#confirm('close', id, params, options);
     }
 
+    /**
+     * Pays a late payment now (Mesub-io/backend#354): the pull of the missed
+     * period runs at once rather than at its next retry, with nothing for the
+     * wallet to sign, since it approved the plan when it subscribed. Answers
+     * the subscription, still `unpaid`: the outcome comes with the pull, as
+     * the `subscription.renewed` or `subscription.payment_failed` webhook.
+     *
+     * The merchant's hand retry from the dashboard follows the same rules: on
+     * Free it is one of the missed period's three, whoever fires it; on Dev
+     * and Business it runs beside the schedule, the wait between two doubling.
+     * Mesub refuses it first when it cannot succeed, so it never spends a
+     * retry for nothing: `apiCode` `insufficient_balance` (top up, then pay
+     * again), `retry_cannot_succeed` (the wallet no longer approves it),
+     * `retry_too_soon` (`retryAfter` says when), `retries_spent`,
+     * `retry_deadline_passed`, `subscription_not_late`, `subscription_paused`,
+     * `plan_ended`. Sent once, never retried: a second one is a second retry.
+     */
+    async retry(id: string, options: RequestOptions = {}): Promise<ServerSubscription> {
+        return serverSubscriptionFrom(
+            await this.#transport.post(`${pathOf(id)}/retry`, undefined, options),
+        );
+    }
+
     async #build(action: Action, id: string, options: RequestOptions): Promise<WalletTransaction> {
         const path = `${pathOf(id)}/${action}`;
 

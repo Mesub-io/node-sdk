@@ -488,7 +488,7 @@ export class FakeMesub {
         if (method === 'POST' && path === '/v1/subscriptions') return this.#create(body);
 
         const [, id, step, confirm] =
-            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|cancel|resume|close|attempts)(\/confirm)?)?$/.exec(
+            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|cancel|resume|close|attempts|retry)(\/confirm)?)?$/.exec(
                 path,
             ) ?? [];
         // A Mesub without the route knows no such path, whatever the id.
@@ -510,6 +510,22 @@ export class FakeMesub {
             }
             if (method === 'POST' && step === 'submit' && !confirm) {
                 return this.#submit(subscription);
+            }
+            // Pay now (Mesub-io/backend#354): taken for a late one, nothing pulled here.
+            if (step === 'retry') {
+                if (method !== 'POST' || confirm) {
+                    return error(404, 'not_found', `Cannot ${method} ${path}`);
+                }
+                if (subscription.status !== 'unpaid') {
+                    return error(
+                        409,
+                        'subscription_not_late',
+                        'This subscription is not behind on its payment.',
+                    );
+                }
+                return Response.json(bounded(subscription, this.#endOf(subscription.plan)), {
+                    status: 202,
+                });
             }
             if (method === 'POST' && step && step !== 'submit') {
                 return confirm

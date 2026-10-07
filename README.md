@@ -184,7 +184,7 @@ creating a new one, since the wallet may have paid.
 The signing code, what `create` answers, the refusals:
 [Subscribe from your server](https://docs.mesub.io/docs/subscribe).
 
-## Cancel, resume, close, and payments
+## Cancel, resume, close, pay now, and payments
 
 Each action is two calls from your server with the wallet in between: your
 server builds a transaction, the subscription's own wallet signs and sends it,
@@ -195,6 +195,14 @@ your server confirms with the signature.
 | stop the renewals of a running one            | `cancel(id)` | `confirmCancel(id, { signature })` |
 | take a cancellation back before its end       | `resume(id)` | `confirmResume(id, { signature })` |
 | close one that is over, and get its rent back | `close(id)`  | `confirmClose(id, { signature })`  |
+
+A late payment is paid now in one call, with nothing to sign: `retry(id)`,
+shown to your customer as "Pay now". Mesub answers the subscription, still
+`unpaid`: the outcome comes with the pull, as the `subscription.renewed` or
+`subscription.payment_failed` webhook. It refuses with an `apiCode` when paying
+cannot succeed, so no retry is spent for nothing: `insufficient_balance` (top
+up first), `retry_cannot_succeed` (the wallet no longer approves it),
+`retry_too_soon` (`retryAfter` says when). Sent once, never retried.
 
 ```ts
 await mesub.subscriptions.retrieve(id);

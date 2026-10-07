@@ -437,6 +437,17 @@ describe.skipIf(!env.url)('contract with the back', () => {
             expect(error).toMatchObject({ apiCode: 'subscription_not_found', status: 404 });
         });
 
+        // Pay now (Mesub-io/backend#354): the route exists, and scopes by id like the others.
+        it('answers subscription_not_found when paying now an id it never issued', async (context) => {
+            const error = await mesub()
+                .subscriptions.retry('never-issued')
+                .catch((caught: unknown) => caught);
+
+            expect(error).toBeInstanceOf(MesubError);
+            if ((error as MesubError).apiCode === null) return context.skip();
+            expect(error).toMatchObject({ apiCode: 'subscription_not_found', status: 404 });
+        });
+
         it('answers not_found, subscription_not_found, for an id it never issued', async () => {
             const error = await mesub()
                 .subscriptions.retrieve('never-issued')
