@@ -19,8 +19,10 @@ import type { ServerSubscription } from './subscriptions.js';
 export type SituationActor = 'subscriber' | 'merchant';
 
 /**
- * What can be done. `add_funds` has no route (the wallet does it), `retry`
- * and `upgrade` exist on the Mesub dashboard only, not with an API key.
+ * What can be done. `add_funds` has no route (the wallet does it). `retry` is
+ * the subscriber's "Pay now" with the API key (`subscriptions.retry`,
+ * Mesub-io/backend#354), and the merchant's on the Mesub dashboard; `upgrade`
+ * exists on the dashboard only.
  */
 export type SituationActionId =
     | 'subscribe'
@@ -97,6 +99,17 @@ const RETRY = {
     route: 'POST /merchant/subscriptions/:id/retry',
     dashboard: true,
 } as const;
+/**
+ * The subscriber's own, shown as "Pay now" (Mesub-io/backend#354): the same
+ * rules as the merchant's, nothing to sign, and refused first when it cannot
+ * succeed (a short wallet, an approval gone), so no retry is spent for nothing.
+ */
+const PAY_NOW = {
+    by: 'subscriber',
+    action: 'retry',
+    sdk: 'subscriptions.retry',
+    route: 'POST /v1/subscriptions/:id/retry',
+} as const;
 const UPGRADE = {
     by: 'merchant',
     action: 'upgrade',
@@ -145,21 +158,26 @@ export const SITUATIONS = {
             'Your payment of {amount} is late, and Mesub will not try again on its own: {plan_name} is ending. You keep access until {access_until}.',
         merchant:
             'Payment late, with no retry ahead: the plan ends before the next one. Access continues until {access_until}, and the subscription ends with the plan.',
-        actions: [CANCEL_BEHIND, RETRY],
+        actions: [PAY_NOW, CANCEL_BEHIND, RETRY],
     },
     unpaid_insufficient_balance_retries: {
         subscriber:
-            'Your payment of {amount} is late because your wallet held too little, and nothing was taken. Add {amount} before {next_retry_at}, with nothing to sign: Mesub tries again then, and your subscription stops if no payment goes through by {access_until}.',
+            'Your payment of {amount} is late because your wallet held too little, and nothing was taken. Add {amount} to your wallet, then pay it now, with nothing to sign; otherwise Mesub tries again on {next_retry_at}. Your subscription stops if no payment goes through by {access_until}.',
         merchant:
-            'Payment late: the wallet was short. Retry[ {next_retry_number} of {retries_allowed}] on {next_retry_at}. Access continues until {access_until}; the subscription stops then if every retry fails.',
-        actions: [ADD_FUNDS, CANCEL_BEHIND, RETRY],
+            "Payment late: the wallet was short. Retry[ {next_retry_number} of {retries_allowed}] on {next_retry_at}, or sooner by hand, yours or the subscriber's. Access continues until {access_until}; the subscription stops then if every retry fails.",
+        actions: [ADD_FUNDS, PAY_NOW, CANCEL_BEHIND, RETRY],
     },
     unpaid_insufficient_balance_free: {
         subscriber:
-            'Your payment of {amount} is late because your wallet held too little, so your access is off. Add {amount} to your wallet and {merchant_name} can retry it until {retry_deadline}; if no payment goes through by then, the subscription stops.',
+            'Your payment of {amount} is late because your wallet held too little, so your access is off. Add {amount} to your wallet, then pay it now, with nothing to sign, before {retry_deadline}; if no payment goes through by then, the subscription stops.',
         merchant:
-            'Payment late: the wallet was short. On Free, Mesub does not retry: you can retry by hand, up to 3 times, 10 minutes apart, until {retry_deadline}. Access is off meanwhile, and it stops after that.',
-        actions: [{ ...RETRY, until: 'retry_deadline' }, ADD_FUNDS, CANCEL_BEHIND],
+            'Payment late: the wallet was short. On Free, Mesub does not retry on its own: you or the subscriber can retry by hand, up to 3 times between you, 10 minutes apart, until {retry_deadline}. Access is off meanwhile, and it stops after that.',
+        actions: [
+            ADD_FUNDS,
+            { ...PAY_NOW, until: 'retry_deadline' },
+            CANCEL_BEHIND,
+            { ...RETRY, until: 'retry_deadline' },
+        ],
     },
     unpaid_approval_revoked: {
         subscriber:
@@ -169,7 +187,8 @@ export const SITUATIONS = {
                 "Payment late: the subscriber's wallet no longer approves Mesub (removed in the wallet, or replaced by another app's approval). Every retry fails until it is back, and no Mesub route restores it today. It stops on {access_until}.",
             free: "Payment late: the subscriber's wallet no longer approves Mesub (removed in the wallet, or replaced by another app's approval). Every retry fails until it is back, and no Mesub route restores it today. It stops at {retry_deadline}.",
         },
-        // A retry by hand is accepted by the API but fails: not offered.
+        // A retry by hand is accepted by the dashboard but fails, and the
+        // subscriber's is refused (`retry_cannot_succeed`): neither is offered.
         actions: [CANCEL_BEHIND],
     },
     unpaid_authority_closed: {
@@ -185,10 +204,10 @@ export const SITUATIONS = {
     },
     unpaid_unknown: {
         subscriber:
-            'Your wallet refused the payment of {amount}, so nothing was taken. Check that it still holds {amount} in {token} and can send it, or Cancel to stop.',
+            'Your wallet refused the payment of {amount}, so nothing was taken. Check that it still holds {amount} in {token} and can send it, then pay it now, or Cancel to stop.',
         merchant:
             "Payment late: the network refused the payment for a reason Mesub does not name (for example a frozen {token} account). See the last attempt's reason.",
-        actions: [CANCEL_BEHIND, RETRY],
+        actions: [PAY_NOW, CANCEL_BEHIND, RETRY],
     },
 
     // Cancelled

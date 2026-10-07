@@ -925,6 +925,64 @@ describe('the widget routes: managing', () => {
     });
 });
 
+// Pay now (Mesub-io/backend#354), for @mesub/react's button.
+describe('the widget routes: paying a late payment now', () => {
+    function late(fake: FakeMesub, wallet = WALLET) {
+        return fake.addSubscription({
+            wallet,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'unpaid',
+            payment_status: 'late',
+            access: false,
+        });
+    }
+
+    it("pays the customer's late subscription, and answers it as shown", async () => {
+        const { fake, post } = setup();
+        const { id } = late(fake);
+
+        const answer = await post(ada, `/subscriptions/${id}/retry`, {});
+
+        expect(answer.status).toBe(202);
+        expect(answer.body).toMatchObject({ subscription: { id, status: 'unpaid' } });
+        expect(JSON.stringify(answer.body)).not.toContain('user_ada');
+    });
+
+    it("answers 404 for another customer's, before anything is asked of Mesub", async () => {
+        const { fake, post } = setup();
+        const { id } = late(fake);
+
+        await expect(post(bob, `/subscriptions/${id}/retry`, {})).resolves.toMatchObject({
+            status: 404,
+            body: { error: { code: 'subscription_not_found' } },
+        });
+    });
+
+    it("hands on Mesub's refusal with its code", async () => {
+        const { client, post } = setup();
+        const id = await subscribed(client);
+
+        await expect(post(ada, `/subscriptions/${id}/retry`, {})).resolves.toMatchObject({
+            status: 409,
+            body: { error: { code: 'subscription_not_late' } },
+        });
+    });
+
+    it('refuses a POST a plain form could send', async () => {
+        const { fake, call } = setup();
+        const { id } = late(fake);
+
+        await expect(
+            call(ada, {
+                method: 'POST',
+                path: `/subscriptions/${id}/retry`,
+                contentType: 'text/plain',
+            }),
+        ).resolves.toMatchObject({ status: 415 });
+    });
+});
+
 describe('the widget routes: one subscription in full', () => {
     const DAY = 24 * 3600 * 1000;
     const at = (daysAgo: number) => new Date(Date.UTC(2026, 9, 1) - daysAgo * DAY).toISOString();

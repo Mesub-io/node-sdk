@@ -113,7 +113,7 @@ const CASES = {
         }),
         subscriber: `Your payment of 9.99 USDC is late, and Mesub will not try again on its own: Pro is ending. You keep access until ${PLAN_END}.`,
         merchant: `Payment late, with no retry ahead: the plan ends before the next one. Access continues until ${PLAN_END}, and the subscription ends with the plan.`,
-        actions: ['subscriber:cancel', 'merchant:retry'],
+        actions: ['subscriber:retry', 'subscriber:cancel', 'merchant:retry'],
     },
     unpaid_insufficient_balance_retries: {
         input: subscription({
@@ -123,9 +123,14 @@ const CASES = {
             next_retry_number: 2,
             retries_allowed: 3,
         }),
-        subscriber: `Your payment of 9.99 USDC is late because your wallet held too little, and nothing was taken. Add 9.99 USDC before ${RETRY}, with nothing to sign: Mesub tries again then, and your subscription stops if no payment goes through by ${UNTIL}.`,
-        merchant: `Payment late: the wallet was short. Retry 2 of 3 on ${RETRY}. Access continues until ${UNTIL}; the subscription stops then if every retry fails.`,
-        actions: ['subscriber:add_funds', 'subscriber:cancel', 'merchant:retry'],
+        subscriber: `Your payment of 9.99 USDC is late because your wallet held too little, and nothing was taken. Add 9.99 USDC to your wallet, then pay it now, with nothing to sign; otherwise Mesub tries again on ${RETRY}. Your subscription stops if no payment goes through by ${UNTIL}.`,
+        merchant: `Payment late: the wallet was short. Retry 2 of 3 on ${RETRY}, or sooner by hand, yours or the subscriber's. Access continues until ${UNTIL}; the subscription stops then if every retry fails.`,
+        actions: [
+            'subscriber:add_funds',
+            'subscriber:retry',
+            'subscriber:cancel',
+            'merchant:retry',
+        ],
     },
     unpaid_insufficient_balance_free: {
         input: subscription({
@@ -134,9 +139,14 @@ const CASES = {
             late_reason: 'insufficient_balance',
             retry_deadline: DEADLINE,
         }),
-        subscriber: `Your payment of 9.99 USDC is late because your wallet held too little, so your access is off. Add 9.99 USDC to your wallet and Acme can retry it until ${DEADLINE}; if no payment goes through by then, the subscription stops.`,
-        merchant: `Payment late: the wallet was short. On Free, Mesub does not retry: you can retry by hand, up to 3 times, 10 minutes apart, until ${DEADLINE}. Access is off meanwhile, and it stops after that.`,
-        actions: ['merchant:retry', 'subscriber:add_funds', 'subscriber:cancel'],
+        subscriber: `Your payment of 9.99 USDC is late because your wallet held too little, so your access is off. Add 9.99 USDC to your wallet, then pay it now, with nothing to sign, before ${DEADLINE}; if no payment goes through by then, the subscription stops.`,
+        merchant: `Payment late: the wallet was short. On Free, Mesub does not retry on its own: you or the subscriber can retry by hand, up to 3 times between you, 10 minutes apart, until ${DEADLINE}. Access is off meanwhile, and it stops after that.`,
+        actions: [
+            'subscriber:add_funds',
+            'subscriber:retry',
+            'subscriber:cancel',
+            'merchant:retry',
+        ],
     },
     unpaid_approval_revoked: {
         input: subscription({ ...LATE, late_reason: 'approval_revoked', next_retry_at: RETRY }),
@@ -155,10 +165,10 @@ const CASES = {
     unpaid_unknown: {
         input: subscription({ ...LATE, next_retry_at: RETRY }),
         subscriber:
-            'Your wallet refused the payment of 9.99 USDC, so nothing was taken. Check that it still holds 9.99 USDC in USDC and can send it, or Cancel to stop.',
+            'Your wallet refused the payment of 9.99 USDC, so nothing was taken. Check that it still holds 9.99 USDC in USDC and can send it, then pay it now, or Cancel to stop.',
         merchant:
             "Payment late: the network refused the payment for a reason Mesub does not name (for example a frozen USDC account). See the last attempt's reason.",
-        actions: ['subscriber:cancel', 'merchant:retry'],
+        actions: ['subscriber:retry', 'subscriber:cancel', 'merchant:retry'],
     },
     cancelled_with_access: {
         input: answer({
@@ -328,24 +338,34 @@ describe('explain', () => {
             expect(explain(free, { names: NAMES }).missing).toEqual([]);
         });
 
-        it('offers the retry by hand only until the deadline', () => {
+        it("offers the retries by hand, the subscriber's and the merchant's, only until the deadline", () => {
             const free = subscription({
                 ...LATE,
                 ...OVER,
                 late_reason: 'insufficient_balance',
                 retry_deadline: DEADLINE,
             });
-            const before = explain(free, { now: NOW }).actions[0];
+            const before = explain(free, { now: NOW }).actions;
             const after = explain(free, { now: new Date(DEADLINE) }).actions;
 
-            expect(before).toEqual({
+            expect(before).toContainEqual({
+                by: 'subscriber',
+                action: 'retry',
+                sdk: 'subscriptions.retry',
+                route: 'POST /v1/subscriptions/:id/retry',
+                until: DEADLINE,
+            });
+            expect(before).toContainEqual({
                 by: 'merchant',
                 action: 'retry',
                 route: 'POST /merchant/subscriptions/:id/retry',
                 dashboard: true,
                 until: DEADLINE,
             });
-            expect(after.map((a) => a.action)).toEqual(['add_funds', 'cancel']);
+            expect(after.map((a) => `${a.by}:${a.action}`)).toEqual([
+                'subscriber:add_funds',
+                'subscriber:cancel',
+            ]);
         });
     });
 
@@ -424,7 +444,7 @@ describe('explain', () => {
             } as const;
 
             expect(explain(answer(late), { names: NAMES }).merchant).toContain(
-                `Retry on ${RETRY}.`,
+                `Retry on ${RETRY}, or sooner by hand`,
             );
             expect(explain(answer(late), { names: NAMES }).missing).toEqual([]);
         });

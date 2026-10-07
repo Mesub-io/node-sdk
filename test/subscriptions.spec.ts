@@ -1111,6 +1111,55 @@ describe.each([
     });
 });
 
+// Pay now (Mesub-io/backend#354): no transaction, the outcome comes with the pull.
+describe('subscriptions.retry', () => {
+    it('posts once and answers the subscription, still late', async () => {
+        const late = subscription({ status: 'unpaid', payment_status: 'late', access: false });
+        const { fetch, calls } = mockFetch(json(202, late));
+
+        await expect(mesub(fetch).subscriptions.retry('sub_1')).resolves.toEqual(late);
+        expect(calls[0]!.init.method).toBe('POST');
+        expect(calls[0]!.url.href).toBe('https://api.test/v1/subscriptions/sub_1/retry');
+    });
+
+    // A second send is a second retry: on Free, one of three.
+    it.each([
+        [409, 'retry_too_soon', true],
+        [409, 'pull_running', true],
+        [429, 'rate_limited', true],
+        [503, 'unavailable', true],
+    ])('never sends again after a %s %s', async (status, code, retryable) => {
+        const { fetch } = mockFetch(
+            json(status, { statusCode: status, message: 'No.', code, retryable }),
+            json(202, subscription()),
+        );
+
+        await expect(mesub(fetch).subscriptions.retry('sub_1')).rejects.toMatchObject({
+            status,
+            apiCode: code,
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("carries Mesub's reason when paying cannot succeed", async () => {
+        const { fetch } = mockFetch(
+            json(409, {
+                statusCode: 409,
+                message:
+                    'You need 9.99 USDC to pay the missed period, and this wallet holds 1 USDC.',
+                code: 'insufficient_balance',
+                retryable: false,
+            }),
+        );
+
+        await expect(mesub(fetch).subscriptions.retry('sub_1')).rejects.toMatchObject({
+            code: 'conflict',
+            apiCode: 'insufficient_balance',
+            retryable: false,
+        });
+    });
+});
+
 describe('subscriptions.retrieve', () => {
     it('gets one subscription by id', async () => {
         const expired = subscription({ status: 'expired', access: false, access_until: null });
