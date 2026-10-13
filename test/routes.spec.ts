@@ -63,6 +63,7 @@ async function subscribed(client: Mesub, externalId = 'user_ada', wallet = WALLE
 
 const STEPS = [
     'submit',
+    'transaction',
     'cancel',
     'cancel/confirm',
     'resume',
@@ -922,6 +923,193 @@ describe('the widget routes: managing', () => {
         await expect(call(ada, { method, path: '/subscriptions' })).resolves.toMatchObject({
             status: 405,
         });
+    });
+});
+
+// A fresh transaction (Mesub-io/backend#427): asked when the wallet is ready, or after one expired.
+describe('the widget routes: a fresh transaction to sign', () => {
+    async function waiting(
+        post: ReturnType<typeof setup>['post'],
+        asked: Parameters<typeof handleWidget>[2] = ada,
+    ) {
+        const created = await post(asked, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        return created.body as {
+            subscription: { id: string };
+            transaction: string;
+            terms: { message: string; expires_at: string };
+        };
+    }
+
+    it('answers what subscribing answers, in the same shape, for the same subscription', async () => {
+        const { post, fake } = setup();
+        const created = await waiting(post);
+        const { id } = created.subscription;
+
+        const answer = await post(ada, `/subscriptions/${id}/transaction`, {});
+
+        expect(answer.status).toBe(201);
+        expect(answer.headers).toBeUndefined();
+        expect(Object.keys(answer.body as object).sort()).toEqual(Object.keys(created).sort());
+        expect(answer.body).toEqual({
+            subscription: { id, status: 'pending' },
+            transaction: expect.any(String),
+            last_valid_block_height: expect.any(String),
+            costs: {
+                rent: { subscription: '0', authority: null, total: '0' },
+                fee: { signatures: 2, per_signature: '0', priority: '0', total: '0' },
+                total: '0',
+            },
+            terms: { message: created.terms.message, expires_at: expect.any(String) },
+        });
+        // Theirs first, then the build: with no body, whatever the browser sent.
+        expect(fake.requests.slice(-2).map((each) => `${each.method} ${each.path}`)).toEqual([
+            `GET /v1/subscriptions/${id}`,
+            `POST /v1/subscriptions/${id}/transaction`,
+        ]);
+        expect(fake.requests.at(-1)?.body).toBeUndefined();
+    });
+
+    it.each([
+        ['an empty body', {}],
+        ['no body', undefined],
+        [
+            'another wallet and plan',
+            { wallet: OTHER_WALLET, plan: 'team', external_id: 'user_bob' },
+        ],
+        ['a list', ['pro']],
+    ])('reads nothing of the body: %s', async (_name, body) => {
+        const { post, fake } = setup();
+        const { subscription } = await waiting(post);
+
+        const answer = await post(ada, `/subscriptions/${subscription.id}/transaction`, body);
+
+        expect(answer).toMatchObject({ status: 201, body: { subscription } });
+        expect(fake.requests.at(-1)?.body).toBeUndefined();
+    });
+
+    it('answers it again and again while nothing landed, then lets the submit through', async () => {
+        const { post } = setup();
+        const { subscription } = await waiting(post);
+        const path = `/subscriptions/${subscription.id}`;
+
+        await post(ada, `${path}/transaction`, {});
+        const last = await post(ada, `${path}/transaction`, {});
+        const landed = await post(ada, `${path}/submit`, {
+            transaction: (last.body as { transaction: string }).transaction,
+            terms_signature: SIGNATURE,
+        });
+
+        expect(last.status).toBe(201);
+        expect(landed).toMatchObject({ status: 201, body: { subscription: { status: 'active' } } });
+    });
+
+    it.each([
+        ['wallet', { kind: 'wallet', value: WALLET }],
+        ['email', { kind: 'email', value: 'ada@example.com' }],
+    ] as const)('serves a customer named by %s too', async (_kind, asked) => {
+        const { post } = setup();
+        const { subscription } = await waiting(post, asked);
+
+        await expect(
+            post(asked, `/subscriptions/${subscription.id}/transaction`, {}),
+        ).resolves.toMatchObject({ status: 201, body: { subscription } });
+    });
+
+    it("answers 404 for another customer's, and builds nothing", async () => {
+        const { post, fake } = setup();
+        const { subscription } = await waiting(post);
+        const before = fake.requests.length;
+
+        await expect(
+            post(bob, `/subscriptions/${subscription.id}/transaction`, {}),
+        ).resolves.toMatchObject({
+            status: 404,
+            body: { error: { code: 'subscription_not_found' } },
+        });
+        expect(fake.requests.slice(before).map((each) => each.method)).toEqual(['GET']);
+    });
+
+    it("hands on Mesub's refusal of one that awaits no signature", async () => {
+        const { client, post } = setup();
+        const id = await subscribed(client);
+
+        await expect(post(ada, `/subscriptions/${id}/transaction`, {})).resolves.toMatchObject({
+            status: 409,
+            body: { error: { code: 'not_awaiting_signature' } },
+        });
+    });
+
+    it("hands on Mesub's refusal once the plan ended", async () => {
+        const { post, fake } = setup();
+        const { subscription } = await waiting(post);
+        fake.endPlan('pro');
+
+        await expect(
+            post(ada, `/subscriptions/${subscription.id}/transaction`, {}),
+        ).resolves.toMatchObject({ status: 409, body: { error: { code: 'plan_ended' } } });
+    });
+
+    it('hands on a wait Mesub asks for, with its Retry-After', async () => {
+        const { post, client } = setup();
+        const { subscription } = await waiting(post);
+        vi.spyOn(client.subscriptions, 'transaction').mockRejectedValue(
+            new MesubError('The period is turning.', {
+                status: 409,
+                code: 'conflict',
+                apiCode: 'comeback_period_rolling',
+                retryable: true,
+                retryAfter: 90_000,
+            }),
+        );
+
+        const answer = await post(ada, `/subscriptions/${subscription.id}/transaction`, {});
+
+        expect(answer).toEqual({
+            status: 409,
+            body: { error: { code: 'comeback_period_rolling', message: 'The period is turning.' } },
+            headers: { 'Retry-After': '90' },
+        });
+    });
+
+    it('refuses a POST a plain form could send, before asking Mesub', async () => {
+        const { post, call, fake } = setup();
+        const { subscription } = await waiting(post);
+        const before = fake.requests.length;
+
+        await expect(
+            call(ada, {
+                method: 'POST',
+                path: `/subscriptions/${subscription.id}/transaction`,
+                contentType: 'application/x-www-form-urlencoded',
+            }),
+        ).resolves.toMatchObject({ status: 415 });
+        expect(fake.requests).toHaveLength(before);
+    });
+
+    it.each(['transaction/confirm', 'transaction/x', 'transactions'])(
+        'answers 404 for %s, which is no step',
+        async (step) => {
+            const { post, fake } = setup();
+            const { subscription } = await waiting(post);
+            const before = fake.requests.length;
+
+            const answer = await post(ada, `/subscriptions/${subscription.id}/${step}`, {});
+
+            expect(answer).toMatchObject({ status: 404, body: { error: { code: 'not_found' } } });
+            expect(fake.requests).toHaveLength(before);
+        },
+    );
+
+    it('is no GET: that path reads nothing', async () => {
+        const { post, call, fake } = setup();
+        const { subscription } = await waiting(post);
+        const before = fake.requests.length;
+
+        const answer = await call(ada, { path: `/subscriptions/${subscription.id}/transaction` });
+
+        expect(answer.status).toBe(404);
+        expect(fake.requests).toHaveLength(before);
     });
 });
 
@@ -1988,6 +2176,26 @@ describe('mesubRoutes for Express', () => {
         },
     );
 
+    it('hands out a fresh transaction under its mount point', async () => {
+        const { server } = app(() => ({ external_id: 'user_ada' }));
+        const created = await request(server)
+            .post('/api/mesub/subscriptions')
+            .send({ plan: 'pro', wallet: WALLET });
+        const { id } = (created.body as { subscription: { id: string } }).subscription;
+
+        const response = await request(server)
+            .post(`/api/mesub/subscriptions/${id}/transaction`)
+            .send({});
+
+        expect(response.status).toBe(201);
+        expect(response.headers['cache-control']).toBe('no-store');
+        expect(response.body).toMatchObject({
+            subscription: { id, status: 'pending' },
+            transaction: expect.any(String),
+            terms: { message: expect.any(String) },
+        });
+    });
+
     it('serves a plan with nobody signed in, without asking who is', async () => {
         const customer = vi.fn(() => null);
         const { server } = app(customer);
@@ -2198,6 +2406,21 @@ describe('mesubRouteHandlers for Next', () => {
         expect(response.status).toBe(201);
         expect(response.headers.get('cache-control')).toBe('no-store');
         expect(fake.requests.at(-1)?.body).toMatchObject({ external_id: 'user_ada' });
+    });
+
+    it('hands out a fresh transaction through the catch-all segment', async () => {
+        const { POST } = handlers(() => ({ external_id: 'user_ada' }));
+        const created = await POST(json({ plan: 'pro', wallet: WALLET }), context('subscriptions'));
+        const { id } = ((await created.json()) as { subscription: { id: string } }).subscription;
+
+        const response = await POST(json({}), context('subscriptions', id, 'transaction'));
+
+        expect(response.status).toBe(201);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        await expect(response.json()).resolves.toMatchObject({
+            subscription: { id, status: 'pending' },
+            transaction: expect.any(String),
+        });
     });
 
     it('reads params given as a plain object too, as before Next 15', async () => {

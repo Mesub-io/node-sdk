@@ -19,6 +19,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         end_reason: null,
         late_reason: null,
         payment_status: 'paid',
+        blocked_since: null,
+        blocked_reason: null,
         subscribed_since: '2026-09-01T00:00:00.000Z',
         first_subscribed_at: '2026-09-01T00:00:00.000Z',
         current_period_end: '2026-10-01T00:00:00.000Z',
@@ -238,6 +240,21 @@ describe('access', () => {
                 without('retry_deadline', 'soon'),
                 'retry_deadline is not a date or null',
             ],
+            [
+                'a blocked_since that is not a date',
+                without('blocked_since', 'a while'),
+                'blocked_since is not a date or null',
+            ],
+            [
+                'a blocked_since as a number',
+                without('blocked_since', 1_759_564_800),
+                'blocked_since is not a date or null',
+            ],
+            [
+                'a blocked_reason that is not a string',
+                without('blocked_reason', { by: 'mesub' }),
+                'blocked_reason is not a string or null',
+            ],
             ['paused as a string', without('paused', 'no'), 'paused is not a boolean'],
             ['paused as null', without('paused', null), 'paused is not a boolean'],
             [
@@ -313,6 +330,56 @@ describe('access', () => {
             expect((error as MesubError).message).toBe(
                 `Mesub answered /v1/access with an answer this SDK cannot read: ${problem}.`,
             );
+        });
+
+        // Served since Mesub-io/backend#398: a back from before still answers.
+        it('reads missing blocked fields as null, in an answer and in a list', async () => {
+            const { blocked_since: _, blocked_reason: __, ...older } = answer();
+            const { fetch } = mockFetch(
+                json(200, older),
+                json(200, { plans: [older], revalidate_after: 60 }),
+            );
+            const mesub = client(fetch);
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toEqual(answer());
+            await expect(mesub.accessList(OTHER_WALLET)).resolves.toEqual({
+                plans: [answer()],
+                revalidate_after: 60,
+            });
+        });
+
+        it.each([
+            'mesub',
+            'puller_not_allowed',
+            'receiver_not_allowed',
+            'receiver_account_missing',
+            'mint_gone',
+            'not_known_yet',
+        ])('hands back an answer blocked by %s as served', async (blocked_reason) => {
+            const blocked = answer({
+                blocked_since: '2026-10-04T08:00:00.000Z',
+                blocked_reason: blocked_reason as never,
+            });
+            const { fetch } = mockFetch(json(200, blocked));
+
+            await expect(client(fetch).access(WALLET, 'pro')).resolves.toEqual(blocked);
+        });
+
+        // A guard reads `access` and nothing of the block: Mesub already ended it.
+        it.each([true, false])('decides a blocked answer by its access: %s', async (access) => {
+            const { fetch } = mockFetch(
+                json(
+                    200,
+                    answer({
+                        access,
+                        access_until: access ? '2099-01-01T00:00:00.000Z' : null,
+                        blocked_since: '2026-10-04T08:00:00.000Z',
+                        blocked_reason: 'puller_not_allowed',
+                    }),
+                ),
+            );
+
+            await expect(client(fetch).hasAccess(WALLET, 'pro')).resolves.toBe(access);
         });
 
         // Served since Mesub-io/backend#191: a back from before still answers.

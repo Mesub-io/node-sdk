@@ -48,6 +48,9 @@ const FIELDS: Record<
     end_reason: 'string|null',
     late_reason: 'string|null',
     payment_status: 'string',
+    // Read as null from a back that predates them (Mesub-io/backend#398).
+    blocked_since: 'string|null',
+    blocked_reason: 'string|null',
     subscribed_since: 'string|null',
     first_subscribed_at: 'string|null',
     current_period_end: 'string|null',
@@ -71,6 +74,9 @@ const SUBSCRIPTION_FIELDS: Record<
     late_reason: 'string|null',
     access: 'boolean',
     payment_status: 'string',
+    // Read as null from a back that predates them (Mesub-io/backend#398).
+    blocked_since: 'string|null',
+    blocked_reason: 'string|null',
     plan: 'string|null',
     wallet: 'string',
     email: 'string|null',
@@ -430,6 +436,17 @@ describe.skipIf(!env.url)('contract with the back', () => {
         it('answers subscription_not_found for the attempts of an id it never issued', async (context) => {
             const error = await mesub()
                 .subscriptions.attempts('never-issued')
+                .catch((caught: unknown) => caught);
+
+            expect(error).toBeInstanceOf(MesubError);
+            if ((error as MesubError).apiCode === null) return context.skip();
+            expect(error).toMatchObject({ apiCode: 'subscription_not_found', status: 404 });
+        });
+
+        // A fresh transaction (Mesub-io/backend#427): the route exists, and scopes by id.
+        it('answers subscription_not_found when asking a transaction for an id it never issued', async (context) => {
+            const error = await mesub()
+                .subscriptions.transaction('never-issued')
                 .catch((caught: unknown) => caught);
 
             expect(error).toBeInstanceOf(MesubError);

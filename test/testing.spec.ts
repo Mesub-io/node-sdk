@@ -441,6 +441,313 @@ describe('FakeMesub', () => {
         );
     });
 
+    describe('a fresh transaction', () => {
+        async function waiting(fake: FakeMesub, plan = 'pro') {
+            const mesub = fake.client();
+            const created = await mesub.subscriptions.create({
+                plan,
+                wallet: WALLET,
+                external_id: 'user_42',
+            });
+
+            return { mesub, created, id: created.subscription.id };
+        }
+
+        it('answers a pending subscription what create answered, with the same terms', async () => {
+            const fake = new FakeMesub();
+            const { mesub, created, id } = await waiting(fake);
+
+            const fresh = await mesub.subscriptions.transaction(id);
+
+            expect(fresh).toEqual({
+                ...created,
+                terms: { message: created.terms.message, expires_at: expect.any(String) },
+            });
+            expect(fresh.subscription).toEqual({ id, status: 'pending' });
+            // The same text: the terms signature a test holds is still good.
+            expect(fresh.terms.message).toBe(created.terms.message);
+            expect(fake.requests.at(-1)).toMatchObject({
+                method: 'POST',
+                path: `/v1/subscriptions/${id}/transaction`,
+                body: undefined,
+            });
+        });
+
+        it('reserves nothing: the same subscription, however often it is asked', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await waiting(fake);
+
+            await mesub.subscriptions.transaction(id);
+            await mesub.subscriptions.transaction(id);
+
+            const { data } = await mesub.subscriptions.list({ wallet: WALLET });
+            expect(data.map((each) => [each.id, each.status])).toEqual([[id, 'pending']]);
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        });
+
+        it('hands out a transaction the submit takes', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await waiting(fake);
+
+            const fresh = await mesub.subscriptions.transaction(id);
+            const { subscription } = await mesub.subscriptions.submit(id, {
+                transaction: fresh.transaction,
+                terms_signature: 'signed',
+            });
+
+            expect(subscription).toMatchObject({ id, status: 'active', access: true });
+        });
+
+        it.each([
+            ['active', {}],
+            ['cancelled', { status: 'cancelled' }],
+            ['unpaid', { status: 'unpaid', payment_status: 'late' }],
+            ['stopped', { status: 'stopped', access: false }],
+            ['ended', { status: 'ended', end_reason: 'closed', access: false }],
+            ['expired', { status: 'expired', access: false }],
+            ['failed', { status: 'failed', access: false }],
+            ['superseded', { status: 'superseded', access: false }],
+        ] as const)('refuses a %s one: it awaits no signature', async (_status, fields) => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro', ...fields });
+
+            const error = await fake
+                .client()
+                .subscriptions.transaction(id)
+                .catch((caught: unknown) => caught);
+
+            expect(error).toMatchObject({
+                status: 409,
+                code: 'conflict',
+                apiCode: 'not_awaiting_signature',
+                retryable: false,
+            });
+        });
+
+        it('refuses once it landed, and once another checkout expired it', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const his = await mesub.subscriptions.create({
+                plan: 'pro',
+                wallet: WALLET,
+                external_id: 'user_1',
+            });
+            const hers = await mesub.subscriptions.create({
+                plan: 'pro',
+                wallet: WALLET,
+                external_id: 'user_2',
+            });
+            await mesub.subscriptions.submit(his.subscription.id, {
+                transaction: his.transaction,
+                terms_signature: 'signed',
+            });
+
+            for (const { subscription } of [his, hers]) {
+                expect(await codeOf(mesub.subscriptions.transaction(subscription.id))).toBe(
+                    'not_awaiting_signature',
+                );
+            }
+        });
+
+        it('refuses a pending one beside a subscription that landed on that wallet', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await waiting(fake);
+            fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+
+            expect(await codeOf(mesub.subscriptions.transaction(id))).toBe('already_subscribed');
+            // Another plan, or another wallet, is no business of this checkout.
+            const other = await waiting(fake, 'team');
+            fake.addSubscription({ wallet: OTHER, plan: 'team' });
+            await expect(mesub.subscriptions.transaction(other.id)).resolves.toMatchObject({
+                subscription: { id: other.id },
+            });
+        });
+
+        it('refuses once the plan ended, and not before', async () => {
+            const soon = new Date(Date.now() + 3600 * 1000).toISOString();
+            const fake = new FakeMesub({ plans: [{ slug: 'pro', ends_at: soon }] });
+            const { mesub, id } = await waiting(fake);
+
+            await expect(mesub.subscriptions.transaction(id)).resolves.toBeDefined();
+            fake.endPlan('pro');
+            expect(await codeOf(mesub.subscriptions.transaction(id))).toBe('plan_ended');
+        });
+
+        it('answers subscription_not_found for an id it does not hold', async () => {
+            const fake = new FakeMesub();
+
+            const error = await fake
+                .client()
+                .subscriptions.transaction('sub_nope')
+                .catch((caught: unknown) => caught);
+
+            expect(error).toMatchObject({ status: 404, apiCode: 'subscription_not_found' });
+        });
+
+        it.each([
+            ['GET', 'transaction'],
+            ['POST', 'transaction/confirm'],
+        ])('knows no %s .../%s', async (method, step) => {
+            const fake = new FakeMesub();
+            const { id } = await waiting(fake);
+
+            const response = await fake.fetch(`${fake.baseUrl}/v1/subscriptions/${id}/${step}`, {
+                method,
+                headers: { authorization: `Bearer ${fake.apiKey}` },
+            });
+
+            expect(response.status).toBe(404);
+            await expect(response.json()).resolves.toMatchObject({ code: 'not_found' });
+        });
+
+        it('fails like any other call when told to', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await waiting(fake);
+
+            fake.fail({ status: 503, code: 'network_unavailable', retryAfter: 10 });
+            await expect(mesub.subscriptions.transaction(id)).rejects.toMatchObject({
+                status: 503,
+                apiCode: 'network_unavailable',
+                retryAfter: 10_000,
+            });
+            fake.fail(null);
+            await expect(mesub.subscriptions.transaction(id)).resolves.toBeDefined();
+        });
+    });
+
+    describe('blocked charges', () => {
+        const SINCE = '2026-10-04T08:00:00.000Z';
+        const REASONS = [
+            'mesub',
+            'puller_not_allowed',
+            'receiver_not_allowed',
+            'receiver_account_missing',
+            'mint_gone',
+        ] as const;
+
+        it('answers both fields null unless a test sets them', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro');
+            fake.deny(WALLET, 'team', { status: 'stopped' });
+            const added = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+
+            for (const plan of ['pro', 'team', 'never']) {
+                await expect(mesub.access(WALLET, plan)).resolves.toMatchObject({
+                    blocked_since: null,
+                    blocked_reason: null,
+                });
+            }
+            await expect(mesub.subscriptions.retrieve(added.id)).resolves.toMatchObject({
+                blocked_since: null,
+                blocked_reason: null,
+            });
+            const { plans } = await mesub.accessList(WALLET);
+            expect(plans.map((plan) => plan.blocked_reason)).toEqual([null, null]);
+        });
+
+        it.each(REASONS)('serves a block by %s as set, status unmoved', async (blocked_reason) => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const block = { blocked_since: SINCE, blocked_reason };
+            fake.grant(WALLET, 'pro', block);
+            fake.grant({ external_id: 'user_42' }, 'pro', block);
+            const added = fake.addSubscription({ wallet: WALLET, plan: 'pro', ...block });
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: true,
+                status: 'active',
+                payment_status: 'paid',
+                ...block,
+            });
+            await expect(mesub.access({ external_id: 'user_42' }, 'pro')).resolves.toMatchObject(
+                block,
+            );
+            await expect(mesub.accessList(WALLET)).resolves.toMatchObject({ plans: [block] });
+            await expect(mesub.subscriptions.retrieve(added.id)).resolves.toMatchObject(block);
+            await expect(mesub.subscriptions.list({ wallet: WALLET })).resolves.toMatchObject({
+                data: [block],
+            });
+        });
+
+        it('serves a blocked one whose access ended, and a guard refuses it', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.deny(WALLET, 'pro', {
+                status: 'active',
+                payment_status: 'paid',
+                blocked_since: SINCE,
+                blocked_reason: 'puller_not_allowed',
+            });
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: false,
+                status: 'active',
+                access_until: null,
+                blocked_reason: 'puller_not_allowed',
+            });
+        });
+
+        it('carries a block in a webhook, null by default', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const plain = await fake.webhook('subscription.renewed');
+            const blocked = await fake.webhook('subscription.renewal_upcoming', {
+                subscription: { blocked_since: SINCE, blocked_reason: 'mesub' },
+            });
+
+            await expect(mesub.webhooks.verify(plain.body, plain.headers)).resolves.toMatchObject({
+                data: { blocked_since: null, blocked_reason: null },
+            });
+            await expect(
+                mesub.webhooks.verify(blocked.body, blocked.headers),
+            ).resolves.toMatchObject({ data: { blocked_since: SINCE, blocked_reason: 'mesub' } });
+        });
+
+        it('lifts the block when the subscription is cancelled, closed or its plan ends', async () => {
+            const block = { blocked_since: SINCE, blocked_reason: 'mesub' } as const;
+            const lifted = { blocked_since: null, blocked_reason: null };
+            const signed = { signature: 'fake_signature' };
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const cancelled = fake.addSubscription({ wallet: WALLET, plan: 'pro', ...block });
+            const ended = fake.addSubscription({ wallet: OTHER, plan: 'team', ...block });
+            fake.grant(WALLET, 'pro', block);
+            fake.grant(OTHER, 'team', block);
+
+            await mesub.subscriptions.cancel(cancelled.id);
+            await expect(
+                mesub.subscriptions.confirmCancel(cancelled.id, signed),
+            ).resolves.toMatchObject({ subscription: { status: 'cancelled', ...lifted } });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject(lifted);
+
+            fake.endPlan('team');
+            await expect(mesub.subscriptions.retrieve(ended.id)).resolves.toMatchObject({
+                status: 'ended',
+                ...lifted,
+            });
+            await expect(mesub.access(OTHER, 'team')).resolves.toMatchObject({
+                status: 'ended',
+                ...lifted,
+            });
+        });
+
+        it('keeps the block through a hand retry, which lands nothing here', async () => {
+            const fake = new FakeMesub();
+            const block = { blocked_since: SINCE, blocked_reason: 'mint_gone' } as const;
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'unpaid',
+                payment_status: 'late',
+                ...block,
+            });
+
+            await expect(fake.client().subscriptions.retry(id)).resolves.toMatchObject(block);
+        });
+    });
+
     describe('a plan with an end', () => {
         const HOUR = 3600 * 1000;
         const soon = () => new Date(Date.now() + HOUR).toISOString();

@@ -57,6 +57,9 @@ const RETRY_DEADLINE: Field = { ...DATE_OR_NULL, absent: null };
 /** `paused` and `end_reason`, served since Mesub-io/backend#236: false and null before it. */
 const PAUSED: Field = { ...BOOLEAN, absent: false };
 const END_REASON: Field = { ...STRING_OR_NULL, absent: null };
+/** `blocked_since` and `blocked_reason`, served since Mesub-io/backend#398: null before it. */
+const BLOCKED_SINCE: Field = { ...DATE_OR_NULL, absent: null };
+const BLOCKED_REASON: Field = { ...STRING_OR_NULL, absent: null };
 /**
  * `next_retry_number`, `retry_number` and `retries_allowed`, served since
  * Mesub-io/backend#289: null when a back predates them.
@@ -78,7 +81,7 @@ const SECONDS: Field = {
 /**
  * Every field of an `AccessAnswer` but `attempts`, which is checked apart: a
  * field added to the type and not here fails to compile. A status, an end
- * reason or an outcome is only checked to be a string, never against the
+ * or blocked reason or an outcome is only checked to be a string, never against the
  * list: one the back adds later must not turn every guard into an error.
  */
 const ANSWER = {
@@ -91,6 +94,8 @@ const ANSWER = {
     end_reason: END_REASON,
     late_reason: STRING_OR_NULL,
     payment_status: STRING,
+    blocked_since: BLOCKED_SINCE,
+    blocked_reason: BLOCKED_REASON,
     subscribed_since: DATE_OR_NULL,
     first_subscribed_at: DATE_OR_NULL,
     current_period_end: DATE_OR_NULL,
@@ -175,6 +180,8 @@ const SUBSCRIPTION = {
     late_reason: STRING_OR_NULL,
     access: BOOLEAN,
     payment_status: STRING,
+    blocked_since: BLOCKED_SINCE,
+    blocked_reason: BLOCKED_REASON,
     plan: STRING_OR_NULL,
     wallet: STRING,
     email: STRING_OR_NULL,
@@ -330,8 +337,11 @@ export function subscriptionAttemptListFrom(body: unknown): SubscriptionAttemptL
     return body as SubscriptionAttemptList;
 }
 
-/** What `create` answered: what the wallet signs, and the subscription's id. */
-export function subscribeTransactionFrom(body: unknown): SubscribeTransaction {
+/** What `create` or `transaction` answered: what the wallet signs, and the subscription's id. */
+export function subscribeTransactionFrom(
+    body: unknown,
+    route = 'POST /v1/subscriptions',
+): SubscribeTransaction {
     const problem =
         problemWith(body, SUBSCRIBE_TRANSACTION) ??
         problemWith(
@@ -348,7 +358,7 @@ export function subscribeTransactionFrom(body: unknown): SubscribeTransaction {
             'terms',
         );
 
-    if (problem !== null) throw unreadable(problem, body, 'POST /v1/subscriptions', 201);
+    if (problem !== null) throw unreadable(problem, body, route, 201);
 
     return body as SubscribeTransaction;
 }

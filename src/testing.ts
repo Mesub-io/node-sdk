@@ -1,8 +1,8 @@
 /**
  * `@mesub/node/testing`: a fake Mesub, for a merchant's own tests. It answers
  * what the SDK calls (`/v1/access`, `/v1/plans`, `/v1/subscriptions`, its
- * attempts and its cancel, resume and close) from what the test sets, through a `fetch` handed
- * to the client: no network, no backend, no test framework of its own.
+ * fresh transaction, its attempts and its cancel, resume and close) from
+ * what the test sets, through a `fetch` handed to the client: no network, no backend, no test framework of its own.
  *
  * ```ts
  * import { FakeMesub } from '@mesub/node/testing';
@@ -119,6 +119,8 @@ const NOTHING: Omit<AccessAnswer, 'wallet' | 'plan'> = {
     end_reason: null,
     late_reason: null,
     payment_status: 'none',
+    blocked_since: null,
+    blocked_reason: null,
     subscribed_since: null,
     first_subscribed_at: null,
     current_period_end: null,
@@ -399,6 +401,8 @@ export class FakeMesub {
             late_reason: null,
             access: true,
             payment_status: 'paid',
+            blocked_since: null,
+            blocked_reason: null,
             email: null,
             external_id: null,
             current_period_start: now,
@@ -426,12 +430,18 @@ export class FakeMesub {
         );
     }
 
+    /** Whether that plan is past its end, where it takes nobody new. */
+    #over(slug: string | null): boolean {
+        const end = this.#endOf(slug);
+
+        return end !== null && Date.parse(end) <= Date.now();
+    }
+
     /** A plan as served: with its end, and taking nobody new once past it. */
     #served(plan: Plan): Plan {
         const ends_at = this.#endOf(plan.slug);
-        const over = ends_at !== null && Date.parse(ends_at) <= Date.now();
 
-        return { ...plan, ends_at, available: plan.available && !over };
+        return { ...plan, ends_at, available: plan.available && !this.#over(plan.slug) };
     }
 
     #nextId(): string {
@@ -488,7 +498,7 @@ export class FakeMesub {
         if (method === 'POST' && path === '/v1/subscriptions') return this.#create(body);
 
         const [, id, step, confirm] =
-            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|cancel|resume|close|attempts|retry)(\/confirm)?)?$/.exec(
+            /^\/v1\/subscriptions\/([^/]+)(?:\/(submit|transaction|cancel|resume|close|attempts|retry)(\/confirm)?)?$/.exec(
                 path,
             ) ?? [];
         // A Mesub without the route knows no such path, whatever the id.
@@ -510,6 +520,12 @@ export class FakeMesub {
             }
             if (method === 'POST' && step === 'submit' && !confirm) {
                 return this.#submit(subscription);
+            }
+            // A fresh transaction (Mesub-io/backend#427): for a pending one only.
+            if (step === 'transaction') {
+                return method === 'POST' && !confirm
+                    ? this.#transaction(subscription)
+                    : error(404, 'not_found', `Cannot ${method} ${path}`);
             }
             // Pay now (Mesub-io/backend#354): taken for a late one, nothing pulled here.
             if (step === 'retry') {
@@ -628,10 +644,7 @@ export class FakeMesub {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
 
-        const planEnd = this.#endOf(plan);
-        if (planEnd !== null && Date.parse(planEnd) <= Date.now()) {
-            return error(409, 'plan_ended', 'This plan has ended.');
-        }
+        if (this.#over(plan)) return error(409, 'plan_ended', 'This plan has ended.');
 
         const contact = {
             email: typeof email === 'string' ? email.trim().toLowerCase() : null,
@@ -661,23 +674,32 @@ export class FakeMesub {
                 current_period_start: null,
                 confirmed_at: null,
             });
-        const zero = '0';
-        const answer: SubscribeTransaction = {
-            subscription: { id: subscription.id, status: 'pending' },
-            transaction: btoa('fake transaction'),
-            last_valid_block_height: zero,
-            costs: {
-                rent: { subscription: zero, authority: null, total: zero },
-                fee: { signatures: 2, per_signature: zero, priority: zero, total: zero },
-                total: zero,
-            },
-            terms: {
-                message: `Fake Mesub terms: ${wallet} subscribes to ${plan}.`,
-                expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-            },
-        };
 
-        return Response.json(answer, { status: 201 });
+        return Response.json(handedOut(subscription), { status: 201 });
+    }
+
+    /**
+     * A fresh transaction for a subscription still pending, with the same
+     * terms message as `create` gave it: a signature held stays good. Refused
+     * as Mesub refuses it otherwise.
+     */
+    #transaction(subscription: ServerSubscription): Response {
+        if (subscription.status !== 'pending') {
+            return error(409, 'not_awaiting_signature', 'That subscription awaits no signature.');
+        }
+        if (this.#over(subscription.plan)) return error(409, 'plan_ended', 'This plan has ended.');
+
+        const landed = this.#subscriptions.some(
+            (s) =>
+                s.plan === subscription.plan &&
+                s.wallet === subscription.wallet &&
+                RUNNING.includes(s.status),
+        );
+        if (landed) {
+            return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
+        }
+
+        return Response.json(handedOut(subscription), { status: 201 });
     }
 
     /**
@@ -769,6 +791,7 @@ export class FakeMesub {
             // Paid up, it keeps its access to the end of the period.
             Object.assign(subscription, {
                 status: 'cancelled',
+                ...NO_BLOCK,
                 next_charge_at: null,
                 next_retry_at: null,
                 retry_deadline: null,
@@ -778,6 +801,7 @@ export class FakeMesub {
             } satisfies Partial<ServerSubscription>);
             this.#answer(subscription, {
                 status: 'cancelled',
+                ...NO_BLOCK,
                 cancelled_at: now,
                 next_charge_at: null,
                 next_retry_at: null,
@@ -797,6 +821,7 @@ export class FakeMesub {
             Object.assign(subscription, {
                 status: 'ended',
                 end_reason: 'closed',
+                ...NO_BLOCK,
                 access: false,
                 payment_status: 'none',
                 access_until: null,
@@ -810,6 +835,7 @@ export class FakeMesub {
                 access: false,
                 status: 'ended',
                 end_reason: 'closed',
+                ...NO_BLOCK,
                 payment_status: 'none',
                 access_until: null,
                 next_charge_at: null,
@@ -872,6 +898,29 @@ function bounded<T extends Dated>(row: T, end: string | null): T {
     };
 }
 
+/** What `create` and `transaction` hand out for a pending subscription: nothing a chain would take. */
+function handedOut(subscription: ServerSubscription): SubscribeTransaction {
+    const zero = '0';
+
+    return {
+        subscription: { id: subscription.id, status: 'pending' },
+        transaction: btoa('fake transaction'),
+        last_valid_block_height: zero,
+        costs: {
+            rent: { subscription: zero, authority: null, total: zero },
+            fee: { signatures: 2, per_signature: zero, priority: zero, total: zero },
+            total: zero,
+        },
+        terms: {
+            message: `Fake Mesub terms: ${subscription.wallet} subscribes to ${subscription.plan}.`,
+            expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        },
+    };
+}
+
+/** A block is only ever on a running row: gone once it is cancelled or over. */
+const NO_BLOCK = { blocked_since: null, blocked_reason: null } as const;
+
 /** What only a subscription carries of a retry, gone with the retry. */
 const NO_RETRY = { next_retry_number: null, retries_allowed: null } as const;
 
@@ -886,6 +935,7 @@ function endedBy(row: {
         status: 'ended',
         end_reason: running ? 'plan_ended' : 'cancelled',
         late_reason: null,
+        ...NO_BLOCK,
         paused: false,
         access: false,
         payment_status: 'none',

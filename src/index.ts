@@ -11,6 +11,7 @@ export type {
     AccessAnswer,
     AccessList,
     AccessOptions,
+    BlockedReason,
     Customer,
     EndReason,
     LateReason,

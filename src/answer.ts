@@ -46,6 +46,20 @@ export type EndReason =
 export type LateReason = 'insufficient_balance' | 'approval_revoked' | 'authority_closed';
 
 /**
+ * Why every charge of a subscription is blocked, none of it the subscriber's
+ * doing (Mesub-io/backend#398). The merchant's own setup, theirs to fix, by
+ * name: Mesub's puller taken off the plan on chain, a receiving wallet that
+ * is not in the plan's destinations or has no token account for the plan's
+ * token, a token that no longer exists. `mesub` for every cause of Mesub's.
+ */
+export type BlockedReason =
+    | 'puller_not_allowed'
+    | 'receiver_not_allowed'
+    | 'receiver_account_missing'
+    | 'mint_gone'
+    | 'mesub';
+
+/**
  * `blocked` is a pull nothing was tried for, none of it the subscriber's
  * doing (Mesub's fee payer, the network): it never counts against them.
  */
@@ -90,6 +104,17 @@ export interface AccessAnswer {
     late_reason: LateReason | null;
     /** `none` on a paused seat: nothing is billed, so nothing is late. */
     payment_status: PaymentStatus;
+    /**
+     * Since when every charge is blocked for a reason that is not the
+     * subscriber's (Mesub-io/backend#398), and whose cause it is; both null
+     * unless blocked. `status` and `payment_status` do not move for it, and
+     * Mesub keeps trying. `access` does: it ends at `access_until`, the end
+     * of the period after the one paid for, or sooner under a cause of the
+     * merchant's setup, and comes back with the first charge that goes
+     * through, nothing to sign. Read as null from a back that predates them.
+     */
+    blocked_since: string | null;
+    blocked_reason: BlockedReason | null;
     subscribed_since: string | null;
     first_subscribed_at: string | null;
     current_period_end: string | null;
@@ -97,7 +122,8 @@ export interface AccessAnswer {
     /**
      * When access ends unless a pull renews it; null while `access` is false.
      * Never later than the plan's end, where access stops for everyone, the
-     * last period being charged in full all the same.
+     * last period being charged in full all the same. On a blocked one
+     * (`blocked_since`), when access ends if nothing is collected by then.
      */
     access_until: string | null;
     /**

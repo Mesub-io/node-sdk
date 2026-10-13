@@ -12,7 +12,7 @@
  * does not always serve: it is shown when every placeholder in it has a
  * value, and left out otherwise, so the sentence stays true without it.
  */
-import type { AccessAnswer, EndReason, LateReason } from './answer.js';
+import type { AccessAnswer, BlockedReason, EndReason, LateReason } from './answer.js';
 import type { ServerSubscription } from './subscriptions.js';
 
 /** Who acts. */
@@ -117,6 +117,13 @@ const UPGRADE = {
     dashboard: true,
 } as const;
 const CANCEL_PAID = { ...CANCEL, confirm: 'confirm_cancel_paid' } as const;
+
+/** A block of the merchant's setup, as the subscriber reads it: one sentence for the four. */
+const BLOCKED_BY_SETUP =
+    'Mesub cannot take your payments for {plan_name} for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying.[ You keep access until {access_until} if no payment goes through by then.] Access comes back on its own with the first payment that goes through.';
+/** How a merchant's sentence on a block ends, whatever the cause. */
+const BLOCKED_ACCESS =
+    '[ Access ends on {access_until} if nothing is collected by then.] Access comes back with the first payment that goes through, with nothing for the subscriber to sign.';
 const CANCEL_BEHIND = { ...CANCEL, confirm: 'confirm_cancel_behind' } as const;
 
 /**
@@ -208,6 +215,36 @@ export const SITUATIONS = {
         merchant:
             "Payment late: the network refused the payment for a reason Mesub does not name (for example a frozen {token} account). See the last attempt's reason.",
         actions: [PAY_NOW, CANCEL_BEHIND, RETRY],
+    },
+
+    // Blocked: every charge fails for a reason that is not the subscriber's
+    // (Mesub-io/backend#398). The status does not move, access has an end.
+    // Worded here from the API's own comments, after the table of 2026-10-05.
+    blocked_mesub: {
+        subscriber:
+            "Mesub cannot take your payments for {plan_name} for now, because of a problem on Mesub's side: there is nothing for you to do or sign, and Mesub keeps trying.[ You keep access until {access_until} if no payment goes through by then.] Access comes back on its own with the first payment that goes through.",
+        merchant: `Payments blocked[ since {blocked_since}] by a problem on Mesub's side: nothing to fix on yours, and none of it is the subscriber's doing. Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_puller_not_allowed: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: Mesub's puller was taken off the plan on chain, so Mesub can take no payment for it. Add Mesub back to the plan's pullers, with the wallet that owns the plan; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_receiver_not_allowed: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the wallet that receives its payments is not among the plan's destinations on chain. Choose one that is; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_receiver_account_missing: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the wallet that receives its payments has no token account for the plan's token, and nobody else on the plan can be paid. Open that account; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_mint_gone: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
     },
 
     // Cancelled
@@ -454,6 +491,14 @@ const LATE_REASONS: Record<Exclude<LateReason, 'insufficient_balance'>, keyof ty
     authority_closed: 'unpaid_authority_closed',
 };
 
+const BLOCKED_REASONS: Record<BlockedReason, keyof typeof SITUATIONS> = {
+    mesub: 'blocked_mesub',
+    puller_not_allowed: 'blocked_puller_not_allowed',
+    receiver_not_allowed: 'blocked_receiver_not_allowed',
+    receiver_account_missing: 'blocked_receiver_account_missing',
+    mint_gone: 'blocked_mint_gone',
+};
+
 /** A key that is its status, whatever else the answer says. */
 const BY_STATUS = new Set(['none', 'pending', 'expired', 'failed', 'superseded']);
 
@@ -469,8 +514,8 @@ function isBilled(input: Explainable): boolean {
 
 /**
  * Which situation an answer is in, in the canonical order: status first,
- * then paused, then the end or late reason. Never throws: a status or a
- * reason this release does not know is `unknown`.
+ * then paused, then blocked, then the end or late reason. Never throws: a
+ * status or a reason this release does not know is `unknown`.
  *
  * A plan's end is read from what it leaves on the answer, which carries no
  * `ends_at`: access with no charge or retry ahead is the last period, and a
@@ -486,6 +531,15 @@ export function situationOf(input: Explainable): SituationKey {
     if (paused && (status === 'active' || status === 'unpaid' || status === 'cancelled')) {
         if (status === 'cancelled') return 'paused_cancelled';
         return input.access ? 'paused' : 'paused_access_over';
+    }
+
+    // Before the plan's end is read off a running row without access: a
+    // blocked one loses its access too, and has not ended.
+    const blocked: string | null = input.blocked_reason ?? null;
+    if (blocked !== null && (status === 'active' || status === 'unpaid')) {
+        return Object.hasOwn(BLOCKED_REASONS, blocked)
+            ? BLOCKED_REASONS[blocked as BlockedReason]
+            : 'unknown';
     }
 
     switch (status) {
@@ -607,6 +661,7 @@ function valuesOf(input: Explainable, options: ExplainOptions): Record<string, s
         next_charge_at: asDate(input.next_charge_at),
         next_retry_at: asDate(input.next_retry_at),
         retry_deadline: asDate(input.retry_deadline),
+        blocked_since: asDate(input.blocked_since),
         // `/v1/access` only.
         cancelled_at: asDate('cancelled_at' in input ? input.cancelled_at : null),
         // On a subscription only.

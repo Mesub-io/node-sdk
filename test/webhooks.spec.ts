@@ -42,6 +42,8 @@ const SUBSCRIPTION = {
     late_reason: null,
     access: true,
     payment_status: 'paid',
+    blocked_since: null,
+    blocked_reason: null,
     plan: 'pro',
     wallet: '11111111111111111111111111111111',
     email: 'subscriber@example.com',
@@ -138,6 +140,17 @@ describe('verifyWebhook', () => {
     // `data` is a subscription: `paused` and `end_reason` are read like retrieve's.
     it('reads a body from a back that predates paused and end_reason', async () => {
         const { paused: _, end_reason: __, ...older } = SUBSCRIPTION;
+        const raw = body('subscription.cancelled', {}, older as typeof SUBSCRIPTION);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
+    });
+
+    it('reads a body from a back that predates the blocked fields', async () => {
+        const { blocked_since: _, blocked_reason: __, ...older } = SUBSCRIPTION;
         const raw = body('subscription.cancelled', {}, older as typeof SUBSCRIPTION);
 
         const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {

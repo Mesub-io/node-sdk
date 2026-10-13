@@ -26,6 +26,8 @@ function subscription(overrides: Partial<ServerSubscription> = {}): ServerSubscr
         late_reason: null,
         access: true,
         payment_status: 'paid',
+        blocked_since: null,
+        blocked_reason: null,
         plan: 'pro',
         wallet: WALLET,
         email: 'a@b.co',
@@ -226,6 +228,176 @@ describe('subscriptions.create', () => {
             message: `Mesub answered POST /v1/subscriptions with an answer this SDK cannot read: ${problem}.`,
         });
         expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+// A fresh transaction by id (Mesub-io/backend#427): what follows `transaction_expired`.
+describe('subscriptions.transaction', () => {
+    const answer = {
+        subscription: { id: 'sub_1', status: 'pending' },
+        transaction: 'AgAAAA==',
+        last_valid_block_height: '312345900',
+        costs: {
+            rent: { subscription: '2039280', authority: null, total: '2039280' },
+            fee: { signatures: 2, per_signature: '5000', priority: '0', total: '10000' },
+            total: '2049280',
+        },
+        terms: { message: 'Mesub: the terms...', expires_at: '2026-10-02T12:05:00.000Z' },
+    };
+
+    it('posts to the subscription with no body, and answers what to sign', async () => {
+        const { fetch, calls } = mockFetch(json(201, answer));
+
+        await expect(mesub(fetch).subscriptions.transaction('sub_1')).resolves.toEqual(answer);
+        expect(calls[0]!.init.method).toBe('POST');
+        expect(calls[0]!.url.href).toBe('https://api.test/v1/subscriptions/sub_1/transaction');
+        expect(calls[0]!.init.body).toBeUndefined();
+    });
+
+    it('encodes the id into the path', async () => {
+        const { fetch, calls } = mockFetch(json(201, answer));
+
+        await mesub(fetch).subscriptions.transaction('sub/1?x');
+
+        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/sub%2F1%3Fx/transaction');
+    });
+
+    it.each(['', undefined, 7])('asks nothing of Mesub for the id %j', async (id) => {
+        const { fetch } = mockFetch();
+
+        await expect(mesub(fetch).subscriptions.transaction(id as string)).rejects.toMatchObject({
+            code: 'invalid_request',
+            status: null,
+        });
+        expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('hands back the terms as served, so a held signature can be compared to them', async () => {
+        const renewed = { ...answer, terms: { ...answer.terms, message: 'Mesub: new terms...' } };
+        const { fetch } = mockFetch(json(201, answer), json(201, renewed));
+        const client = mesub(fetch);
+
+        const first = await client.subscriptions.transaction('sub_1');
+        const second = await client.subscriptions.transaction('sub_1');
+
+        expect(first.terms.message).toBe(answer.terms.message);
+        expect(second.terms.message).not.toBe(first.terms.message);
+    });
+
+    it.each([
+        [404, 'subscription_not_found', 'not_found'],
+        [409, 'not_awaiting_signature', 'conflict'],
+        [409, 'plan_sunset', 'conflict'],
+        [409, 'plan_deleted', 'conflict'],
+        [409, 'plan_rebuilt', 'conflict'],
+        [409, 'plan_ended', 'conflict'],
+        [409, 'insufficient_balance', 'conflict'],
+        [409, 'receiver_account_missing', 'conflict'],
+        [409, 'plan_mismatch', 'conflict'],
+        [409, 'already_subscribed', 'conflict'],
+        [409, 'subscription_cancelled', 'conflict'],
+        [409, 'payment_pending', 'conflict'],
+        [409, 'subscription_stopped', 'conflict'],
+        [409, 'subscription_terms_changed', 'conflict'],
+        [409, 'comeback_in_flight', 'conflict'],
+        [409, 'comeback_landed', 'conflict'],
+    ])('throws a %s %s as Mesub said it', async (status, apiCode, code) => {
+        const { fetch } = mockFetch(coded(status, apiCode, 'No.'));
+
+        const { error } = await settle(mesub(fetch).subscriptions.transaction('sub_1'));
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).toMatchObject({ status, code, apiCode, retryable: false });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    // Sent once like `create`: the caller decides when the wallet is ready for another.
+    it.each([
+        [409, 'comeback_period_rolling', { 'retry-after': '90' }, 90_000],
+        [429, 'rate_limited', { 'retry-after': '12' }, 12_000],
+        [503, 'network_unavailable', { 'retry-after': '10' }, 10_000],
+        [503, 'unavailable', {}, null],
+    ])('never sends again after a retryable %s %s', async (status, apiCode, headers, wait) => {
+        const { fetch } = mockFetch(
+            coded(status, apiCode, 'Later.', true, headers),
+            json(201, answer),
+        );
+
+        const { error } = await settle(mesub(fetch).subscriptions.transaction('sub_1'));
+
+        expect(error).toMatchObject({ status, apiCode, retryable: true, retryAfter: wait });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('never sends again after a network error', async () => {
+        const { fetch } = mockFetch(new TypeError('fetch failed'), json(201, answer));
+
+        const { error } = await settle(mesub(fetch).subscriptions.transaction('sub_1'));
+
+        expect(error).toMatchObject({ status: null });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes the signal on, and rejects with its reason', async () => {
+        const { fetch } = mockFetch('hang');
+        const controller = new AbortController();
+        const reason = new Error('the visitor left');
+
+        const pending = settle(
+            mesub(fetch).subscriptions.transaction('sub_1', { signal: controller.signal }),
+        );
+        controller.abort(reason);
+
+        expect((await pending).error).toBe(reason);
+    });
+
+    it.each([
+        ['no transaction', { ...answer, transaction: undefined }, 'transaction is missing'],
+        ['no terms', { ...answer, terms: undefined }, 'terms is missing'],
+        [
+            'terms without a message',
+            { ...answer, terms: { expires_at: answer.terms.expires_at } },
+            'terms.message is missing',
+        ],
+        [
+            'terms that expire on no date',
+            { ...answer, terms: { ...answer.terms, expires_at: 'soon' } },
+            'terms.expires_at is not a date',
+        ],
+        [
+            'a block height as a number',
+            { ...answer, last_valid_block_height: 312345900 },
+            'last_valid_block_height is not a string',
+        ],
+        ['no costs', { ...answer, costs: undefined }, 'costs is missing'],
+        ['a subscription alone', subscription(), 'subscription is missing'],
+    ])(
+        'throws unexpected on an answer with %s, naming its route',
+        async (_label, body, problem) => {
+            const { fetch } = mockFetch(json(201, body));
+
+            await expect(mesub(fetch).subscriptions.transaction('sub_1')).rejects.toMatchObject({
+                status: 201,
+                code: 'unexpected',
+                message: `Mesub answered POST /v1/subscriptions/:id/transaction with an answer this SDK cannot read: ${problem}.`,
+            });
+            expect(fetch).toHaveBeenCalledTimes(1);
+        },
+    );
+
+    it('leaves the access cache alone: nothing landed', async () => {
+        const store = new MemoryStore<AccessAnswer | AccessList>();
+        const drop = vi.spyOn(store, 'delete');
+        const { fetch } = mockFetch(json(201, answer));
+
+        await new Mesub({
+            apiKey: 'sk_test',
+            baseUrl: 'https://api.test',
+            fetch,
+            cache: store,
+        }).subscriptions.transaction('sub_1');
+
+        expect(drop).not.toHaveBeenCalled();
     });
 });
 
@@ -1205,6 +1377,39 @@ describe('subscriptions.retrieve', () => {
         });
     });
 
+    // Served since Mesub-io/backend#398: a back from before still answers.
+    it('reads missing blocked fields as null, from a back that predates them', async () => {
+        const { blocked_since: _, blocked_reason: __, ...older } = subscription();
+        const { fetch } = mockFetch(
+            json(200, older),
+            json(200, { data: [older], has_more: false }),
+        );
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.retrieve('sub_1')).resolves.toEqual(subscription());
+        await expect(client.subscriptions.list({ wallet: WALLET })).resolves.toEqual({
+            data: [subscription()],
+            has_more: false,
+        });
+    });
+
+    it.each([
+        'mesub',
+        'puller_not_allowed',
+        'receiver_not_allowed',
+        'receiver_account_missing',
+        'mint_gone',
+        'not_known_yet',
+    ])('hands back a subscription blocked by %s, its status unmoved', async (blocked_reason) => {
+        const blocked = subscription({
+            blocked_since: '2026-10-04T08:00:00.000Z',
+            blocked_reason: blocked_reason as never,
+        });
+        const { fetch } = mockFetch(json(200, blocked));
+
+        await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(blocked);
+    });
+
     // Served since Mesub-io/backend#236: a back from before still answers.
     it('reads a missing paused as false and a missing end_reason as null', async () => {
         const { paused: _, end_reason: __, ...older } = subscription();
@@ -1362,6 +1567,16 @@ describe('subscriptions.retrieve', () => {
             'a fraction of a retry',
             subscription({ retries_allowed: 1.5 }),
             'retries_allowed is not a whole number or null',
+        ],
+        [
+            'a blocked_since that is not a date',
+            subscription({ blocked_since: 'a while' }),
+            'blocked_since is not a date or null',
+        ],
+        [
+            'a blocked_reason that is not a string',
+            subscription({ blocked_reason: true as never }),
+            'blocked_reason is not a string or null',
         ],
         ['access as a string', subscription({ access: 'yes' as never }), 'access is not a boolean'],
         ['paused as a string', subscription({ paused: 'no' as never }), 'paused is not a boolean'],
@@ -1751,6 +1966,8 @@ describe('the access cache once a subscription lands', () => {
             end_reason: null,
             late_reason: null,
             payment_status: 'none',
+            blocked_since: null,
+            blocked_reason: null,
             subscribed_since: null,
             first_subscribed_at: null,
             current_period_end: null,
