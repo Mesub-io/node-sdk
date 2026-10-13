@@ -121,6 +121,14 @@ pull is left to run. For a few minutes past the end, `status` can still read
 `active` or `unpaid` with `access: false`, until Mesub ends the subscription
 (`ended`, `end_reason: 'plan_ended'`).
 
+A charge can also fail for a reason that is not your customer's. The answer
+then carries `blocked_since` and `blocked_reason`, both null otherwise:
+`mesub` for a cause on Mesub's side, or your plan's own setup by name,
+`puller_not_allowed`, `receiver_not_allowed`, `receiver_account_missing` or
+`mint_gone`. `status` and `payment_status` do not move for it and Mesub keeps
+trying; `access` ends at `access_until` if nothing is collected by then, and
+comes back with the first charge that goes through, nothing to sign.
+
 Everything else, the answer's fields, the errors, who to ask about:
 [Check access](https://docs.mesub.io/docs/access). What each status means:
 [Lifecycle](https://docs.mesub.io/docs/lifecycle).
@@ -181,6 +189,20 @@ lower for a serverless function. When no answer says what became of it, it
 throws a `MesubSubmitError`: read the subscription back with `retrieve` before
 creating a new one, since the wallet may have paid.
 
+A transaction lives about half a minute, the terms five. Have the terms
+signed first, then ask for the transaction when the wallet is ready, and
+after a submit refused with `transaction_expired`:
+
+```ts
+const fresh = await mesub.subscriptions.transaction(subscription.id);
+// fresh.terms.message is the text the wallet signed: its signature is still good.
+// Another text is new terms: have the wallet sign them too.
+```
+
+It answers what `create` answers for the same subscription, reserves nothing,
+and is refused with `not_awaiting_signature` once the subscription is signed
+or expired. Always sign the transaction of the last call.
+
 The signing code, what `create` answers, the refusals:
 [Subscribe from your server](https://docs.mesub.io/docs/subscribe).
 
@@ -238,7 +260,10 @@ const { key, subscriber, access, actions } = explain(answer, {
 stays as `{amount}` and is listed in `missing`. Dates are written as Mesub
 serves them, in ISO 8601, unless you pass `formatDate`. A status or a reason
 newer than this release gives `key: 'unknown'` and the access line, never an
-error. `@mesub/node/situations` imports nothing of Node, so your pages can use
+error. A blocked subscription has its own keys, `blocked_mesub` and one per
+cause of your setup (`blocked_puller_not_allowed`, ...): the subscriber reads
+that nothing is theirs to do, you read what to fix.
+`@mesub/node/situations` imports nothing of Node, so your pages can use
 it too; `SITUATIONS` is the whole table.
 
 ## Routes for the React widget
@@ -284,6 +309,7 @@ API key, nor the email and the id you gave Mesub.
 | `GET /subscriptions`                                         | The customer's subscriptions, 500 at most.  |
 | `GET /subscriptions/:id`                                     | One of them, with its payments.             |
 | `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
+| `POST /subscriptions/:id/transaction`                        | A fresh transaction for it, and its terms.  |
 | `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
@@ -373,8 +399,8 @@ It also carries `apiCode`, Mesub's own finer code (`already_subscribed`,
 parsed `body`. New codes are added: keep a default branch. Every code:
 [Errors](https://docs.mesub.io/reference/errors).
 
-Reads time out after 5 s and are retried twice. `create` and the six manage
-calls are sent once and never retried.
+Reads time out after 5 s and are retried twice. `create`, `transaction` and
+the six manage calls are sent once and never retried.
 
 ## Test your integration
 
@@ -392,6 +418,11 @@ await mesub.hasAccess({ external_id: 'user_42' }, 'pro'); // true
 
 fake.grantLastPeriod({ external_id: 'user_7' }, 'pro', endsAt); // access until the plan ends
 fake.endPlan('pro'); // the end passed: what is held on it ends with plan_ended
+
+fake.grant({ external_id: 'user_9' }, 'pro', {
+    blocked_since: new Date().toISOString(), // charges blocked, access still on
+    blocked_reason: 'puller_not_allowed',
+});
 
 fake.fail('outage'); // every call answers 503, until fail(null)
 const { body, headers } = await fake.webhook('subscription.renewed'); // signed

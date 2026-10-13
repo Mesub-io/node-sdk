@@ -35,6 +35,14 @@ The first version published to npm. Requires Node 22 or later.
   past the end `status` can still read `active` or `unpaid` with
   `access: false`: a guard reads `access`, never `status`. Nothing changes in
   what is accepted: these fields were nullable already (#124).
+- The answer carries `blocked_since` and `blocked_reason`, both null unless
+  every charge is blocked for a reason that is not the subscriber's
+  (Mesub-io/backend#398): `mesub`, or the plan's own setup by name,
+  `puller_not_allowed`, `receiver_not_allowed`, `receiver_account_missing`,
+  `mint_gone`. `status` and `payment_status` do not move for it; `access`
+  ends at `access_until`. A subscription carries both too, from `retrieve`,
+  `list`, `submit` and in a webhook's `data`. Read as null from a Mesub that
+  predates them; `BlockedReason` is exported (#128).
 - The answer carries `paused` (a seat parked over the project's cap: status
   unchanged, nothing charged, access to the end of the paid period) and
   `end_reason`, why an `ended` one ended: `cancelled`, `plan_removed`,
@@ -121,6 +129,13 @@ The first version published to npm. Requires Node 22 or later.
 
 - `subscriptions.create`, `submit`, `retrieve`, `list` and `listAll`, over
   `/v1/subscriptions` (#61).
+- `subscriptions.transaction(id)` answers a fresh transaction for a
+  subscription still `pending`, with the terms it names, over
+  `POST /v1/subscriptions/:id/transaction` (Mesub-io/backend#427): what to
+  call when the wallet is ready to sign, and after a submit refused with
+  `transaction_expired`, rather than `create` again. The terms signature held
+  stays good while `terms.message` is the text the wallet signed. Sent once,
+  never retried (#128).
 - `subscriptions.attempts(id, { limit, starting_after })` answers a
   subscription's own pull attempts, newest first, each with its `id`, `retry`,
   `retry_number`, `retries_allowed` and `period_start`, and `paid`, how many
@@ -168,6 +183,13 @@ The first version published to npm. Requires Node 22 or later.
   the end, `active` or `unpaid` without access reads `ended_plan_ended`, and
   a paid up cancellation cut short reads `cancelled_ended`, not
   `cancelled_no_access` (#124).
+- Five situations for a subscription whose charges are blocked, read before
+  the end or late reason on an `active` or `unpaid` one: `blocked_mesub`, and
+  `blocked_puller_not_allowed`, `blocked_receiver_not_allowed`,
+  `blocked_receiver_account_missing` and `blocked_mint_gone` for the plan's
+  setup. The subscriber reads that nothing is theirs to do, the merchant
+  what to fix, and both when access ends. A blocked one whose access ended
+  no longer reads `ended_plan_ended` (#128).
 
 ### Routes for the React widget
 
@@ -197,6 +219,9 @@ The first version published to npm. Requires Node 22 or later.
   without a call. A change to a plan shows within a minute. A failed read is
   not kept, and `plans.list` and `plans.retrieve` stay uncached (#98).
 
+- `POST /subscriptions/:id/transaction` answers a fresh transaction for the
+  signed-in customer's pending subscription, 201 and the body
+  `POST /subscriptions` answers; any other customer's is a 404 (#128).
 - `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
   5 pages at most, so one browser request is never more than 5 calls to
   Mesub. It answers `has_more` beside `subscriptions`: true when the customer
@@ -263,6 +288,11 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   customer (`external_id`, else `email`) answers the same subscription,
   another customer gets its own, and once one lands the others on that
   wallet expire and a new `create` is refused `already_subscribed` (#100).
+- `FakeMesub` answers `subscriptions.transaction` for a pending
+  subscription, with the terms `create` gave it, and refuses any other
+  (`not_awaiting_signature`, `plan_ended`, `already_subscribed`). Its access
+  answers, subscriptions and webhooks carry `blocked_since` and
+  `blocked_reason`, null unless a test sets them (#128).
 
 ### Errors
 

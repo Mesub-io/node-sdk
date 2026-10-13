@@ -424,6 +424,8 @@ const SUBSCRIPTION = {
     late_reason: null,
     access: true,
     payment_status: 'paid',
+    blocked_since: null,
+    blocked_reason: null,
     plan: 'pro',
     wallet: WALLET,
     email: null,

@@ -28,6 +28,8 @@ function subscription(over: Partial<ServerSubscription> = {}): ServerSubscriptio
         late_reason: null,
         access: true,
         payment_status: 'paid',
+        blocked_since: null,
+        blocked_reason: null,
         plan: 'pro',
         wallet: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
         email: null,
@@ -56,6 +58,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         end_reason: null,
         late_reason: null,
         payment_status: 'paid',
+        blocked_since: null,
+        blocked_reason: null,
         subscribed_since: '2026-10-02T12:00:00.000Z',
         first_subscribed_at: '2026-10-02T12:00:00.000Z',
         current_period_end: UNTIL,
@@ -71,6 +75,19 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
 
 const LATE = { status: 'unpaid', payment_status: 'late', next_charge_at: null } as const;
 const OVER = { access: false, access_until: null, next_charge_at: null } as const;
+const SINCE = '2026-10-04T08:00:00.000Z';
+/** How every sentence on a block ends while the access still runs. */
+const BLOCKED_SUBSCRIBER = `You keep access until ${UNTIL} if no payment goes through by then. Access comes back on its own with the first payment that goes through.`;
+const BLOCKED_MERCHANT = `Access ends on ${UNTIL} if nothing is collected by then. Access comes back with the first payment that goes through, with nothing for the subscriber to sign.`;
+const BY_SETUP = `Mesub cannot take your payments for Pro for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying. ${BLOCKED_SUBSCRIBER}`;
+
+function blocked(reason: string, over: Partial<ServerSubscription> = {}): ServerSubscription {
+    return subscription({
+        blocked_since: SINCE,
+        blocked_reason: reason as ServerSubscription['blocked_reason'],
+        ...over,
+    });
+}
 
 interface Case {
     input: Explainable;
@@ -223,6 +240,36 @@ const CASES = {
             'Paused over your tier limit, and its paid period is over, so access is off. Moving back up a tier makes a payment due at once.',
         actions: ['subscriber:cancel', 'merchant:upgrade'],
     },
+    blocked_mesub: {
+        input: answer({ blocked_since: SINCE, blocked_reason: 'mesub' }),
+        subscriber: `Mesub cannot take your payments for Pro for now, because of a problem on Mesub's side: there is nothing for you to do or sign, and Mesub keeps trying. ${BLOCKED_SUBSCRIBER}`,
+        merchant: `Payments blocked since ${SINCE} by a problem on Mesub's side: nothing to fix on yours, and none of it is the subscriber's doing. Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_puller_not_allowed: {
+        input: blocked('puller_not_allowed'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: Mesub's puller was taken off the plan on chain, so Mesub can take no payment for it. Allow it on the plan again; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_receiver_not_allowed: {
+        input: blocked('receiver_not_allowed'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the wallet that receives its payments is not among the plan's destinations on chain. Receive them on one that is; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_receiver_account_missing: {
+        input: blocked('receiver_account_missing'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the wallet that receives its payments has no token account for the plan's token, and nobody else on the plan can be paid. Open that account; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_mint_gone: {
+        input: blocked('mint_gone'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the plan's token no longer exists on chain, so no payment can be taken while it does not. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
     paused_cancelled: {
         input: subscription({ status: 'cancelled', paused: true, next_charge_at: null }),
         subscriber: `Cancelled: nothing more will be taken, and you keep access until ${UNTIL}. You can resume before then, but it stays paused, with no payment, until Acme unpauses it.`,
@@ -320,6 +367,140 @@ describe('explain', () => {
         expect(explained.actions.map((a) => `${a.by}:${a.action}`)).toEqual(c.actions);
         expect(explained.missing).toEqual([]);
         expect(explained.subscriber + explained.merchant).not.toMatch(/[{}[\]]/);
+    });
+
+    describe('a blocked subscription', () => {
+        const REASONS = [
+            'mesub',
+            'puller_not_allowed',
+            'receiver_not_allowed',
+            'receiver_account_missing',
+            'mint_gone',
+        ] as const;
+
+        it.each(REASONS)('reads %s as blocked once its access ended, never as ended', (reason) => {
+            const over = blocked(reason, OVER);
+            const explained = explain(over, { names: NAMES, now: NOW });
+
+            expect(explained.key).toBe(`blocked_${reason}`);
+            expect(explained.access).toBe('No access');
+            expect(explained.subscriber).not.toContain('You keep access');
+            expect(explained.subscriber).toMatch(
+                /Mesub keeps trying\. Access comes back on its own with the first payment that goes through\.$/,
+            );
+            expect(explained.merchant).not.toContain('Access ends on');
+            expect(explained.merchant).toMatch(
+                /\. Access comes back with the first payment that goes through, with nothing for the subscriber to sign\.$/,
+            );
+            expect(explained.missing).toEqual([]);
+            expect(explained.subscriber + explained.merchant).not.toMatch(/[{}[\]]|  /);
+        });
+
+        it.each(REASONS)(
+            'reads %s on a late one as blocked, whatever its late reason',
+            (reason) => {
+                for (const late_reason of [
+                    'insufficient_balance',
+                    'approval_revoked',
+                    null,
+                ] as const) {
+                    const late = blocked(reason, { ...LATE, late_reason, next_retry_at: RETRY });
+
+                    expect(situationOf(late)).toBe(`blocked_${reason}`);
+                }
+                // On Free too, where a late one has no access.
+                const free = blocked(reason, { ...LATE, ...OVER, retry_deadline: DEADLINE });
+
+                expect(situationOf(free)).toBe(`blocked_${reason}`);
+            },
+        );
+
+        it('reads the same from an access answer and from a subscription', () => {
+            for (const reason of REASONS) {
+                const fields = { blocked_since: SINCE, blocked_reason: reason };
+
+                expect(explain(answer(fields), { names: NAMES })).toEqual(
+                    explain(subscription(fields), { names: NAMES }),
+                );
+            }
+        });
+
+        it('says the blame only where it lies', () => {
+            const ours = explain(blocked('mesub'), { names: NAMES });
+            const theirs = explain(blocked('puller_not_allowed'), { names: NAMES });
+
+            expect(ours.subscriber).toContain("a problem on Mesub's side");
+            expect(ours.merchant).toContain('nothing to fix on yours');
+            expect(ours.merchant).not.toContain('setup');
+            expect(theirs.subscriber).toContain('because of how the plan is set up');
+            expect(theirs.subscriber).not.toContain("Mesub's side");
+            expect(theirs.merchant).toContain("by your plan's setup");
+            for (const { subscriber } of [ours, theirs]) {
+                expect(subscriber).toContain('nothing for you to do or sign');
+            }
+        });
+
+        it('offers the subscriber a cancel and nothing else, with no promise attached', () => {
+            for (const reason of REASONS) {
+                expect(explain(blocked(reason), { names: NAMES, now: NOW }).actions).toEqual([
+                    {
+                        by: 'subscriber',
+                        action: 'cancel',
+                        sdk: 'subscriptions.cancel',
+                        route: 'POST /v1/subscriptions/:id/cancel',
+                    },
+                ]);
+            }
+        });
+
+        it('leaves the date out of the merchant sentence when none is served', () => {
+            const explained = explain(blocked('mesub', { blocked_since: null }), { names: NAMES });
+
+            expect(explained.merchant).toMatch(/^Payments blocked by a problem on Mesub's side:/);
+            expect(explained.missing).toEqual([]);
+        });
+
+        it('writes blocked_since with formatDate', () => {
+            const explained = explain(blocked('mint_gone'), {
+                names: NAMES,
+                formatDate: (iso) => iso.slice(0, 10),
+            });
+
+            expect(explained.merchant).toContain('Payments blocked since 2026-10-04 by');
+            expect(explained.merchant).toContain('Access ends on 2026-11-01 if');
+        });
+
+        it('reads a reason newer than this release as unknown, with the access line', () => {
+            const newer = blocked('fee_payer_asleep');
+
+            expect(situationOf(newer)).toBe('unknown');
+            expect(explain(newer).subscriber).toBe(`Access until ${UNTIL}`);
+            expect(explain(blocked('toString')).key).toBe('unknown');
+        });
+
+        it.each([
+            ['cancelled', { status: 'cancelled', next_charge_at: null }, 'cancelled_with_access'],
+            ['stopped', { status: 'stopped', ...OVER }, 'stopped'],
+            ['ended', { status: 'ended', end_reason: 'plan_ended', ...OVER }, 'ended_plan_ended'],
+            ['pending', { status: 'pending', ...OVER }, 'pending'],
+            ['paused', { paused: true, payment_status: 'none' }, 'paused'],
+        ] as const)('ignores a reason left on a %s one, which is never blocked', (_, over, key) => {
+            expect(situationOf(blocked('mesub', over))).toBe(key);
+        });
+
+        it('reads an answer without the fields, as an older SDK cached it, as not blocked', () => {
+            const { blocked_since: _since, blocked_reason: _reason, ...older } = subscription();
+
+            expect(situationOf(older as ServerSubscription)).toBe('active');
+            expect(situationOf({ ...older, ...OVER } as ServerSubscription)).toBe(
+                'ended_plan_ended',
+            );
+        });
+
+        it('still reads a running one without access and without a block as its plan ended', () => {
+            expect(situationOf(subscription(OVER))).toBe('ended_plan_ended');
+            expect(situationOf(subscription({ ...LATE, ...OVER }))).toBe('ended_plan_ended');
+        });
     });
 
     it('writes the access line beside every sentence', () => {

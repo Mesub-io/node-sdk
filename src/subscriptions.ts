@@ -1,4 +1,11 @@
-import type { Customer, EndReason, LateReason, PaymentStatus, PullOutcome } from './answer.js';
+import type {
+    BlockedReason,
+    Customer,
+    EndReason,
+    LateReason,
+    PaymentStatus,
+    PullOutcome,
+} from './answer.js';
 import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
 import { numberOf } from './options.js';
@@ -15,7 +22,7 @@ import {
 
 /**
  * Subscribing from your own server, with the API key (Mesub-io/backend#143):
- * `POST /v1/subscriptions`, its submit, the reads, and what stops one
+ * `POST /v1/subscriptions`, a fresh transaction, its submit, the reads, and what stops one
  * (Mesub-io/backend#276): cancel, resume and close. The types copy the
  * back's `server-subscriptions.service.ts`, which stays the source of truth.
  * Snake case, as the API serves it.
@@ -53,6 +60,14 @@ export interface ServerSubscription {
     access: boolean;
     /** `paid`, `late` or `none`, as `/v1/access` answers it. */
     payment_status: PaymentStatus;
+    /**
+     * Since when its charges are blocked for a reason that is not the
+     * subscriber's, and whose cause it is, as `/v1/access` answers them
+     * (Mesub-io/backend#398): both null unless blocked. Read as null from a
+     * back that predates them.
+     */
+    blocked_since: string | null;
+    blocked_reason: BlockedReason | null;
     /** The plan's slug. */
     plan: string | null;
     wallet: string;
@@ -100,7 +115,7 @@ export interface SubscribeCosts {
     total: string;
 }
 
-/** What `create` answers: what the wallet signs, terms first, then the transaction. */
+/** What `create` and `transaction` answer: what the wallet signs, terms first, then the transaction. */
 export interface SubscribeTransaction {
     subscription: { id: string; status: ServerSubscriptionStatus };
     /** Base64, signed by nobody: the wallet signs it with signTransaction, without sending it. */
@@ -345,7 +360,8 @@ export class Subscriptions {
      * it signs: `terms.message`, then `transaction`. Hand both to your front,
      * then their signatures to `submit`. Called again for the same plan,
      * wallet and customer (`external_id`, else `email`) while nothing landed,
-     * it answers the same subscription with a fresh transaction. Another
+     * it answers the same subscription with a fresh transaction; by its id,
+     * `transaction` does. Another
      * customer naming that wallet gets a subscription of its own
      * (Mesub-io/backend#311): only the one the wallet signs for lands, and
      * the others then expire. Sent once, never retried.
@@ -388,7 +404,9 @@ export class Subscriptions {
      * as that `conflict`.
      *
      * Any other refusal (`terms_expired`, `transaction_expired`, ...) is
-     * thrown as is.
+     * thrown as is. After `transaction_expired` nothing was sent and the same
+     * submit cannot land: call `transaction(id)` for a new one, never
+     * `create` again.
      * An abort through `options.signal` stops everything, sends, waits and
      * the read back, and rejects with the signal's reason; a send already out
      * may have been co-signed, so read the subscription back.
@@ -407,6 +425,34 @@ export class Subscriptions {
 
         await this.#seen(result.subscription);
         return result;
+    }
+
+    /**
+     * A fresh transaction for a subscription still `pending`, with the terms
+     * it names (Mesub-io/backend#427). A transaction lives about half a
+     * minute, the terms five: have the terms signed first, call this when the
+     * wallet is ready, have it sign the transaction at once, then `submit`.
+     * Always sign the transaction of the last call. It is also what follows
+     * a submit refused with `transaction_expired`.
+     *
+     * A terms signature you hold is still good when `terms.message` is, to
+     * the letter, the message the wallet signed. Another text is new terms:
+     * have the wallet sign it, the old signature is refused
+     * (`invalid_terms_signature`).
+     *
+     * Reserves nothing and sends no body: the wallet, the plan and the
+     * customer are the subscription's own. Refused with `apiCode`
+     * `not_awaiting_signature` once it is signed, expired or ended (call
+     * `create` again for an expired one), and with what `create` refuses of
+     * a plan or a wallet (`plan_ended`, `insufficient_balance`,
+     * `already_subscribed`, ...). Sent once, never retried: asking twice is
+     * safe, only the last transaction is to be signed.
+     */
+    async transaction(id: string, options: RequestOptions = {}): Promise<SubscribeTransaction> {
+        return subscribeTransactionFrom(
+            await this.#transport.post(`${pathOf(id)}/transaction`, undefined, options),
+            'POST /v1/subscriptions/:id/transaction',
+        );
     }
 
     async #submit(id: string, params: SubmitParams, options: SubmitOptions): Promise<SubmitResult> {
