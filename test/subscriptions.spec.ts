@@ -1743,6 +1743,7 @@ describe('subscriptions.attempts', () => {
             outcome: 'paid',
             reason: null,
             amount: '9990000',
+            amount_usd: '9.99',
             signature: SIGNATURE,
             retry: false,
             retry_number: null,
@@ -1808,6 +1809,27 @@ describe('subscriptions.attempts', () => {
         expect(data).toEqual([attempt({ retry: true })]);
     });
 
+    it('reads a missing dollar value as null, from a back that does not serve it', async () => {
+        const { amount_usd: _, ...older } = attempt();
+        const { fetch } = mockFetch(json(200, page([older])));
+
+        const { data } = await mesub(fetch).subscriptions.attempts('sub_1');
+
+        expect(data).toEqual([attempt({ amount_usd: null })]);
+    });
+
+    it('takes an attempt not priced yet, and one priced', async () => {
+        const attempts = [
+            attempt({ amount_usd: null }),
+            attempt({ id: 'att_2', amount_usd: '0.41' }),
+        ];
+        const { fetch } = mockFetch(json(200, page(attempts)));
+
+        const { data } = await mesub(fetch).subscriptions.attempts('sub_1');
+
+        expect(data).toEqual(attempts);
+    });
+
     it('hands back an outcome and a field newer than this release', async () => {
         const newer = { ...attempt({ outcome: 'REFUNDED' as never }), refunded_at: 'later' };
         const body = { ...page([newer]), total_refunded: '1' };
@@ -1867,6 +1889,11 @@ describe('subscriptions.attempts', () => {
             'an attempt with no retry',
             page([{ ...attempt(), retry: undefined }]),
             'data[0].retry is missing',
+        ],
+        [
+            'a dollar value that is a number',
+            page([attempt({ amount_usd: 9.99 as never })]),
+            'data[0].amount_usd is not a string or null',
         ],
         [
             'a retry number that is not one',

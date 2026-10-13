@@ -19,7 +19,7 @@
 import type { AccessAnswer, Customer, ServedAttempt } from './answer.js';
 import { Mesub, type MesubOptions } from './client.js';
 import { type Asked, customerOf } from './customer.js';
-import type { Plan } from './plans.js';
+import type { Plan, PlanToken } from './plans.js';
 import type {
     ServerSubscription,
     ServerSubscriptionList,
@@ -42,9 +42,12 @@ export interface FakeMesubOptions {
      * Name them to test the widget routes, which read `plans.list`: left
      * out, the list is empty. A plan given an `ends_at` is served as Mesub
      * serves one: no `access_until` later than it, no pull dated from it
-     * on, and no access once it has passed.
+     * on, and no access once it has passed. A plan's token is USDC, verified,
+     * and its `amount_usd` its `amount_display`: give a `token` (some of its
+     * fields are enough) and an `amount_usd` for any other, such as an
+     * unverified one with a null `symbol`.
      */
-    plans?: Array<string | (Partial<Plan> & { slug: string })>;
+    plans?: Array<string | FakePlanFields>;
     /** What `webhook()` signs with, and `client()` verifies with. Defaults to a fixed `whsec_` secret. */
     webhookSecret?: string;
     /**
@@ -54,6 +57,12 @@ export interface FakeMesubOptions {
      */
     attemptsRoute?: boolean;
 }
+
+/** A plan as declared to the fake: its slug, and any field to set, a token's included. */
+export type FakePlanFields = Partial<Omit<Plan, 'token'>> & {
+    slug: string;
+    token?: Partial<PlanToken>;
+};
 
 /** How many attempts `/v1/access` serves at most. */
 const ACCESS_ATTEMPTS = 5;
@@ -304,7 +313,8 @@ export class FakeMesub {
      * `subscriptions.attempts` answers for it, with their `paid` total, and
      * the five newest through `/v1/access` with `attempts`, whose answer
      * becomes about that subscription. Each is a paid one of 9.99 USDC now,
-     * not a retry, unless told otherwise; they are served newest first.
+     * priced 9.99 dollars, not a retry, unless told otherwise; one given
+     * another `amount` and no `amount_usd` is not priced. Newest first.
      * Throws for an id the fake does not hold.
      */
     setAttempts(id: string, attempts: Array<Partial<SubscriptionAttempt>>): SubscriptionAttempt[] {
@@ -319,6 +329,8 @@ export class FakeMesub {
                 outcome: 'paid',
                 reason: null,
                 amount: '9990000',
+                // The default amount's worth only: no price is guessed for another.
+                amount_usd: attempt.amount === undefined ? '9.99' : null,
                 signature: 'fake_signature',
                 retry: false,
                 retry_number: null,
@@ -1090,8 +1102,16 @@ function withAttempts(answer: AccessAnswer, attempts: boolean): AccessAnswer {
 }
 
 /** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
-/** A plan as `/v1/plans` serves one: 9.99 USDC a month on devnet, unless told otherwise. */
-function fakePlan(slug: string, over: Partial<Plan> = {}): Plan {
+/**
+ * A plan as `/v1/plans` serves one: 9.99 USDC a month on devnet, unless told
+ * otherwise. Its token follows its `symbol`, which only a vouched mint has:
+ * verified and worth its amount in dollars with one, unverified and unpriced
+ * with a `token` given or a null `symbol`.
+ */
+function fakePlan(slug: string, { token, ...over }: Omit<FakePlanFields, 'slug'> = {}): Plan {
+    const symbol = over.symbol === undefined ? (token ? null : 'USDC') : over.symbol;
+    const vouched = token === undefined && symbol !== null;
+
     return {
         slug,
         name: slug,
@@ -1100,8 +1120,16 @@ function fakePlan(slug: string, over: Partial<Plan> = {}): Plan {
         logo_url: null,
         amount: '9990000',
         amount_display: '9.99',
+        amount_usd: vouched ? (over.amount_display ?? '9.99') : null,
         decimals: 6,
-        symbol: 'USDC',
+        symbol,
+        token: {
+            symbol: token ? null : symbol,
+            name: vouched && symbol === 'USDC' ? 'USD Coin' : null,
+            logo_url: null,
+            verified: vouched,
+            ...token,
+        },
         mint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
         period_hours: 720,
         network: 'devnet',

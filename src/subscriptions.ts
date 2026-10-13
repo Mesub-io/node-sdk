@@ -195,6 +195,12 @@ export interface SubscriptionAttempt {
      * `paid` one that is what the transfer moved.
      */
     amount: string;
+    /**
+     * That amount in dollars at the price of the instant it was attempted, a
+     * decimal string such as `"9.99"`. Null until Mesub priced it, when it
+     * knows no price, and from a Mesub that predates it.
+     */
+    amount_usd: string | null;
     /** The transaction that paid. Null on every outcome but `paid`, a refused one included. */
     signature: string | null;
     /** The subscription had already failed on this period. */

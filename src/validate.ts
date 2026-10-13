@@ -1,6 +1,6 @@
 import type { AccessAnswer, AccessList, ServedAttempt } from './answer.js';
 import { MesubError } from './errors.js';
-import type { Plan } from './plans.js';
+import type { Plan, PlanToken } from './plans.js';
 import type {
     ConfirmResult,
     ServerSubscription,
@@ -27,9 +27,10 @@ interface Field {
     expected: string;
     /**
      * A field newer than some backs still serving: absent, it is set to this
-     * value rather than refused, so the answer still holds its type.
+     * value rather than refused, so the answer still holds its type. A
+     * function builds a fresh one for each answer.
      */
-    absent?: null | false;
+    absent?: null | false | (() => unknown);
     /** A field the back leaves out when it has nothing to say: absent is fine, as is. */
     optional?: true;
 }
@@ -60,6 +61,16 @@ const END_REASON: Field = { ...STRING_OR_NULL, absent: null };
 /** `blocked_since` and `blocked_reason`, served since Mesub-io/backend#398: null before it. */
 const BLOCKED_SINCE: Field = { ...DATE_OR_NULL, absent: null };
 const BLOCKED_REASON: Field = { ...STRING_OR_NULL, absent: null };
+/**
+ * A plan's `token` and `amount_usd`, and an attempt's `amount_usd`, served
+ * since Mesub-io/backend#433: an unverified token with nothing known, and
+ * null, before it.
+ */
+const AMOUNT_USD: Field = { ...STRING_OR_NULL, absent: null };
+const TOKEN: Field = {
+    ...OBJECT,
+    absent: (): PlanToken => ({ symbol: null, name: null, logo_url: null, verified: false }),
+};
 /**
  * `next_retry_number`, `retry_number` and `retries_allowed`, served since
  * Mesub-io/backend#289: null when a back predates them.
@@ -210,6 +221,7 @@ const SUBSCRIPTION_ATTEMPT = {
     outcome: STRING,
     reason: STRING_OR_NULL,
     amount: STRING,
+    amount_usd: AMOUNT_USD,
     signature: STRING_OR_NULL,
     retry: BOOLEAN,
     retry_number: RETRY_COUNT,
@@ -270,8 +282,10 @@ const PLAN = {
     logo_url: STRING_OR_NULL,
     amount: STRING,
     amount_display: STRING,
+    amount_usd: AMOUNT_USD,
     decimals: COUNT,
     symbol: STRING_OR_NULL,
+    token: TOKEN,
     mint: STRING,
     period_hours: COUNT,
     network: STRING,
@@ -281,9 +295,29 @@ const PLAN = {
     ends_at: DATE_OR_NULL,
 } satisfies Record<keyof Plan, Field>;
 
+/** A served `token` is whole: one field missing or of another type is refused. */
+const PLAN_TOKEN = {
+    symbol: STRING_OR_NULL,
+    name: STRING_OR_NULL,
+    logo_url: STRING_OR_NULL,
+    verified: BOOLEAN,
+} satisfies Record<keyof PlanToken, Field>;
+
+/** A plan's own fields, then its token's. */
+function planProblem(body: unknown, label?: string): string | null {
+    return (
+        problemWith(body, PLAN, label) ??
+        problemWith(
+            (body as Plan).token,
+            PLAN_TOKEN,
+            label === undefined ? 'token' : `${label}.token`,
+        )
+    );
+}
+
 /** One plan, from `plans.retrieve`. */
 export function planFrom(body: unknown): Plan {
-    const problem = problemWith(body, PLAN);
+    const problem = planProblem(body);
 
     if (problem !== null) throw unreadable(problem, body, 'GET /v1/plans/:slug');
 
@@ -294,7 +328,7 @@ export function planFrom(body: unknown): Plan {
 export function planListFrom(body: unknown): Plan[] {
     const problem =
         problemWith(body, { plans: LIST_OF }) ??
-        firstProblem((body as { plans: unknown[] }).plans, 'plans', PLAN);
+        firstProblem((body as { plans: unknown[] }).plans, 'plans', planProblem);
 
     if (problem !== null) throw unreadable(problem, body, 'GET /v1/plans');
 
@@ -474,10 +508,12 @@ export function webhookEventFrom(body: unknown, id: string): WebhookEvent {
 function firstProblem(
     items: unknown[],
     label: string,
-    fields: Record<string, Field>,
+    fields: Record<string, Field> | ((item: unknown, label: string) => string | null),
 ): string | null {
     for (const [index, item] of items.entries()) {
-        const problem = problemWith(item, fields, `${label}[${index}]`);
+        const at = `${label}[${index}]`;
+        const problem =
+            typeof fields === 'function' ? fields(item, at) : problemWith(item, fields, at);
 
         if (problem !== null) return problem;
     }
@@ -518,7 +554,8 @@ function problemWith(body: unknown, fields: Record<string, Field>, label?: strin
 
         if (value === undefined && field.optional) continue;
         if (value === undefined && 'absent' in field) {
-            (body as Record<string, unknown>)[name] = field.absent;
+            (body as Record<string, unknown>)[name] =
+                typeof field.absent === 'function' ? field.absent() : field.absent;
             continue;
         }
         if (value === undefined) return `${prefix}${name} is missing`;

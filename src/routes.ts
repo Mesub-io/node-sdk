@@ -178,6 +178,11 @@ export interface WidgetPayment {
     outcome: string;
     /** What was asked for, in the mint's smallest unit; on a paid one, what was paid. */
     amount: string;
+    /**
+     * That amount in dollars when it was attempted, a decimal string. Null
+     * until Mesub priced it, and from a Mesub that does not say.
+     */
+    amount_usd: string | null;
     /** Mesub's short reason, null on a paid one. */
     reason: string | null;
     /** The transaction that paid. Null on every outcome but `paid`. */
@@ -332,6 +337,8 @@ function payment(attempt: SubscriptionAttempt): WidgetPayment {
         attempted_at: attempt.attempted_at,
         outcome: attempt.outcome,
         amount: attempt.amount,
+        // `?? null` for an attempt handed by a client that predates the field.
+        amount_usd: attempt.amount_usd ?? null,
         reason: attempt.reason,
         signature: attempt.signature,
         retry: attempt.retry,
@@ -347,6 +354,7 @@ function olderPayment(attempt: ServedAttempt): WidgetPayment {
         attempted_at: attempt.attempted_at,
         outcome: attempt.outcome,
         amount: attempt.amount,
+        amount_usd: null,
         reason: attempt.reason,
         signature: attempt.signature,
         retry: null,

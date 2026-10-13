@@ -92,6 +92,16 @@ The first version published to npm. Requires Node 22 or later.
 - `plans.list()` and `plans.retrieve(slug)` read your project's plans for a
   pricing page: price, period, token, and whether each takes new subscribers
   (#84).
+- A plan carries `token`, what Mesub resolved for its mint (`symbol`, `name`,
+  `logo_url`, `verified`), and `amount_usd`, its amount in dollars at the
+  latest price Mesub knows, a decimal string, null when it knows none
+  (Mesub-io/backend#433). `verified` is true for a mint Mesub vouches for or
+  one Jupiter marks verified. A symbol is free text on chain and a fake
+  "USDC" is a known scam: show an unverified token as unverified, with its
+  mint; Mesub never serves one under the symbol or name of a vouched
+  stablecoin. The top-level `symbol` is unchanged: set only for a vouched
+  mint. Read as an unverified token with nothing known and `amount_usd: null`
+  from a Mesub that predates them; `PlanToken` is exported (#130).
 
 ### Guards
 
@@ -144,6 +154,9 @@ The first version published to npm. Requires Node 22 or later.
   and `retries_allowed`: the retry due at `next_retry_at` and out of how many,
   null when Mesub retries nothing on its own. Both are read as null from a
   Mesub that predates them. Needs Mesub-io/backend#290 (#91).
+- An attempt carries `amount_usd`, its amount in dollars at the price of the
+  instant it was attempted, a decimal string: null until Mesub priced it, and
+  from a Mesub that predates it (Mesub-io/backend#433) (#130).
 - `submit` sends the same request again when a send got no answer, three
   sends at most within its `budget`, then reads the subscription back rather
   than guessing its outcome; a `MesubSubmitError` carries what it found (#61).
@@ -222,6 +235,9 @@ The first version published to npm. Requires Node 22 or later.
 - `POST /subscriptions/:id/transaction` answers a fresh transaction for the
   signed-in customer's pending subscription, 201 and the body
   `POST /subscriptions` answers; any other customer's is a 404 (#128).
+- `GET /plans/:slug` hands on the plan's `token` and `amount_usd`, and each
+  of `payments` its `amount_usd`, null from a Mesub that does not price it
+  (#130).
 - `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
   5 pages at most, so one browser request is never more than 5 calls to
   Mesub. It answers `has_more` beside `subscriptions`: true when the customer
@@ -293,6 +309,11 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   (`not_awaiting_signature`, `plan_ended`, `already_subscribed`). Its access
   answers, subscriptions and webhooks carry `blocked_since` and
   `blocked_reason`, null unless a test sets them (#128).
+- `FakeMesub` plans carry `token` and `amount_usd`: USDC, verified and worth
+  its `amount_display` by default. A plan declared with a `token` (some of
+  its fields are enough) or a null `symbol` is unverified with no symbol and
+  no dollar value unless told. An attempt of `setAttempts` is priced `9.99`,
+  and not priced when given another `amount` and no `amount_usd` (#130).
 
 ### Errors
 

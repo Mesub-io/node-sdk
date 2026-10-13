@@ -129,6 +129,7 @@ describe('FakeMesub', () => {
             outcome: 'paid',
             reason: null,
             amount: '9990000',
+            amount_usd: '9.99',
             retry: false,
             retry_number: null,
             retries_allowed: null,
@@ -150,6 +151,25 @@ describe('FakeMesub', () => {
         }
         expect(await mesub.access(WALLET, 'pro')).not.toHaveProperty('attempts');
         expect(() => fake.setAttempts('sub_nope', [])).toThrow(/sub_nope/);
+    });
+
+    it('prices an attempt of the default amount, and any other only when told', async () => {
+        const fake = new FakeMesub();
+        const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        const day = (n: number) => new Date(Date.UTC(2026, 8, n)).toISOString();
+
+        fake.setAttempts(id, [
+            { attempted_at: day(4) },
+            { attempted_at: day(3), amount: '30000000000' },
+            { attempted_at: day(2), amount: '30000000000', amount_usd: '0.41' },
+            { attempted_at: day(1), amount_usd: null },
+        ]);
+        const { data } = await fake.client().subscriptions.attempts(id);
+
+        expect(data.map((each) => each.amount_usd)).toEqual(['9.99', null, '0.41', null]);
+        // /v1/access serves no dollar value.
+        const answer = await fake.client().access(WALLET, 'pro', { attempts: true });
+        expect(answer.attempts![0]).not.toHaveProperty('amount_usd');
     });
 
     it('answers a subscription its own attempts, paged, with the total over all of them', async () => {
