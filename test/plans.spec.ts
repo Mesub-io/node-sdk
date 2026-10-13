@@ -12,8 +12,10 @@ function plan(over: Partial<Plan> = {}): Plan {
         logo_url: null,
         amount: '9990000',
         amount_display: '9.99',
+        amount_usd: '9.99',
         decimals: 6,
         symbol: 'USDC',
+        token: { symbol: 'USDC', name: 'USD Coin', logo_url: null, verified: true },
         mint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
         period_hours: 720,
         network: 'devnet',
@@ -23,6 +25,12 @@ function plan(over: Partial<Plan> = {}): Plan {
         ...over,
     };
 }
+
+/** What a plan reads as from a Mesub that predates `token` and `amount_usd`. */
+const UNKNOWN = {
+    amount_usd: null,
+    token: { symbol: null, name: null, logo_url: null, verified: false },
+} as const;
 
 /** A client whose API is one function, and what it was asked. */
 function mesub(answer: (url: URL) => Response) {
@@ -66,6 +74,82 @@ describe('plans.list', () => {
         const { client } = mesub(() => Response.json({ plans: [later] }));
 
         await expect(client.plans.list()).resolves.toEqual([later]);
+    });
+
+    it('reads a plan with no token nor dollar value, from a Mesub that predates them', async () => {
+        const { token: _token, amount_usd: _usd, ...older } = plan();
+        const { client } = mesub(() => Response.json({ plans: [older, { ...older }] }));
+
+        const plans = await client.plans.list();
+
+        expect(plans).toEqual([plan(UNKNOWN), plan(UNKNOWN)]);
+        // Each plan its own token, not one shared.
+        expect(plans[0]!.token).not.toBe(plans[1]!.token);
+    });
+
+    it('takes an unverified token with no symbol, and a plan Mesub knows no price for', async () => {
+        const bonk = plan({
+            symbol: null,
+            amount_usd: null,
+            token: {
+                symbol: null,
+                name: 'Bonk',
+                logo_url: 'https://img.example/b.png',
+                verified: false,
+            },
+        });
+        const { client } = mesub(() => Response.json({ plans: [bonk] }));
+
+        await expect(client.plans.list()).resolves.toEqual([bonk]);
+    });
+
+    it('takes a token Jupiter verified that Mesub does not vouch for', async () => {
+        const jup = plan({
+            symbol: null,
+            amount_usd: '0.41',
+            token: { symbol: 'BONK', name: 'Bonk', logo_url: null, verified: true },
+        });
+        const { client } = mesub(() => Response.json({ plans: [jup] }));
+
+        await expect(client.plans.list()).resolves.toEqual([jup]);
+    });
+
+    it.each([
+        ['a token that is a string', { token: 'USDC' }, 'plans[0].token is not an object'],
+        ['a null token', { token: null }, 'plans[0].token is not an object'],
+        ['a token that is a list', { token: [] }, 'plans[0].token is not an object'],
+        [
+            'a token with no verified',
+            { token: { symbol: 'USDC', name: null, logo_url: null } },
+            'plans[0].token.verified is missing',
+        ],
+        [
+            'a verified that is no boolean',
+            { token: { ...plan().token, verified: 'yes' } },
+            'plans[0].token.verified is not a boolean',
+        ],
+        [
+            'a token symbol that is a number',
+            { token: { ...plan().token, symbol: 1 } },
+            'plans[0].token.symbol is not a string or null',
+        ],
+        [
+            'a token logo that is an object',
+            { token: { ...plan().token, logo_url: {} } },
+            'plans[0].token.logo_url is not a string or null',
+        ],
+        [
+            'a dollar value that is a number',
+            { amount_usd: 9.99 },
+            'plans[0].amount_usd is not a string or null',
+        ],
+    ])('refuses %s as an answer it cannot read', async (_name, over, problem) => {
+        const { client } = mesub(() => Response.json({ plans: [{ ...plan(), ...over }] }));
+
+        await expect(client.plans.list()).rejects.toMatchObject({
+            code: 'unexpected',
+            message: expect.stringContaining(problem),
+        });
     });
 
     it.each([
@@ -116,6 +200,24 @@ describe('plans.retrieve', () => {
         await expect(client.plans.retrieve('pro')).resolves.toEqual(ending);
     });
 
+    it('reads one with no token nor dollar value, from a Mesub that predates them', async () => {
+        const { token: _token, amount_usd: _usd, ...older } = plan();
+        const { client } = mesub(() => Response.json(older));
+
+        await expect(client.plans.retrieve('pro')).resolves.toEqual(plan(UNKNOWN));
+    });
+
+    it('refuses a token it cannot read, naming the field', async () => {
+        const { client } = mesub(() =>
+            Response.json({ ...plan(), token: { ...plan().token, name: 7 } }),
+        );
+
+        await expect(client.plans.retrieve('pro')).rejects.toMatchObject({
+            code: 'unexpected',
+            message: expect.stringContaining('token.name is not a string or null'),
+        });
+    });
+
     it('throws plan_not_found for a slug the project lacks', async () => {
         const { client } = mesub(() => refusal(404, 'plan_not_found'));
 
@@ -158,6 +260,63 @@ describe('testing: plans', () => {
         expect(plans.map((each) => each.slug)).toEqual(['pro', 'team']);
         expect(plans[0]).toMatchObject({ amount_display: '4.99', available: false });
         expect(plans[1]).toMatchObject({ name: 'team', status: 'active', available: true });
+    });
+
+    it('serves a plan in verified USDC worth its amount, unless told otherwise', async () => {
+        const fake = new FakeMesub({
+            plans: ['pro', { slug: 'team', amount: '29000000', amount_display: '29.00' }],
+        });
+
+        const [pro, team] = await fake.client().plans.list();
+
+        expect(pro).toMatchObject({
+            symbol: 'USDC',
+            amount_usd: '9.99',
+            token: { symbol: 'USDC', name: 'USD Coin', logo_url: null, verified: true },
+        });
+        expect(team).toMatchObject({ amount_usd: '29.00', token: { verified: true } });
+    });
+
+    it('serves the token a plan was declared with, unverified with no symbol by default', async () => {
+        const fake = new FakeMesub({
+            plans: [
+                { slug: 'bonk', token: { name: 'Bonk' } },
+                {
+                    slug: 'jup',
+                    amount_usd: '0.41',
+                    token: {
+                        symbol: 'JUP',
+                        name: 'Jupiter',
+                        logo_url: 'https://img.example/j.png',
+                        verified: true,
+                    },
+                },
+                { slug: 'unknown', symbol: null },
+                { slug: 'usdt', symbol: 'USDT' },
+            ],
+        });
+        const client = fake.client();
+
+        await expect(client.plans.retrieve('bonk')).resolves.toMatchObject({
+            symbol: null,
+            amount_usd: null,
+            token: { symbol: null, name: 'Bonk', logo_url: null, verified: false },
+        });
+        await expect(client.plans.retrieve('jup')).resolves.toMatchObject({
+            symbol: null,
+            amount_usd: '0.41',
+            token: { symbol: 'JUP', name: 'Jupiter', verified: true },
+        });
+        await expect(client.plans.retrieve('unknown')).resolves.toMatchObject({
+            symbol: null,
+            amount_usd: null,
+            token: { symbol: null, name: null, logo_url: null, verified: false },
+        });
+        await expect(client.plans.retrieve('usdt')).resolves.toMatchObject({
+            symbol: 'USDT',
+            amount_usd: '9.99',
+            token: { symbol: 'USDT', name: null, verified: true },
+        });
     });
 
     it('retrieves one, and answers plan_not_found for a slug outside the list', async () => {

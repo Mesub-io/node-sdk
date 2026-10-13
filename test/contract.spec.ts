@@ -1,4 +1,11 @@
-import { type AccessAnswer, Mesub, MesubError, type ServerSubscription } from '../src/index.js';
+import {
+    type AccessAnswer,
+    Mesub,
+    MesubError,
+    type Plan,
+    type PlanToken,
+    type ServerSubscription,
+} from '../src/index.js';
 
 /**
  * The SDK against the real back, not a fake one: what catches the back
@@ -95,27 +102,30 @@ const SUBSCRIPTION_FIELDS: Record<
 };
 
 /**
- * A plan as `GET /v1/plans` serves it (Mesub-io/backend#184). The SDK has no
- * method for it yet: checked here so the one it gets starts from what the
- * back really answers.
+ * A plan as `GET /v1/plans` serves it (Mesub-io/backend#184), its `token`
+ * checked apart. Kept in step with src/plans.ts.
  */
-const PLAN_FIELDS: Record<string, 'string' | 'number' | 'boolean' | 'string|null'> = {
-    slug: 'string',
-    name: 'string',
-    description: 'string|null',
-    project_name: 'string',
-    logo_url: 'string|null',
-    amount: 'string',
-    amount_display: 'string',
-    decimals: 'number',
-    symbol: 'string|null',
-    mint: 'string',
-    period_hours: 'number',
-    network: 'string',
-    status: 'string',
-    available: 'boolean',
-    ends_at: 'string|null',
-};
+const PLAN_FIELDS: Record<keyof Plan, 'string' | 'number' | 'boolean' | 'string|null' | 'object'> =
+    {
+        slug: 'string',
+        name: 'string',
+        description: 'string|null',
+        project_name: 'string',
+        logo_url: 'string|null',
+        amount: 'string',
+        amount_display: 'string',
+        // Read as null, and as an unverified token, from a back that predates them (Mesub-io/backend#433).
+        amount_usd: 'string|null',
+        decimals: 'number',
+        symbol: 'string|null',
+        token: 'object',
+        mint: 'string',
+        period_hours: 'number',
+        network: 'string',
+        status: 'string',
+        available: 'boolean',
+        ends_at: 'string|null',
+    };
 
 const STATUSES = [
     'pending',
@@ -144,6 +154,27 @@ const STRANGER = 'SysvarC1ock11111111111111111111111111111111';
 
 function typeOf(value: unknown): string {
     return value === null ? 'null' : typeof value;
+}
+
+const TOKEN_FIELDS: Record<keyof PlanToken, 'boolean' | 'string|null'> = {
+    symbol: 'string|null',
+    name: 'string|null',
+    logo_url: 'string|null',
+    verified: 'boolean',
+};
+
+/** The fields a back that predates Mesub-io/backend#433 leaves out of a plan. */
+const NEWER_PLAN_FIELDS = ['amount_usd', 'token'];
+
+/** A plan and its token. Straight from the back, the newer fields may be missing, both or none. */
+function expectPlan(plan: unknown, { raw = false } = {}) {
+    const older = raw && NEWER_PLAN_FIELDS.every((field) => !(field in (plan as object)));
+    const fields = Object.entries(PLAN_FIELDS).filter(
+        ([field]) => !older || !NEWER_PLAN_FIELDS.includes(field),
+    );
+
+    expectShape(plan, Object.fromEntries(fields));
+    if (!older) expectShape((plan as Plan).token, TOKEN_FIELDS);
 }
 
 /** Each field of `fields` present in `value` with one of its types, and nothing else. */
@@ -423,6 +454,8 @@ describe.skipIf(!env.url)('contract with the back', () => {
                 outcome: 'string',
                 reason: 'string|null',
                 amount: 'string',
+                // Read as null from a back that predates it (Mesub-io/backend#433).
+                amount_usd: 'string|null',
                 signature: 'string|null',
                 retry: 'boolean',
                 retry_number: 'number|null',
@@ -490,7 +523,7 @@ describe.skipIf(!env.url)('contract with the back', () => {
 
             expect(response.status).toBe(200);
             expect(Object.keys(body)).toEqual(['plans']);
-            for (const plan of body.plans) expectShape(plan, PLAN_FIELDS);
+            for (const plan of body.plans) expectPlan(plan, { raw: true });
             expect(body.plans.map(({ slug }) => slug)).toEqual([env.plan, env.endedPlan].sort());
         });
 
@@ -499,7 +532,7 @@ describe.skipIf(!env.url)('contract with the back', () => {
             const missing = await get('/v1/plans/no-such-plan-here');
 
             expect(found.status).toBe(200);
-            expectShape(await found.json(), PLAN_FIELDS);
+            expectPlan(await found.json(), { raw: true });
             expect(missing.status).toBe(404);
             expect(await missing.json()).toMatchObject({ code: 'plan_not_found' });
         });
@@ -509,7 +542,7 @@ describe.skipIf(!env.url)('contract with the back', () => {
         it('lists both plans, each one the SDK can read', async () => {
             const plans = await mesub().plans.list();
 
-            for (const plan of plans) expectShape(plan, PLAN_FIELDS);
+            for (const plan of plans) expectPlan(plan);
             expect(plans.map(({ slug }) => slug)).toEqual([env.plan, env.endedPlan].sort());
         });
 

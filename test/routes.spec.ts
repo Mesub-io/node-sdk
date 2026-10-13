@@ -18,6 +18,9 @@ const JSON_TYPE = 'application/json';
 const SIGNATURE =
     '5wHu1qwD4kLDLoREEPBpKvGvhbxWFxFFfr5nQq7dxAsRRDXvHRqpNvfsCvC1qzjWQhqmPtBb8LnZjKmvpehJqSWk';
 
+const BONK = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
+const LOGO = 'https://img.example/bonk.png';
+
 const ada = { kind: 'external_id', value: 'user_ada' } as const;
 const bob = { kind: 'external_id', value: 'user_bob' } as const;
 
@@ -80,6 +83,63 @@ describe('the widget routes: a plan', () => {
 
         expect(answer.status).toBe(200);
         expect(answer.body).toMatchObject({ slug: 'pro', amount_display: '9.99' });
+    });
+
+    it('hands on the token and the dollar value of a vouched plan', async () => {
+        const { call } = setup();
+
+        const answer = await call(null, { path: '/plans/pro' });
+
+        expect(answer.body).toMatchObject({
+            symbol: 'USDC',
+            amount_usd: '9.99',
+            token: { symbol: 'USDC', name: 'USD Coin', logo_url: null, verified: true },
+        });
+    });
+
+    it('hands on an unverified token as unverified, with its mint and no symbol', async () => {
+        const fake = new FakeMesub({
+            plans: [{ slug: 'pro', mint: BONK, token: { name: 'Bonk', logo_url: LOGO } }],
+        });
+
+        const answer = await handleWidget(
+            fake.client(),
+            { method: 'GET', path: '/plans/pro', body: undefined, contentType: null },
+            null,
+        );
+
+        expect(answer.body).toMatchObject({
+            symbol: null,
+            mint: BONK,
+            amount_usd: null,
+            token: { symbol: null, name: 'Bonk', logo_url: LOGO, verified: false },
+        });
+    });
+
+    it('answers a plan of a Mesub that predates the token as unverified, with no dollar value', async () => {
+        const {
+            token: _token,
+            amount_usd: _usd,
+            ...older
+        } = await new FakeMesub().client().plans.retrieve('pro');
+        const client = new Mesub({
+            apiKey: 'SUB_test',
+            baseUrl: 'https://api.mesub.test',
+            maxRetries: 0,
+            fetch: (async () => Response.json({ plans: [older] })) as typeof globalThis.fetch,
+        });
+
+        const answer = await handleWidget(
+            client,
+            { method: 'GET', path: '/plans/pro', body: undefined, contentType: null },
+            null,
+        );
+
+        expect(answer.body).toEqual({
+            ...older,
+            amount_usd: null,
+            token: { symbol: null, name: null, logo_url: null, verified: false },
+        });
     });
 
     it.each(['/plans/nope', '/plans/..', '/plans/Pro', '/plans/a%2Fb'])(
@@ -1437,6 +1497,7 @@ describe('the widget routes: one subscription in full', () => {
                 attempted_at: at(0),
                 outcome: 'paid',
                 amount: '9990000',
+                amount_usd: '9.99',
                 reason: null,
                 signature: 'sig_last',
                 retry: true,
@@ -1448,6 +1509,7 @@ describe('the widget routes: one subscription in full', () => {
                 attempted_at: at(1),
                 outcome: 'rejected',
                 amount: '9990000',
+                amount_usd: '9.99',
                 reason: 'insufficient-balance',
                 signature: 'sig_rejected',
                 retry: true,
@@ -1459,6 +1521,7 @@ describe('the widget routes: one subscription in full', () => {
                 attempted_at: at(2),
                 outcome: 'skipped',
                 amount: '9990000',
+                amount_usd: '9.99',
                 reason: 'wrong-delegate',
                 signature: null,
                 retry: false,
@@ -1470,6 +1533,7 @@ describe('the widget routes: one subscription in full', () => {
                 attempted_at: at(30),
                 outcome: 'paid',
                 amount: '9990000',
+                amount_usd: '9.99',
                 reason: null,
                 signature: 'sig_first',
                 retry: false,
@@ -1633,6 +1697,24 @@ describe('the widget routes: one subscription in full', () => {
         expect(answer.body).toMatchObject({ payments: [], paid: { count: 7, amount: '123' } });
     });
 
+    it('hands on what each payment was worth in dollars, null for one not priced', async () => {
+        const { client, call, fake } = setup();
+        const id = await subscribed(client);
+        fake.setAttempts(id, [
+            { attempted_at: at(2) },
+            { attempted_at: at(1), amount: '30000000000', amount_usd: '0.41' },
+            { attempted_at: at(0), amount: '30000000000' },
+        ]);
+
+        const answer = await call(ada, { path: `/subscriptions/${id}` });
+
+        expect((answer.body as Detail).payments).toMatchObject([
+            { amount: '30000000000', amount_usd: null },
+            { amount: '30000000000', amount_usd: '0.41' },
+            { amount: '9990000', amount_usd: '9.99' },
+        ]);
+    });
+
     it('hands the browser only the fields it knows of an attempt', async () => {
         const { client, call, fake } = setup();
         const id = await subscribed(client);
@@ -1643,6 +1725,7 @@ describe('the widget routes: one subscription in full', () => {
         expect(JSON.stringify(answer.body)).not.toContain('internal');
         expect(Object.keys((answer.body as Detail).payments![0]!).sort()).toEqual([
             'amount',
+            'amount_usd',
             'attempted_at',
             'outcome',
             'period_start',
@@ -1921,6 +2004,8 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
                     amount: '9990000',
                     reason: null,
                     signature: 'sig_last',
+                    // /v1/access prices nothing.
+                    amount_usd: null,
                     retry: null,
                     retry_number: null,
                     retries_allowed: null,
@@ -2200,9 +2285,14 @@ describe('mesubRoutes for Express', () => {
         const customer = vi.fn(() => null);
         const { server } = app(customer);
 
-        await request(server).get('/api/mesub/plans/pro').expect(200);
+        const response = await request(server).get('/api/mesub/plans/pro').expect(200);
 
         expect(customer).not.toHaveBeenCalled();
+        // Its token and dollar value reach the browser.
+        expect(response.body).toMatchObject({
+            amount_usd: '9.99',
+            token: { symbol: 'USDC', name: 'USD Coin', logo_url: null, verified: true },
+        });
     });
 
     it('answers 401 with nobody signed in', async () => {
@@ -2431,6 +2521,11 @@ describe('mesubRouteHandlers for Next', () => {
         });
 
         expect(response.status).toBe(200);
+        // Its token and dollar value reach the browser.
+        expect(await response.json()).toMatchObject({
+            amount_usd: '9.99',
+            token: { symbol: 'USDC', verified: true },
+        });
     });
 
     it('answers 401 with nobody signed in, 400 to a body that is not JSON', async () => {

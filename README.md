@@ -151,11 +151,21 @@ broken integration is never read as "not subscribed".
 const plans = await mesub.plans.list(); // sorted by slug
 const pro = await mesub.plans.retrieve('pro');
 // pro.amount_display "9.99", pro.symbol "USDC", pro.period_hours 720, pro.available
+// pro.token { symbol: "USDC", name: "USD Coin", logo_url, verified: true }, pro.amount_usd "9.99"
 ```
 
 `available` is false on a plan that is ending and when your project is full:
 show "Subscribe" only when it is true. `ends_at` is when a plan ends, null
 for one with no end. Nothing is cached.
+
+`symbol` is set only for a mint Mesub vouches for (USDC, USDT, PYUSD).
+`token` is what Mesub resolved for any mint: its symbol, name and logo, and
+`verified`, true for a vouched mint or one Jupiter marks verified. A symbol is
+free text on chain and a fake "USDC" is a known scam: show an unverified token
+as unverified and keep `mint` visible. `amount_usd` is the plan's amount in
+dollars at the latest price Mesub knows, a decimal string to show beside the
+amount, null when it knows none. An attempt's `amount_usd` is priced when it
+was attempted, null until then.
 
 ## Subscribe from your server
 
@@ -423,6 +433,9 @@ fake.grant({ external_id: 'user_9' }, 'pro', {
     blocked_since: new Date().toISOString(), // charges blocked, access still on
     blocked_reason: 'puller_not_allowed',
 });
+
+// A plan is in verified USDC unless told: here an unverified token, no symbol, no price.
+new FakeMesub({ plans: ['pro', { slug: 'bonk', mint, token: { name: 'Bonk' } }] });
 
 fake.fail('outage'); // every call answers 503, until fail(null)
 const { body, headers } = await fake.webhook('subscription.renewed'); // signed
