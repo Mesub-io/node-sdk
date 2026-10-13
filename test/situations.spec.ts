@@ -249,13 +249,13 @@ const CASES = {
     blocked_puller_not_allowed: {
         input: blocked('puller_not_allowed'),
         subscriber: BY_SETUP,
-        merchant: `Payments blocked since ${SINCE} by your plan's setup: Mesub's puller was taken off the plan on chain, so Mesub can take no payment for it. Allow it on the plan again; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: Mesub's puller was taken off the plan on chain, so Mesub can take no payment for it. Add Mesub back to the plan's pullers, with the wallet that owns the plan; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
         actions: ['subscriber:cancel'],
     },
     blocked_receiver_not_allowed: {
         input: blocked('receiver_not_allowed'),
         subscriber: BY_SETUP,
-        merchant: `Payments blocked since ${SINCE} by your plan's setup: the wallet that receives its payments is not among the plan's destinations on chain. Receive them on one that is; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the wallet that receives its payments is not among the plan's destinations on chain. Choose one that is; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
         actions: ['subscriber:cancel'],
     },
     blocked_receiver_account_missing: {
@@ -267,7 +267,7 @@ const CASES = {
     blocked_mint_gone: {
         input: blocked('mint_gone'),
         subscriber: BY_SETUP,
-        merchant: `Payments blocked since ${SINCE} by your plan's setup: the plan's token no longer exists on chain, so no payment can be taken while it does not. ${BLOCKED_MERCHANT}`,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token. ${BLOCKED_MERCHANT}`,
         actions: ['subscriber:cancel'],
     },
     paused_cancelled: {
