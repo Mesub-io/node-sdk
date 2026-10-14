@@ -103,6 +103,10 @@ The first version published to npm. Requires Node 22 or later.
   stablecoin. The top-level `symbol` is unchanged: set only for a vouched
   mint. Read as an unverified token with nothing known and `amount_usd: null`
   from a Mesub that predates them; `PlanToken` is exported (#130).
+- A plan slug needs at least one letter, as Mesub requires: `retrieve('123')`
+  throws `invalid_request` before anything is sent, the widget routes answer
+  `GET /plans/123` 404 without a call, and `mesubRoutes({ plans: ['123'] })`
+  throws (#136).
 
 ### Guards
 
@@ -135,6 +139,13 @@ The first version published to npm. Requires Node 22 or later.
   Express's own error handler answers an error's `status`: without a handler
   of yours, `requirePlan` and `mesubRoutes` answered Mesub's 401 or 404
   (#120).
+- During an outage, a blocked subscription (`blocked_since`) keeps the
+  fallback only until its `access_until`, as Mesub does: the retry Mesub keeps
+  scheduling used to keep it in for up to `maxStaleMs`. A cache store that
+  hangs no longer holds a guard: a `get` not answered within `guardTimeout`
+  is a miss, and no answer waits for a `set`. A guard's 503 carries the
+  `Retry-After` Mesub sent, 30 s only when it sent none, and `Decision` gets
+  `retryAfter` (#132).
 
 ### Subscribing from your server
 
@@ -178,6 +189,10 @@ The first version published to npm. Requires Node 22 or later.
   90 s by default and answers the subscription, with Mesub's `reason` when
   nothing changed. A confirm that settled drops every cached access answer
   for that customer on that plan, the yes too (#50).
+- A subscription id is checked as Mesub writes them, letters, digits, `-`
+  and `_`, 64 at most, before any method builds a path with it: anything else
+  throws `invalid_request` and sends nothing. `retrieve('.')` asked the list
+  and `cancel('..')` reached `POST /v1/cancel` (#136).
 
 ### Situations
 
@@ -204,6 +219,13 @@ The first version published to npm. Requires Node 22 or later.
   setup. The subscriber reads that nothing is theirs to do, the merchant
   what to fix, and both when access ends. A blocked one whose access ended
   no longer reads `ended_plan_ended` (#128).
+- `blocked_mint_gone` no longer says access comes back with the first payment
+  that goes through: the token no longer exists, so no payment can. Both
+  sentences say access does not come back once it ends (#136).
+- `pending` offers `transaction` before `submit`
+  (`subscriptions.transaction`, `POST /v1/subscriptions/:id/transaction`): a
+  fresh transaction when the wallet is ready to sign, or after
+  `transaction_expired`. `SituationActionId` gains `transaction` (#136).
 
 ### Routes for the React widget
 
@@ -239,6 +261,9 @@ The first version published to npm. Requires Node 22 or later.
 - `GET /plans/:slug` hands on the plan's `token` and `amount_usd`, and each
   of `payments` its `amount_usd`, null from a Mesub that does not price it
   (#130).
+- `upcoming` carries `amount_usd`, the plan's amount in dollars at the latest
+  price Mesub knows, null when it knows none or the plan could not be read
+  (#136).
 - `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
   5 pages at most, so one browser request is never more than 5 calls to
   Mesub. It answers `has_more` beside `subscriptions`: true when the customer
@@ -324,6 +349,20 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   its fields are enough) or a null `symbol` is unverified with no symbol and
   no dollar value unless told. An attempt of `setAttempts` is priced `9.99`,
   and not priced when given another `amount` and no `amount_usd` (#130).
+- `FakeMesub` serves the `revalidate_after` Mesub does: 10 for a no, and for
+  a yes the seconds to its next charge, retry or end, from 10 to 300; a list
+  gets its soonest yes, or 10. A client keeps a yes up to five minutes, as
+  against Mesub: `new FakeMesub({ revalidateAfter: 0 })` shows every change
+  on the next call (#134).
+- `FakeMesub` refuses as Mesub does. `create` and `transaction` beside a
+  subscription the wallet holds answer by its status: `already_subscribed`,
+  `subscription_cancelled` or `payment_pending`. `close` of a stopped
+  subscription nobody cancelled answers `subscription_not_cancelled`, and
+  one ended with its plan closes. A wallet that is not base58 (32 to 44
+  characters) or an invalid email is a 400 `invalid_request` (#134).
+- `FakeMesub` lists as Mesub does: no `superseded` subscription, and a 400
+  for a `starting_after` it does not hold. An error's `retryable` follows its
+  code, true for `subscription_changed` (#134).
 
 ### Errors
 
@@ -334,6 +373,12 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 - `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
   `total`, as it is typed: amounts are whole numbers as strings, and
   `rent.authority` may be null (#101).
+- An answer to `subscriptions.retry` it cannot read names
+  `POST /v1/subscriptions/:id/retry` and status 202, no longer
+  `GET /v1/subscriptions/:id` and 200 (#136).
+- Whether a GET is sent again comes from Mesub's `retryable`, or the status
+  without one: an `x-should-retry` header, which Mesub never sends, is no
+  longer read (#136).
 - The docs say when `retryAfter` comes on a 409 (`retry_too_soon`,
   `comeback_period_rolling`), and that `pending_cap_reached` is a quota, not
   a rate. `retry` lists `pull_running` and `subscription_changed`; `close`

@@ -254,12 +254,14 @@ describe('subscriptions.transaction', () => {
         expect(calls[0]!.init.body).toBeUndefined();
     });
 
-    it('encodes the id into the path', async () => {
-        const { fetch, calls } = mockFetch(json(201, answer));
+    it('refuses an id that could rewrite the path, sending nothing', async () => {
+        const { fetch } = mockFetch(json(201, answer));
 
-        await mesub(fetch).subscriptions.transaction('sub/1?x');
-
-        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/sub%2F1%3Fx/transaction');
+        await expect(mesub(fetch).subscriptions.transaction('sub/1?x')).rejects.toMatchObject({
+            status: null,
+            code: 'invalid_request',
+        });
+        expect(fetch).not.toHaveBeenCalled();
     });
 
     it.each(['', undefined, 7])('asks nothing of Mesub for the id %j', async (id) => {
@@ -432,12 +434,14 @@ describe('subscriptions.submit', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('escapes the id in the path', async () => {
-        const { fetch, calls } = mockFetch(json(201, { subscription: subscription() }));
+    it('refuses an id that could rewrite the path, sending nothing', async () => {
+        const { fetch } = mockFetch(json(201, { subscription: subscription() }));
 
-        await mesub(fetch).subscriptions.submit('a/b?c', signed);
-
-        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/a%2Fb%3Fc/submit');
+        await expect(mesub(fetch).subscriptions.submit('a/b?c', signed)).rejects.toMatchObject({
+            status: null,
+            code: 'invalid_request',
+        });
+        expect(fetch).not.toHaveBeenCalled();
     });
 
     it('throws a refusal as is, without reading back or sending again', async () => {
@@ -1034,12 +1038,14 @@ describe.each(ACTIONS)('subscriptions.%s', (action) => {
         expect(new Headers(calls[0]!.init.headers).get('authorization')).toBe('Bearer sk_test');
     });
 
-    it('escapes the id in the path', async () => {
-        const { fetch, calls } = mockFetch(json(201, unsigned));
+    it('refuses an id that could rewrite the path, sending nothing', async () => {
+        const { fetch } = mockFetch(json(201, unsigned));
 
-        await build(mesub(fetch), action, 'a/b c');
-
-        expect(calls[0]!.url.pathname).toBe(`/v1/subscriptions/a%2Fb%20c/${action}`);
+        await expect(build(mesub(fetch), action, 'a/b c')).rejects.toMatchObject({
+            status: null,
+            code: 'invalid_request',
+        });
+        expect(fetch).not.toHaveBeenCalled();
     });
 
     it('refuses an empty id, sending nothing', async () => {
@@ -1170,17 +1176,17 @@ describe.each([
         await expect(confirm(mesub(fetch), action)).resolves.toEqual(body);
     });
 
-    it('escapes the id, and refuses an empty one', async () => {
-        const { fetch, calls } = mockFetch(json(201, { subscription: settled }));
+    it('refuses an id that could rewrite the path, and an empty one', async () => {
+        const { fetch } = mockFetch(json(201, { subscription: settled }));
         const client = mesub(fetch);
 
-        await confirm(client, action, 'a/b');
-        expect(calls[0]!.url.pathname).toBe(`/v1/subscriptions/a%2Fb/${action}/confirm`);
-
+        await expect(confirm(client, action, 'a/b')).rejects.toMatchObject({
+            code: 'invalid_request',
+        });
         await expect(confirm(client, action, '')).rejects.toMatchObject({
             code: 'invalid_request',
         });
-        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(fetch).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -1292,6 +1298,17 @@ describe('subscriptions.retry', () => {
         await expect(mesub(fetch).subscriptions.retry('sub_1')).resolves.toEqual(late);
         expect(calls[0]!.init.method).toBe('POST');
         expect(calls[0]!.url.href).toBe('https://api.test/v1/subscriptions/sub_1/retry');
+    });
+
+    it('names its own route and status on an answer it cannot read', async () => {
+        const { fetch } = mockFetch(json(202, { id: 'sub_1' }));
+
+        await expect(mesub(fetch).subscriptions.retry('sub_1')).rejects.toMatchObject({
+            status: 202,
+            code: 'unexpected',
+            message:
+                'Mesub answered POST /v1/subscriptions/:id/retry with an answer this SDK cannot read: status is missing.',
+        });
     });
 
     // A second send is a second retry: on Free, one of three.
@@ -1773,12 +1790,12 @@ describe('subscriptions.attempts', () => {
         expect(calls[0]!.url.search).toBe('?limit=50&starting_after=att_0');
     });
 
-    it('leaves out what was not given, and escapes the id', async () => {
+    it('leaves out what was not given', async () => {
         const { fetch, calls } = mockFetch(json(200, page([])));
 
-        await mesub(fetch).subscriptions.attempts('a/b');
+        await mesub(fetch).subscriptions.attempts('sub_1');
 
-        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/a%2Fb/attempts');
+        expect(calls[0]!.url.pathname).toBe('/v1/subscriptions/sub_1/attempts');
         expect(calls[0]!.url.search).toBe('');
     });
 
@@ -2292,5 +2309,54 @@ describe('the access cache once a subscription lands', () => {
                 client.subscriptions.confirmCancel('sub_1', { signature: SIGNATURE }),
             ).resolves.toEqual({ subscription: cancelled });
         });
+    });
+});
+
+describe('a subscription id', () => {
+    const calls: [string, (client: Mesub, id: string) => Promise<unknown>][] = [
+        ['retrieve', (client, id) => client.subscriptions.retrieve(id)],
+        ['attempts', (client, id) => client.subscriptions.attempts(id)],
+        ['transaction', (client, id) => client.subscriptions.transaction(id)],
+        [
+            'submit',
+            (client, id) =>
+                client.subscriptions.submit(id, {
+                    transaction: 'AQ==',
+                    terms_signature: SIGNATURE,
+                }),
+        ],
+        ['retry', (client, id) => client.subscriptions.retry(id)],
+        ['cancel', (client, id) => client.subscriptions.cancel(id)],
+        [
+            'confirmClose',
+            (client, id) => client.subscriptions.confirmClose(id, { signature: SIGNATURE }),
+        ],
+    ];
+
+    // `.` and `..` survive encodeURIComponent, and the URL resolves them: `retrieve('.')`
+    // would ask the list, `cancel('..')` POST /v1/cancel.
+    describe.each(calls)('%s', (_name, call) => {
+        it.each(['.', '..', '../access', 'sub 1', 'sub_1?x', 'x'.repeat(65)])(
+            'refuses %j before anything is sent: it could reach another route',
+            async (id) => {
+                const { fetch } = mockFetch();
+
+                await expect(call(mesub(fetch), id)).rejects.toMatchObject({
+                    status: null,
+                    code: 'invalid_request',
+                });
+                expect(fetch).not.toHaveBeenCalled();
+            },
+        );
+    });
+
+    it('takes an id as Mesub writes them, 64 characters at most', async () => {
+        const id = `sub-${'A_9'.repeat(20)}`;
+        const { fetch, calls: sent } = mockFetch(json(200, subscription({ id })));
+
+        await mesub(fetch).subscriptions.retrieve(id);
+
+        expect(id).toHaveLength(64);
+        expect(sent[0]!.url.pathname).toBe(`/v1/subscriptions/${id}`);
     });
 });

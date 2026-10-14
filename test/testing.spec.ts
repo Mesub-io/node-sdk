@@ -3,6 +3,7 @@ import request from 'supertest';
 
 import { requirePlan } from '../src/express.js';
 import { Mesub, MesubError, explain } from '../src/index.js';
+import type { ServerSubscription } from '../src/subscriptions.js';
 import { FakeMesub } from '../src/testing.js';
 
 const WALLET = 'SysvarRent111111111111111111111111111111111';
@@ -65,17 +66,108 @@ describe('FakeMesub', () => {
         expect(new FakeMesub().client()).toBeInstanceOf(Mesub);
     });
 
-    it('answers a change on the next call', async () => {
-        const fake = new FakeMesub();
-        const mesub = fake.client();
-        fake.grant(WALLET, 'pro');
-        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+    // Mesub's AccessService: a no is fresh 10 s (REVALIDATE_MIN_S), a yes
+    // until the next retry, charge, expiry or parked period end, the plan's
+    // end, or a blocked row's access_until, from 10 s to 300 s
+    // (revalidateAfter); a list for the soonest yes, 10 with none.
+    describe('revalidate_after', () => {
+        const at = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+        const near = (seconds: number) => expect.closeTo(seconds, -1);
 
-        fake.deny(WALLET, 'pro', { status: 'stopped' });
+        it('serves Mesub’s: 10 for a no, up to 300 for a yes', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const freshness = async (customer: string, plan: string) =>
+                (await mesub.access(customer, plan)).revalidate_after;
 
-        await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
-            access: false,
-            status: 'stopped',
+            fake.grant(WALLET, 'pro');
+            fake.grant(WALLET, 'charge', { next_charge_at: at(120) });
+            fake.grant(WALLET, 'soon', { next_charge_at: at(2) });
+            fake.grant(WALLET, 'late', {
+                status: 'unpaid',
+                next_retry_at: at(200),
+                next_charge_at: null,
+            });
+            fake.grant(WALLET, 'cancelled', { status: 'cancelled', access_until: at(150) });
+            fake.grant(WALLET, 'parked', { paused: true, current_period_end: at(90) });
+            fake.grant(WALLET, 'blocked', {
+                blocked_since: at(-60),
+                blocked_reason: 'receiver_not_allowed',
+                access_until: at(100),
+                next_retry_at: at(250),
+            });
+            fake.grantLastPeriod(WALLET, 'ending', at(80));
+            fake.deny(WALLET, 'stopped', { status: 'stopped' });
+
+            await expect(freshness(OTHER, 'pro')).resolves.toBe(10);
+            await expect(freshness(WALLET, 'stopped')).resolves.toBe(10);
+            await expect(freshness(WALLET, 'pro')).resolves.toBe(300);
+            await expect(freshness(WALLET, 'charge')).resolves.toEqual(near(120));
+            await expect(freshness(WALLET, 'soon')).resolves.toBe(10);
+            await expect(freshness(WALLET, 'late')).resolves.toEqual(near(200));
+            await expect(freshness(WALLET, 'cancelled')).resolves.toEqual(near(150));
+            await expect(freshness(WALLET, 'parked')).resolves.toEqual(near(90));
+            await expect(freshness(WALLET, 'blocked')).resolves.toEqual(near(100));
+            await expect(freshness(WALLET, 'ending')).resolves.toEqual(near(80));
+        });
+
+        it('serves a list the soonest yes, and 10 with none', async () => {
+            const fake = new FakeMesub();
+            // A new client each time: one keeps a list as long as it is fresh.
+            const mesub = { accessList: (wallet: string) => fake.client().accessList(wallet) };
+
+            await expect(mesub.accessList(WALLET)).resolves.toEqual({
+                plans: [],
+                revalidate_after: 10,
+            });
+
+            fake.deny(OTHER, 'team', { status: 'stopped' });
+            await expect(mesub.accessList(OTHER)).resolves.toMatchObject({
+                revalidate_after: 10,
+            });
+
+            fake.grant(WALLET, 'pro');
+            fake.grant(WALLET, 'charge', { next_charge_at: at(120) });
+            fake.deny(WALLET, 'team', { status: 'stopped' });
+            await expect(mesub.accessList(WALLET)).resolves.toMatchObject({
+                revalidate_after: near(120),
+            });
+        });
+
+        it('keeps a yes cached as a real client does: a later no shows once it is stale', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro');
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+
+            fake.deny(WALLET, 'pro', { status: 'stopped' });
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+            await expect(fake.client().hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        });
+
+        it('serves the one asked for, 0 to answer a change on the next call', async () => {
+            const fake = new FakeMesub({ revalidateAfter: 0 });
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro');
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: true,
+                revalidate_after: 0,
+            });
+
+            fake.deny(WALLET, 'pro', { status: 'stopped' });
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: false,
+                status: 'stopped',
+                revalidate_after: 0,
+            });
+            await expect(mesub.accessList(OTHER)).resolves.toMatchObject({ revalidate_after: 0 });
+            // One a test sets on an answer wins.
+            fake.grant(WALLET, 'team', { revalidate_after: 3600 });
+            await expect(mesub.access(WALLET, 'team')).resolves.toMatchObject({
+                revalidate_after: 3600,
+            });
         });
     });
 
@@ -289,7 +381,8 @@ describe('FakeMesub', () => {
     });
 
     it('fails as told, and the outage fallback serves what was cached', async () => {
-        const fake = new FakeMesub();
+        // Stale at once, so the client asks again and meets the failure.
+        const fake = new FakeMesub({ revalidateAfter: 0 });
         fake.grant(WALLET, 'pro');
         const mesub = fake.client();
         await mesub.hasAccess(WALLET, 'pro');
@@ -314,6 +407,31 @@ describe('FakeMesub', () => {
             .catch((e: unknown) => e)) as MesubError;
 
         expect(error).toMatchObject({ status: 429, code: 'rate_limited', retryAfter: 2000 });
+    });
+
+    // Mesub's error body takes `retryable` from its code (ERROR_CODES), never from the status.
+    it('says retryable by the code, as Mesub does, else by the status', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const retryableOf = async (failure: Parameters<FakeMesub['fail']>[0]) => {
+            fake.fail(failure);
+            const error = await mesub.access(WALLET, 'pro').catch((caught: unknown) => caught);
+            return (error as MesubError).retryable;
+        };
+
+        await expect(retryableOf({ status: 409, code: 'subscription_changed' })).resolves.toBe(
+            true,
+        );
+        await expect(retryableOf({ status: 409, code: 'comeback_in_flight' })).resolves.toBe(true);
+        await expect(retryableOf({ status: 409, code: 'already_subscribed' })).resolves.toBe(false);
+        await expect(retryableOf({ status: 503, code: 'network_unavailable' })).resolves.toBe(true);
+        // A code Mesub does not have: the status says.
+        await expect(retryableOf({ status: 502, code: 'bad_gateway' })).resolves.toBe(true);
+        await expect(retryableOf({ status: 409, code: 'made_up' })).resolves.toBe(false);
+        // What the test says wins.
+        await expect(
+            retryableOf({ status: 409, code: 'subscription_changed', retryable: false }),
+        ).resolves.toBe(false);
     });
 
     it('drives a guard end to end', async () => {
@@ -421,6 +539,44 @@ describe('FakeMesub', () => {
         await expect(
             mesub.subscriptions.retrieve(elsewhere.subscription.id),
         ).resolves.toMatchObject({ status: 'pending' });
+    });
+
+    // Mesub's reserveSubscription answers liveRefusal of the wallet's live row
+    // on the plan, by its status; a STOPPED one nothing cancelled is a
+    // comeback, a new checkout beside it (#211).
+    it('refuses a create over a subscription the wallet holds, by its status', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const create = (plan: string) => mesub.subscriptions.create({ plan, wallet: WALLET });
+        const later = new Date(Date.now() + 3600 * 1000).toISOString();
+        const past = '2020-01-01T00:00:00.000Z';
+        const held = (plan: string, fields: Partial<Omit<ServerSubscription, 'plan'>>) =>
+            fake.addSubscription({ wallet: WALLET, plan, ...fields });
+
+        held('active', { status: 'active' });
+        held('cancelled', { status: 'cancelled', access_until: later });
+        held('cancelled-over', { status: 'cancelled', access: false, access_until: past });
+        // Cancelled and past its end, not closed yet: Mesub reads it ended.
+        held('ran-out', { status: 'ended', end_reason: 'cancelled', access: false });
+        held('unpaid', { status: 'unpaid', payment_status: 'late' });
+        const stopped = held('stopped', { status: 'stopped', access: false });
+        held('closed', { status: 'ended', end_reason: 'closed', access: false });
+
+        expect(await codeOf(create('active'))).toBe('already_subscribed');
+        const resume = await create('cancelled').catch((caught: unknown) => caught);
+        expect(resume).toMatchObject({ apiCode: 'subscription_cancelled' });
+        expect((resume as MesubError).message).toContain('resume it');
+        const close = await create('cancelled-over').catch((caught: unknown) => caught);
+        expect(close).toMatchObject({ apiCode: 'subscription_cancelled' });
+        expect((close as MesubError).message).toContain('close it');
+        expect(await codeOf(create('ran-out'))).toBe('subscription_cancelled');
+        expect(await codeOf(create('unpaid'))).toBe('payment_pending');
+
+        const comeback = await create('stopped');
+        expect(comeback.subscription.id).not.toBe(stopped.id);
+        await expect(create('closed')).resolves.toMatchObject({
+            subscription: { status: 'pending' },
+        });
     });
 
     it('subscribes: create, submit, then access, retrieve and list', async () => {
@@ -581,6 +737,19 @@ describe('FakeMesub', () => {
             await expect(mesub.subscriptions.transaction(other.id)).resolves.toMatchObject({
                 subscription: { id: other.id },
             });
+        });
+
+        // Mesub's subscribeTransaction answers liveRefusal of the row that landed, by its status.
+        it('refuses it by the status of the subscription that landed', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await waiting(fake);
+            const landed = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+
+            expect(await codeOf(mesub.subscriptions.transaction(id))).toBe('payment_pending');
+            landed.status = 'cancelled';
+            expect(await codeOf(mesub.subscriptions.transaction(id))).toBe(
+                'subscription_cancelled',
+            );
         });
 
         it('refuses once the plan ended, and not before', async () => {
@@ -812,7 +981,8 @@ describe('FakeMesub', () => {
 
         it('refuses everyone from the end on, whatever the status still reads', async () => {
             vi.useFakeTimers({ toFake: ['Date'] });
-            const fake = new FakeMesub();
+            // Stale at once: Mesub's yes just before the end is fresh 10 s.
+            const fake = new FakeMesub({ revalidateAfter: 0 });
             const mesub = fake.client();
             const end = soon();
             fake.grantLastPeriod(WALLET, 'pro', end);
@@ -1118,6 +1288,76 @@ describe('FakeMesub', () => {
             });
         });
 
+        // Mesub's buildCloseTransaction: a STOPPED row whose delegation carries
+        // no expiry (nothing cancelled it) answers subscription_not_cancelled.
+        it('refuses to close a stopped one never cancelled: it is cancelled first', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'stopped',
+                access: false,
+                payment_status: 'none',
+            });
+            const mesub = fake.client();
+
+            expect(await codeOf(mesub.subscriptions.close(id))).toBe('subscription_not_cancelled');
+            expect(await codeOf(mesub.subscriptions.confirmClose(id, signed))).toBe(
+                'subscription_not_cancelled',
+            );
+        });
+
+        // Mesub's buildCloseTransaction and confirmClose (#344): a row ended
+        // with its plan (removed, replaced, past its end) still holds its
+        // delegation, and closes; it stays ENDED with its reason, and once its
+        // account is gone a second close finds nothing on chain.
+        it('closes one ended with its plan, which keeps its status and reason', async () => {
+            for (const end_reason of ['plan_ended', 'plan_removed', 'plan_replaced'] as const) {
+                const fake = new FakeMesub();
+                const { id } = fake.addSubscription({
+                    wallet: WALLET,
+                    plan: 'pro',
+                    status: 'ended',
+                    end_reason,
+                    access: false,
+                    payment_status: 'none',
+                });
+                const mesub = fake.client();
+
+                await expect(mesub.subscriptions.close(id)).resolves.toMatchObject({
+                    transaction: expect.any(String),
+                });
+                await expect(mesub.subscriptions.confirmClose(id, signed)).resolves.toEqual({
+                    subscription: expect.objectContaining({ status: 'ended', end_reason }),
+                });
+                // Confirmed twice, it is answered the same.
+                await expect(mesub.subscriptions.confirmClose(id, signed)).resolves.toEqual({
+                    subscription: expect.objectContaining({ status: 'ended', end_reason }),
+                });
+                expect(await codeOf(mesub.subscriptions.close(id))).toBe(
+                    'subscription_not_on_chain',
+                );
+            }
+        });
+
+        // Mesub's buildCloseTransaction: an ENDED row that is neither closed
+        // nor ended with its plan is answered subscription_not_on_chain.
+        it('refuses to close one ended any other way', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'ended',
+                end_reason: 'authority_closed',
+                access: false,
+                payment_status: 'none',
+            });
+
+            expect(await codeOf(fake.client().subscriptions.close(id))).toBe(
+                'subscription_not_on_chain',
+            );
+        });
+
         it('refuses what the status does not allow, as Mesub does', async () => {
             const fake = new FakeMesub();
             const { mesub, id } = await subscribed(fake);
@@ -1233,6 +1473,66 @@ describe('FakeMesub', () => {
         }
 
         expect(all).toEqual([second.id, first.id]);
+    });
+
+    // Mesub's ServerSubscriptionsService.list: SUPERSEDED rows are left out
+    // (#254), still answered by id; the cursor is a position among every
+    // subscription it holds, and one it does not hold is a 400.
+    it('lists as Mesub does: no superseded row, and no cursor it does not hold', async () => {
+        const fake = new FakeMesub();
+        const old = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'superseded' });
+        const comeback = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        const elsewhere = fake.addSubscription({ wallet: OTHER, plan: 'pro' });
+        const newest = fake.addSubscription({ wallet: WALLET, plan: 'team' });
+        const { subscriptions } = fake.client();
+
+        await expect(subscriptions.list({ wallet: WALLET })).resolves.toMatchObject({
+            data: [{ id: newest.id }, { id: comeback.id }],
+            has_more: false,
+        });
+        await expect(subscriptions.retrieve(old.id)).resolves.toMatchObject({
+            status: 'superseded',
+        });
+        // Another customer's id is still a position.
+        await expect(
+            subscriptions.list({ wallet: WALLET, starting_after: elsewhere.id }),
+        ).resolves.toMatchObject({ data: [{ id: comeback.id }] });
+
+        const error = await subscriptions
+            .list({ wallet: WALLET, starting_after: 'sub_nope' })
+            .catch((caught: unknown) => caught);
+        expect(error).toMatchObject({ status: 400, apiCode: 'invalid_request' });
+    });
+
+    // Mesub's CustomerQueryDto and ServerSubscribeDto: a wallet is base58, 32
+    // to 44 characters, and an email is one IsEmail takes, or the call is a
+    // 400 invalid_request, which a guard raises as an integration error.
+    it('refuses a wallet or an email Mesub refuses, with a 400', async () => {
+        const fake = new FakeMesub();
+        fake.grant('alice', 'pro');
+        const mesub = fake.client();
+        const refused = async (promise: Promise<unknown>) => {
+            const error = await promise.catch((caught: unknown) => caught);
+            expect(error).toMatchObject({ status: 400, apiCode: 'invalid_request' });
+        };
+
+        await refused(mesub.hasAccess('alice', 'pro'));
+        await refused(mesub.accessList('0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl'));
+        await refused(mesub.hasAccess(`${WALLET}1x`, 'pro'));
+        await refused(mesub.hasAccess({ email: 'ops@localhost' }, 'pro'));
+        await refused(mesub.hasAccess({ email: 'not an email' }, 'pro'));
+        await refused(mesub.subscriptions.list({ wallet: 'alice' }));
+        await refused(mesub.subscriptions.list({ email: 'ops@localhost' }));
+        await refused(mesub.subscriptions.create({ plan: 'pro', wallet: 'alice' }));
+        await refused(
+            mesub.subscriptions.create({ plan: 'pro', wallet: WALLET, email: 'ops@localhost' }),
+        );
+
+        // 32 characters is a wallet too, and a plain email is one.
+        await expect(mesub.hasAccess('11111111111111111111111111111111', 'pro')).resolves.toBe(
+            false,
+        );
+        await expect(mesub.hasAccess({ email: 'Ops@Shop.Example' }, 'pro')).resolves.toBe(false);
     });
 
     it('records every call', async () => {
