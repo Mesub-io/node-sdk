@@ -140,11 +140,12 @@ pull is left to run. For a few minutes past the end, `status` can still read
 A charge can also fail for a reason that is not your customer's. The answer
 then carries `blocked_since` and `blocked_reason`, both null otherwise:
 `mesub` for a cause on Mesub's side, or your plan's own setup by name,
-`puller_not_allowed`, `receiver_not_allowed`, `receiver_account_missing` or
-`mint_gone`. `status` and `payment_status` do not move for it and Mesub keeps
-trying; `access` ends at `access_until` if nothing is collected by then, and
-comes back with the first charge that goes through, nothing to sign. On
-`mint_gone` no charge can go through again, so access does not come back.
+`puller_not_allowed`, `receiver_not_allowed`, `receiver_account_missing`,
+`receiver_account_frozen` or `mint_gone`. `status` and `payment_status` do not
+move for it and Mesub keeps trying; `access` ends at `access_until` if nothing
+is collected by then, and comes back with the first charge that goes through,
+nothing to sign. On `mint_gone` no charge can go through again, so access does
+not come back.
 
 Everything else, the answer's fields, the errors, who to ask about:
 [Check access](https://docs.mesub.io/docs/access). What each status means:

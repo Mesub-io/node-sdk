@@ -267,6 +267,12 @@ const CASES = {
         merchant: `Payments blocked since ${SINCE} by your plan's setup: the wallet that receives its payments has no token account for the plan's token, and nobody else on the plan can be paid. Open that account; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
         actions: ['subscriber:cancel'],
     },
+    blocked_receiver_account_frozen: {
+        input: blocked('receiver_account_frozen'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the token account of the wallet that receives its payments is frozen, so it cannot take payments. Choose another receiving wallet, or ask the token's issuer to unfreeze that account; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
     blocked_mint_gone: {
         input: blocked('mint_gone'),
         subscriber: `Mesub can no longer take your payments for Pro: the token it is paid in no longer exists. This is not because of anything you did, and there is nothing for you to do or sign. You keep access until ${UNTIL}. ${NEVER_BACK}`,
@@ -378,6 +384,7 @@ describe('explain', () => {
             'puller_not_allowed',
             'receiver_not_allowed',
             'receiver_account_missing',
+            'receiver_account_frozen',
             'mint_gone',
         ] as const;
 

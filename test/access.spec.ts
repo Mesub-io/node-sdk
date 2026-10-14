@@ -359,6 +359,7 @@ describe('access', () => {
             'puller_not_allowed',
             'receiver_not_allowed',
             'receiver_account_missing',
+            'receiver_account_frozen',
             'mint_gone',
             'not_known_yet',
         ])('hands back an answer blocked by %s as served', async (blocked_reason) => {

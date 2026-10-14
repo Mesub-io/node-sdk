@@ -253,6 +253,11 @@ export const SITUATIONS = {
         merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the wallet that receives its payments has no token account for the plan's token, and nobody else on the plan can be paid. Open that account; Mesub keeps trying.${BLOCKED_ACCESS}`,
         actions: [CANCEL],
     },
+    blocked_receiver_account_frozen: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the token account of the wallet that receives its payments is frozen, so it cannot take payments. Choose another receiving wallet, or ask the token's issuer to unfreeze that account; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
     blocked_mint_gone: {
         subscriber: `Mesub can no longer take your payments for {plan_name}: the token it is paid in no longer exists. This is not because of anything you did, and there is nothing for you to do or sign.[ You keep access until {access_until}.] ${NEVER_BACK}`,
         merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token.[ Access ends on {access_until}.] ${NEVER_BACK}`,
@@ -515,6 +520,7 @@ const BLOCKED_REASONS: Record<BlockedReason, keyof typeof SITUATIONS> = {
     puller_not_allowed: 'blocked_puller_not_allowed',
     receiver_not_allowed: 'blocked_receiver_not_allowed',
     receiver_account_missing: 'blocked_receiver_account_missing',
+    receiver_account_frozen: 'blocked_receiver_account_frozen',
     mint_gone: 'blocked_mint_gone',
 };
 
