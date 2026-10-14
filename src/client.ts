@@ -426,7 +426,11 @@ export class Mesub {
         const slot = await this.slotOf(asked);
         // Read once, for both: a fresh answer is served as is, a stale one is
         // the fallback. A guard's store that has not answered by the deadline
-        // is a miss, as is one that fails (#132).
+        // is a miss, as is one that fails (#132). Not read again after Mesub
+        // fails: its call runs to the deadline, so a second read would always
+        // be a miss. An answer a webhook drops during that call can still be
+        // the fallback, at most `guardTimeout` after it was dropped: the same
+        // window as a request in flight when it landed (`landed`).
         const cached = await this.cache.read(slot.who, slug, slot.scope, deadline);
 
         if (cached?.fresh) {
