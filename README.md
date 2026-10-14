@@ -54,7 +54,10 @@ app.get('/api/analytics', yourLogin, async (req, res) => {
 });
 ```
 
-The guards do the same in one line and answer the refusals themselves (401
+Called like this, `hasAccess` has no time budget: it waits out the client's
+timeout and retries, and a 429's `Retry-After` twice, so a rate limit can hold
+the route for about two minutes. The guards do the same in one line, within
+`guardTimeout` (2 s by default), and answer the refusals themselves (401
 nobody signed in, 402 no access, 503 Mesub could not answer about a customer it
 never saw):
 
@@ -112,10 +115,12 @@ A customer is named by exactly one of `external_id` (your own id for them),
 function of the request. `access` returns the whole answer for a screen, and
 `accessList` every plan a customer has anything on.
 
-A guard reads `access`, never `status`. Access never runs past
-`access_until`, and on a plan with an end date (`ends_at` on the plan)
-`access_until` is never later than that end: nobody has access past it, the
-last period being charged in full all the same. In that last period the
+A guard reads `access`, never `status`. Access runs past `access_until`
+while the renewal goes through, a couple of minutes when nothing is in its
+way; never past it on a blocked subscription, nor past a plan's end. On a plan
+with an end date (`ends_at` on the plan) `access_until` is never later than
+that end: nobody has access past it, the last period being charged in full
+all the same. In that last period the
 answer has no `next_charge_at`, and a late one no `next_retry_at`, since no
 pull is left to run. For a few minutes past the end, `status` can still read
 `active` or `unpaid` with `access: false`, until Mesub ends the subscription
@@ -140,10 +145,14 @@ nor let a stranger in: they serve the last answer they knew for that customer
 and plan, for up to 24 hours (`maxStaleMs`), and `false` or a 503 for one they
 never saw. An answer with no charge or retry ahead (cancelled, parked, or in
 a plan's last period) stops at its `access_until`; one with a renewal ahead
-keeps the fallback, as it was likely paid while Mesub was down.
+keeps the fallback, as it was likely paid while Mesub was down. A blocked one
+(`blocked_since`) stops at its `access_until` whatever is ahead, as Mesub
+does: its retries say nothing of a payment.
 `access` throws instead. A guard never holds a request longer than
-`guardTimeout`, 2 s by default. A bad key or an unknown plan always throws: a
-broken integration is never read as "not subscribed".
+`guardTimeout`, 2 s by default, a cache store that hangs included: a read not
+answered by then is a miss, and no answer waits for a write. Its 503 carries
+the `Retry-After` Mesub sent, 30 s when it sent none. A bad key or an unknown
+plan always throws: a broken integration is never read as "not subscribed".
 
 ## Show your plans
 

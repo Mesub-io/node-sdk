@@ -16,7 +16,7 @@ import {
     type MesubAccess,
     type PlanOption,
     plansOf,
-    UNAVAILABLE_RETRY_AFTER_S,
+    retryAfterOf,
 } from './guard.js';
 
 import {
@@ -127,7 +127,7 @@ export function requirePlan(
             }
 
             if (outcome.reason === 'unavailable') {
-                res.setHeader('Retry-After', String(UNAVAILABLE_RETRY_AFTER_S));
+                res.setHeader('Retry-After', retryAfterOf(outcome));
             }
 
             res.status(denial.status).json(denialBody(outcome));

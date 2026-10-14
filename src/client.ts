@@ -23,6 +23,11 @@ export interface Decision {
      * knows yet, so the guards answer 503, not 402.
      */
     unavailable?: boolean;
+    /**
+     * With `unavailable`, the milliseconds Mesub's `Retry-After` asked for,
+     * when it sent one: a guard's 503 hands it on (#132).
+     */
+    retryAfter?: number;
 }
 
 export interface MesubOptions {
@@ -179,7 +184,12 @@ export class Mesub {
         // Attempts skip the cache both ways: no key to compute.
         if (options.attempts === true) return this.ask(asked, slug, null, boundOf(options));
 
-        return this.ask(asked, slug, await this.slotOf(asked));
+        const slot = await this.slotOf(asked);
+        const cached = await this.cache.read(slot.who, slug, slot.scope);
+
+        if (cached?.fresh) return cached.value;
+
+        return this.ask(asked, slug, slot);
     }
 
     /**
@@ -221,8 +231,9 @@ export class Mesub {
     }
 
     /**
-     * `access`, in the cache slot its caller computed once, or without the
-     * cache at all (`null`) for an answer with its attempts.
+     * `access` from Mesub, cached in the slot its caller computed once and
+     * already read, or without the cache at all (`null`) for an answer with
+     * its attempts.
      */
     private async ask(
         asked: Asked,
@@ -231,12 +242,6 @@ export class Mesub {
         call: CallOptions = {},
     ): Promise<AccessAnswer> {
         const attempts = slot === null;
-
-        if (slot) {
-            const cached = await this.cache.read(slot.who, plan, slot.scope);
-
-            if (cached?.fresh) return cached.value;
-        }
 
         // Throws a MesubError on any failure, which goes straight to the caller;
         // an answer of the wrong shape too, before it reaches the cache.
@@ -283,8 +288,10 @@ export class Mesub {
 
         if (pending) return pending as Promise<T>;
 
-        const flight: Promise<T> = request().then(async (value) => {
-            if (this.flights.get(key) === flight) await keep(value);
+        // Not awaited: a store slow to write never holds the answer (#132).
+        // `keep` never throws, a store that fails being dropped.
+        const flight: Promise<T> = request().then((value) => {
+            if (this.flights.get(key) === flight) void keep(value);
             return value;
         });
         const land = () => {
@@ -379,6 +386,9 @@ export class Mesub {
      * `false` for a customer it never saw. Any other error is thrown, never
      * turned into `false`: a bad key or an unknown plan is a broken
      * integration, not a denial.
+     *
+     * No time budget: it waits out the client's timeout and retries, and a
+     * 429's `Retry-After`. A guard answers within `guardTimeout` instead.
      */
     async hasAccess(customer: Customer | string, plan: string): Promise<boolean> {
         return (await this.decideBy(customer, plan)).access;
@@ -414,6 +424,18 @@ export class Mesub {
         const asked = customerOf(customer);
         const slug = planOf(plan);
         const slot = await this.slotOf(asked);
+        // Read once, for both: a fresh answer is served as is, a stale one is
+        // the fallback. A guard's store that has not answered by the deadline
+        // is a miss, as is one that fails (#132). Not read again after Mesub
+        // fails: its call runs to the deadline, so a second read would always
+        // be a miss. An answer a webhook drops during that call can still be
+        // the fallback, at most `guardTimeout` after it was dropped: the same
+        // window as a request in flight when it landed (`landed`).
+        const cached = await this.cache.read(slot.who, slug, slot.scope, deadline);
+
+        if (cached?.fresh) {
+            return { access: cached.value.access, answer: cached.value, stale: false };
+        }
 
         try {
             const answer = await this.ask(asked, slug, slot, call);
@@ -428,14 +450,19 @@ export class Mesub {
             if (!unreachable) throw error;
 
             // The last answer known, even stale; a customer never seen stays out.
-            const cached = await this.cache.read(slot.who, slug, slot.scope);
-
             if (cached) {
                 return { access: stillGrants(cached.value), answer: cached.value, stale: true };
             }
 
-            // Not Mesub saying no: nobody knows, so a guard asks for a retry later.
-            return { access: false, answer: null, stale: true, unavailable: true };
+            // Not Mesub saying no: nobody knows, so a guard asks for a retry
+            // later, when Mesub said when.
+            return {
+                access: false,
+                answer: null,
+                stale: true,
+                unavailable: true,
+                ...(error.retryAfter !== null && { retryAfter: error.retryAfter }),
+            };
         }
     }
 }
@@ -526,9 +553,16 @@ function hex(bytes: ArrayBuffer): string {
  * A stale answer's access, past what it paid for (#35): an answer with no
  * charge or retry ahead (cancelled, parked) ends at `access_until`. One with a
  * renewal ahead keeps the fallback: it was likely paid while Mesub was down.
+ * A blocked one (`blocked_since`) ends there too, whatever is ahead: Mesub
+ * keeps retrying it, which says nothing of a payment, and never grants it
+ * past `access_until` (#132).
  */
 function stillGrants(answer: AccessAnswer, now: number = Date.now()): boolean {
     if (!answer.access || !answer.access_until) return answer.access;
-    if (answer.next_charge_at || answer.next_retry_at) return true;
+
+    // Truthy, not non-null: an entry an older release wrote to a shared store may lack them.
+    const renewing = Boolean(answer.next_charge_at || answer.next_retry_at);
+
+    if (renewing && !answer.blocked_since) return true;
     return Date.parse(answer.access_until) > now;
 }

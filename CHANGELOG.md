@@ -134,6 +134,13 @@ The first version published to npm. Requires Node 22 or later.
   Express's own error handler answers an error's `status`: without a handler
   of yours, `requirePlan` and `mesubRoutes` answered Mesub's 401 or 404
   (#120).
+- During an outage, a blocked subscription (`blocked_since`) keeps the
+  fallback only until its `access_until`, as Mesub does: the retry Mesub keeps
+  scheduling used to keep it in for up to `maxStaleMs`. A cache store that
+  hangs no longer holds a guard: a `get` not answered within `guardTimeout`
+  is a miss, and no answer waits for a `set`. A guard's 503 carries the
+  `Retry-After` Mesub sent, 30 s only when it sent none, and `Decision` gets
+  `retryAfter` (#132).
 
 ### Subscribing from your server
 
