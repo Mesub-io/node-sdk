@@ -1300,6 +1300,17 @@ describe('subscriptions.retry', () => {
         expect(calls[0]!.url.href).toBe('https://api.test/v1/subscriptions/sub_1/retry');
     });
 
+    it('names its own route and status on an answer it cannot read', async () => {
+        const { fetch } = mockFetch(json(202, { id: 'sub_1' }));
+
+        await expect(mesub(fetch).subscriptions.retry('sub_1')).rejects.toMatchObject({
+            status: 202,
+            code: 'unexpected',
+            message:
+                'Mesub answered POST /v1/subscriptions/:id/retry with an answer this SDK cannot read: status is missing.',
+        });
+    });
+
     // A second send is a second retry: on Free, one of three.
     it.each([
         [409, 'retry_too_soon', true],

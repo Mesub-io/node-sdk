@@ -332,6 +332,9 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 - `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
   `total`, as it is typed: amounts are whole numbers as strings, and
   `rent.authority` may be null (#101).
+- An answer to `subscriptions.retry` it cannot read names
+  `POST /v1/subscriptions/:id/retry` and status 202, no longer
+  `GET /v1/subscriptions/:id` and 200 (#136).
 
 ### Releases and CI
 

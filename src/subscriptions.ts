@@ -692,6 +692,8 @@ export class Subscriptions {
     async retry(id: string, options: RequestOptions = {}): Promise<ServerSubscription> {
         return serverSubscriptionFrom(
             await this.#transport.post(`${pathOf(id)}/retry`, undefined, options),
+            'POST /v1/subscriptions/:id/retry',
+            202,
         );
     }
 
