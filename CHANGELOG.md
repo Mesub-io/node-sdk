@@ -246,6 +246,9 @@ The first version published to npm. Requires Node 22 or later.
 - `GET /plans/:slug` hands on the plan's `token` and `amount_usd`, and each
   of `payments` its `amount_usd`, null from a Mesub that does not price it
   (#130).
+- `upcoming` carries `amount_usd`, the plan's amount in dollars at the latest
+  price Mesub knows, null when it knows none or the plan could not be read
+  (#136).
 - `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
   5 pages at most, so one browser request is never more than 5 calls to
   Mesub. It answers `has_more` beside `subscriptions`: true when the customer

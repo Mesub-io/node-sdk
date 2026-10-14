@@ -235,6 +235,13 @@ export interface WidgetUpcoming {
     amount: string | null;
     amount_display: string | null;
     /**
+     * The plan's amount in dollars at the latest price Mesub knows, a decimal
+     * string such as `"9.99"`: an estimate to show beside the amount, never
+     * what is charged. Null when Mesub knows no price, and when the plan could
+     * not be read.
+     */
+    amount_usd: string | null;
+    /**
      * On a `retry`, which one it will be and out of how many: 2 and 3 for
      * "next try 2 / 3". Null on a `charge`, and when Mesub does not say.
      */
@@ -305,7 +312,7 @@ async function upcomingOf(
     // A date on any other status is no pull Mesub will run.
     if (!next || next.due_at === null || subscription.paused) return [];
 
-    let price: { amount: string; amount_display: string } | null = null;
+    let price: Pick<Plan, 'amount' | 'amount_display' | 'amount_usd'> | null = null;
 
     if (plan !== null && SLUG.test(plan)) {
         try {
@@ -323,6 +330,7 @@ async function upcomingOf(
             due_at: next.due_at,
             amount: price?.amount ?? null,
             amount_display: price?.amount_display ?? null,
+            amount_usd: price?.amount_usd ?? null,
             // Mesub's own, never counted here; `?? null` for a subscription cached by an older SDK.
             retry_number: retry ? (subscription.next_retry_number ?? null) : null,
             retries_allowed: retry ? (subscription.retries_allowed ?? null) : null,
