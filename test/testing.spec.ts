@@ -458,7 +458,7 @@ describe('FakeMesub', () => {
         const create = (plan: string) => mesub.subscriptions.create({ plan, wallet: WALLET });
         const later = new Date(Date.now() + 3600 * 1000).toISOString();
         const past = '2020-01-01T00:00:00.000Z';
-        const held = (plan: string, fields: Partial<ServerSubscription>) =>
+        const held = (plan: string, fields: Partial<Omit<ServerSubscription, 'plan'>>) =>
             fake.addSubscription({ wallet: WALLET, plan, ...fields });
 
         held('active', { status: 'active' });
