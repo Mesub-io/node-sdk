@@ -71,7 +71,8 @@ type Action = (typeof ACTIONS)[number];
 
 /** An id as Mesub writes them: nothing that could rewrite the path. */
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
-const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** A plan slug as Mesub writes them: with at least one letter, never a number. */
+const SLUG = /^(?=.*[a-z])[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
  * How long one widget request gives Mesub for all its reads, in milliseconds:

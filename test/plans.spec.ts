@@ -227,18 +227,30 @@ describe('plans.retrieve', () => {
         });
     });
 
-    it.each(['', '.', '..', 'Pro', 'a/b', 'a b', '-pro', 'pro-', 'a--b', '../access', 42, null])(
-        'refuses %j before anything is sent: it could reach another route',
-        async (slug) => {
-            const { client, asked } = mesub(() => Response.json(plan()));
+    it.each([
+        '',
+        '.',
+        '..',
+        'Pro',
+        'a/b',
+        'a b',
+        '-pro',
+        'pro-',
+        'a--b',
+        '../access',
+        '123',
+        '2026-10',
+        42,
+        null,
+    ])('refuses %j before anything is sent: it could reach another route', async (slug) => {
+        const { client, asked } = mesub(() => Response.json(plan()));
 
-            await expect(client.plans.retrieve(slug as never)).rejects.toMatchObject({
-                code: 'invalid_request',
-                status: null,
-            });
-            expect(asked).toEqual([]);
-        },
-    );
+        await expect(client.plans.retrieve(slug as never)).rejects.toMatchObject({
+            code: 'invalid_request',
+            status: null,
+        });
+        expect(asked).toEqual([]);
+    });
 
     it('refuses an answer it cannot read', async () => {
         const { client } = mesub(() => Response.json({ slug: 'pro' }));

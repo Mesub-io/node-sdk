@@ -102,6 +102,10 @@ The first version published to npm. Requires Node 22 or later.
   stablecoin. The top-level `symbol` is unchanged: set only for a vouched
   mint. Read as an unverified token with nothing known and `amount_usd: null`
   from a Mesub that predates them; `PlanToken` is exported (#130).
+- A plan slug needs at least one letter, as Mesub requires: `retrieve('123')`
+  throws `invalid_request` before anything is sent, the widget routes answer
+  `GET /plans/123` 404 without a call, and `mesubRoutes({ plans: ['123'] })`
+  throws (#136).
 
 ### Guards
 

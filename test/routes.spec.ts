@@ -142,7 +142,7 @@ describe('the widget routes: a plan', () => {
         });
     });
 
-    it.each(['/plans/nope', '/plans/..', '/plans/Pro', '/plans/a%2Fb'])(
+    it.each(['/plans/nope', '/plans/..', '/plans/Pro', '/plans/a%2Fb', '/plans/123'])(
         'answers 404 for %s',
         async (path) => {
             const { call, fake } = setup();
@@ -2212,7 +2212,11 @@ describe('the widget routes: your auth', () => {
         expect(() => checkWidgetOptions({ customer: () => null, plans: ['Pro!'] })).toThrow(
             TypeError,
         );
+        expect(() => checkWidgetOptions({ customer: () => null, plans: ['123'] })).toThrow(
+            TypeError,
+        );
         expect(() => checkWidgetOptions({ customer: () => null, plans: ['pro'] })).not.toThrow();
+        expect(() => checkWidgetOptions({ customer: () => null, plans: ['pro-2'] })).not.toThrow();
     });
 });
 
