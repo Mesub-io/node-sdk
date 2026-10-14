@@ -442,6 +442,9 @@ const { body, headers } = await fake.webhook('subscription.renewed'); // signed
 fake.reset(); // between tests
 ```
 
+As on Mesub, a client keeps a yes up to five minutes: a change shows to a new
+`fake.client()`, or on the next call with `new FakeMesub({ revalidateAfter: 0 })`.
+
 Guards, webhooks, subscribing and managing against it:
 [Test your integration](https://docs.mesub.io/docs/testing).
 

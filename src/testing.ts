@@ -189,6 +189,11 @@ const REASONS: Record<number, string> = {
  * or `setAccess`, gets a client wired to it with `client()`, and makes it
  * fail with `fail()`. A plan with an end is `grantLastPeriod`, `endPlan`, or
  * an `ends_at` in `plans`.
+ *
+ * It answers and refuses as Mesub does, `revalidate_after` included: a
+ * client keeps a yes up to five minutes and a no 10 seconds, so a change
+ * made after a client asked shows to a new client, or to every client with
+ * `revalidateAfter: 0`.
  */
 export class FakeMesub {
     readonly baseUrl: string;
