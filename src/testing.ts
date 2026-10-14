@@ -188,6 +188,8 @@ export class FakeMesub {
     #subscriptions: ServerSubscription[] = [];
     /** The subscriptions a cancel, resume or close transaction was built for, by id. */
     readonly #built = new Map<string, Set<FakeAction>>();
+    /** The rows ended with their plan whose close landed: nothing of them is left on chain. */
+    readonly #gone = new Set<string>();
     /** The attempts `setAttempts` gave each subscription, newest first, by id. */
     readonly #attempts = new Map<string, SubscriptionAttempt[]>();
     readonly #attemptsRoute: boolean;
@@ -395,6 +397,7 @@ export class FakeMesub {
         this.#ends.clear();
         this.#subscriptions = [];
         this.#built.clear();
+        this.#gone.clear();
         this.#attempts.clear();
         this.#failure = null;
         this.requests.length = 0;
@@ -765,7 +768,7 @@ export class FakeMesub {
 
     /** The transaction of a cancel, resume or close, or Mesub's refusal of it. */
     #build(action: FakeAction, subscription: ServerSubscription): Response {
-        const refusal = refusalOf(action, subscription);
+        const refusal = refusalOf(action, subscription, this.#gone.has(subscription.id));
         if (refusal) return refusal;
 
         const built = this.#built.get(subscription.id) ?? new Set();
@@ -785,8 +788,11 @@ export class FakeMesub {
         if (typeof signature !== 'string' || signature === '') {
             return error(400, 'invalid_request', 'signature must be a transaction signature.');
         }
-        const done = subscription.status === DONE[action];
-        const refusal = done ? null : refusalOf(action, subscription);
+        const gone = this.#gone.has(subscription.id);
+        // One ended with its plan is ended before its close and after it (#344).
+        const done =
+            subscription.status === DONE[action] && !(endedWithPlan(subscription) && !gone);
+        const refusal = done ? null : refusalOf(action, subscription, gone);
         if (refusal) return refusal;
         if (!this.#built.get(subscription.id)?.has(action)) {
             return error(400, 'nothing_to_confirm', 'There is no transaction to confirm yet.');
@@ -799,6 +805,12 @@ export class FakeMesub {
         const now = new Date().toISOString();
         const end = subscription.current_period_end;
 
+        if (action === 'close' && endedWithPlan(subscription)) {
+            // As Mesub's confirmClose: its account is gone, and the row stays
+            // ended with the reason it ended for. Nothing ends twice.
+            this.#gone.add(subscription.id);
+            return Response.json({ subscription }, { status: 201 });
+        }
         if (action === 'cancel') {
             // Paid up, it keeps its access to the end of the period.
             Object.assign(subscription, {
@@ -968,8 +980,15 @@ const DONE: Record<FakeAction, ServerSubscription['status']> = {
     close: 'ended',
 };
 
-/** Mesub's 409 for an action a subscription's status does not allow, or null. */
-function refusalOf(action: FakeAction, subscription: ServerSubscription): Response | null {
+/**
+ * Mesub's 409 for an action a subscription's status does not allow, or null.
+ * `gone`: a row ended with its plan whose close landed already.
+ */
+function refusalOf(
+    action: FakeAction,
+    subscription: ServerSubscription,
+    gone = false,
+): Response | null {
     const { status, access_until } = subscription;
     const over = access_until === null || Date.parse(access_until) <= Date.now();
     const cancelled =
@@ -991,10 +1010,31 @@ function refusalOf(action: FakeAction, subscription: ServerSubscription): Respon
             ? error(409, 'subscription_ended', 'The period paid for is over: subscribe again.')
             : null;
     }
+    // A close, as Mesub's buildCloseTransaction answers it. Ended with its
+    // plan, the delegation still holds the deposit (#344): it closes, once.
+    if (endedWithPlan(subscription)) {
+        return gone
+            ? error(
+                  409,
+                  'subscription_not_on_chain',
+                  'This subscription was closed outside Mesub, so it has ended.',
+              )
+            : null;
+    }
     if (isClosed(subscription)) {
         return error(409, 'subscription_not_on_chain', 'This subscription is closed already.');
     }
-    if (!cancelled && status !== 'stopped') {
+    if (status === 'ended' && !cancelled) {
+        return error(
+            409,
+            'subscription_not_on_chain',
+            'This subscription has ended and cannot be closed through Mesub.',
+        );
+    }
+    // A stopped one included: the fake's is one nothing cancelled, which
+    // Mesub cancels first. Neither a cancellation signed without Mesub nor an
+    // authority closed for good (Mesub-io/backend#394) is modelled here.
+    if (!cancelled) {
         return error(
             409,
             'subscription_not_cancelled',
@@ -1014,6 +1054,18 @@ function holderOf(contact: Pick<ServerSubscription, 'email' | 'external_id'>): s
     if (contact.external_id) return `x:${contact.external_id}`;
 
     return contact.email ? `e:${contact.email}` : '-';
+}
+
+/** The reasons a row ends with its plan: removed, replaced, or past its end. */
+const WITH_ITS_PLAN: Array<ServerSubscription['end_reason']> = [
+    'plan_removed',
+    'plan_replaced',
+    'plan_ended',
+];
+
+/** A row ended with its plan, which Mesub still closes (Mesub-io/backend#344). */
+function endedWithPlan(subscription: ServerSubscription): boolean {
+    return subscription.status === 'ended' && WITH_ITS_PLAN.includes(subscription.end_reason);
 }
 
 function isClosed(subscription: ServerSubscription): boolean {

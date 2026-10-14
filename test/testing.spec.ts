@@ -1118,6 +1118,76 @@ describe('FakeMesub', () => {
             });
         });
 
+        // Mesub's buildCloseTransaction: a STOPPED row whose delegation carries
+        // no expiry (nothing cancelled it) answers subscription_not_cancelled.
+        it('refuses to close a stopped one never cancelled: it is cancelled first', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'stopped',
+                access: false,
+                payment_status: 'none',
+            });
+            const mesub = fake.client();
+
+            expect(await codeOf(mesub.subscriptions.close(id))).toBe('subscription_not_cancelled');
+            expect(await codeOf(mesub.subscriptions.confirmClose(id, signed))).toBe(
+                'subscription_not_cancelled',
+            );
+        });
+
+        // Mesub's buildCloseTransaction and confirmClose (#344): a row ended
+        // with its plan (removed, replaced, past its end) still holds its
+        // delegation, and closes; it stays ENDED with its reason, and once its
+        // account is gone a second close finds nothing on chain.
+        it('closes one ended with its plan, which keeps its status and reason', async () => {
+            for (const end_reason of ['plan_ended', 'plan_removed', 'plan_replaced'] as const) {
+                const fake = new FakeMesub();
+                const { id } = fake.addSubscription({
+                    wallet: WALLET,
+                    plan: 'pro',
+                    status: 'ended',
+                    end_reason,
+                    access: false,
+                    payment_status: 'none',
+                });
+                const mesub = fake.client();
+
+                await expect(mesub.subscriptions.close(id)).resolves.toMatchObject({
+                    transaction: expect.any(String),
+                });
+                await expect(mesub.subscriptions.confirmClose(id, signed)).resolves.toEqual({
+                    subscription: expect.objectContaining({ status: 'ended', end_reason }),
+                });
+                // Confirmed twice, it is answered the same.
+                await expect(mesub.subscriptions.confirmClose(id, signed)).resolves.toEqual({
+                    subscription: expect.objectContaining({ status: 'ended', end_reason }),
+                });
+                expect(await codeOf(mesub.subscriptions.close(id))).toBe(
+                    'subscription_not_on_chain',
+                );
+            }
+        });
+
+        // Mesub's buildCloseTransaction: an ENDED row that is neither closed
+        // nor ended with its plan is answered subscription_not_on_chain.
+        it('refuses to close one ended any other way', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'ended',
+                end_reason: 'authority_closed',
+                access: false,
+                payment_status: 'none',
+            });
+
+            expect(await codeOf(fake.client().subscriptions.close(id))).toBe(
+                'subscription_not_on_chain',
+            );
+        });
+
         it('refuses what the status does not allow, as Mesub does', async () => {
             const fake = new FakeMesub();
             const { mesub, id } = await subscribed(fake);
