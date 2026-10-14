@@ -573,6 +573,8 @@ export class FakeMesub {
     }
 
     #access(query: Record<string, string>): Response {
+        const invalid = invalidContact(query);
+        if (invalid) return invalid;
         const asked = askedIn(query);
         if (!asked)
             return error(400, 'invalid_request', 'Name one of wallet, external_id or email.');
@@ -599,6 +601,8 @@ export class FakeMesub {
     }
 
     #list(query: Record<string, string>): Response {
+        const invalid = invalidContact(query);
+        if (invalid) return invalid;
         const asked = askedIn(query);
         if (!asked)
             return error(400, 'invalid_request', 'Name one of wallet, external_id or email.');
@@ -667,6 +671,8 @@ export class FakeMesub {
         if (typeof plan !== 'string' || typeof wallet !== 'string') {
             return error(400, 'invalid_request', 'plan and wallet are required.');
         }
+        const invalid = invalidContact({ wallet, email });
+        if (invalid) return invalid;
         if (this.#plans && !this.#plans.has(plan)) {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
@@ -1173,6 +1179,38 @@ function nothing(asked: Asked, plan: string): AccessAnswer {
     return { wallet: asked.kind === 'wallet' ? asked.value : null, plan, ...NOTHING };
 }
 
+/** A Solana address's shape, as Mesub's DTOs hold a wallet to: base58, 32 to 44 characters. */
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * Close to the `IsEmail` Mesub checks an email with, validator.js's
+ * defaults: no space, one @, and a domain ending in a top-level one of two
+ * letters or more, so `ops@localhost` is refused. Not every edge of it.
+ */
+const EMAIL = /^[^\s@]+@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
+
+/**
+ * Mesub's 400 for a wallet or an email its DTOs refuse (`CustomerQueryDto`,
+ * `ServerSubscribeDto`), before anything is looked up; null for those it
+ * takes, or that are not given. The email is trimmed and lowercased first,
+ * as Mesub does.
+ */
+function invalidContact({ wallet, email }: { wallet?: unknown; email?: unknown }): Response | null {
+    const reasons: string[] = [];
+    if (typeof wallet === 'string' && !BASE58_ADDRESS.test(wallet)) {
+        reasons.push('wallet must be a base58 Solana address');
+    }
+    if (typeof email === 'string') {
+        const normalised = email.trim().toLowerCase();
+        if (!EMAIL.test(normalised)) reasons.push('email must be an email address');
+        if (normalised.length > 254) {
+            reasons.push('email must be shorter than or equal to 254 characters');
+        }
+    }
+
+    return reasons.length ? error(400, 'invalid_request', reasons) : null;
+}
+
 /** The one customer a query names, or null when it names none or several. */
 function askedIn(query: Record<string, string>): Asked | null {
     try {
@@ -1255,7 +1293,8 @@ const RETRYABLE_CODES = new Set([
 function error(
     status: number,
     code: string,
-    message: string,
+    // A list for what Mesub's validation refused, as Nest answers it.
+    message: string | string[],
     { retryable, retryAfter }: { retryable?: boolean; retryAfter?: number } = {},
 ): Response {
     return Response.json(

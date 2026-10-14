@@ -1411,6 +1411,37 @@ describe('FakeMesub', () => {
         expect(error).toMatchObject({ status: 400, apiCode: 'invalid_request' });
     });
 
+    // Mesub's CustomerQueryDto and ServerSubscribeDto: a wallet is base58, 32
+    // to 44 characters, and an email is one IsEmail takes, or the call is a
+    // 400 invalid_request, which a guard raises as an integration error.
+    it('refuses a wallet or an email Mesub refuses, with a 400', async () => {
+        const fake = new FakeMesub();
+        fake.grant('alice', 'pro');
+        const mesub = fake.client();
+        const refused = async (promise: Promise<unknown>) => {
+            const error = await promise.catch((caught: unknown) => caught);
+            expect(error).toMatchObject({ status: 400, apiCode: 'invalid_request' });
+        };
+
+        await refused(mesub.hasAccess('alice', 'pro'));
+        await refused(mesub.accessList('0OIl0OIl0OIl0OIl0OIl0OIl0OIl0OIl'));
+        await refused(mesub.hasAccess(`${WALLET}1x`, 'pro'));
+        await refused(mesub.hasAccess({ email: 'ops@localhost' }, 'pro'));
+        await refused(mesub.hasAccess({ email: 'not an email' }, 'pro'));
+        await refused(mesub.subscriptions.list({ wallet: 'alice' }));
+        await refused(mesub.subscriptions.list({ email: 'ops@localhost' }));
+        await refused(mesub.subscriptions.create({ plan: 'pro', wallet: 'alice' }));
+        await refused(
+            mesub.subscriptions.create({ plan: 'pro', wallet: WALLET, email: 'ops@localhost' }),
+        );
+
+        // 32 characters is a wallet too, and a plain email is one.
+        await expect(mesub.hasAccess('11111111111111111111111111111111', 'pro')).resolves.toBe(
+            false,
+        );
+        await expect(mesub.hasAccess({ email: 'Ops@Shop.Example' }, 'pro')).resolves.toBe(false);
+    });
+
     it('records every call', async () => {
         const fake = new FakeMesub();
         await fake.client().access({ email: 'ada@example.com' }, 'pro');
