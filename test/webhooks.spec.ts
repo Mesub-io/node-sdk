@@ -135,6 +135,20 @@ describe('verifyWebhook', () => {
             created_at: '2026-01-15T12:00:00.000Z',
             data: { ...SUBSCRIPTION, detail: DETAILS['subscription.renewed'] },
         });
+        expect(event.test).toBeUndefined();
+    });
+
+    // The back's `samplePayload`: a real event type, sent by hand, `test: true` at the root.
+    it('hands back test: true on a sample of a real event type', async () => {
+        const raw = JSON.stringify({
+            ...JSON.parse(body('subscription.stopped', DETAILS['subscription.stopped'])),
+            test: true,
+        });
+        const headers = backendHeaders(SECRET, 'cmsample1', NOW, raw);
+
+        const event = await verifyWebhook(raw, headers, { secret: SECRET });
+
+        expect(event).toMatchObject({ type: 'subscription.stopped', test: true });
     });
 
     // `data` is a subscription: `paused` and `end_reason` are read like retrieve's.
@@ -634,6 +648,7 @@ describe('verifyWebhook', () => {
             }),
         ],
         ['the detail', JSON.stringify({ type: 'test', created_at: NOW, data: SUBSCRIPTION })],
+        ['a test flag that is true', JSON.stringify({ ...JSON.parse(body('test')), test: 'yes' })],
     ])('throws unexpected for a signed body missing %s', async (_what, raw) => {
         const error = await failure(
             verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
@@ -751,6 +766,31 @@ describe('mesub.webhooks.verify', () => {
         await mesub.hasAccess(WALLET, 'pro');
         await mesub.accessList(WALLET);
 
+        expect(fake.requests.length).toBe(asked);
+    });
+
+    // The dashboard's sample of a real event type: a made-up subscription, flagged `test: true`.
+    it('keeps the cached answer when a sample sent from the dashboard comes', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        fake.grant(WALLET, 'pro', { revalidate_after: 300 });
+        await mesub.hasAccess(WALLET, 'pro');
+        await mesub.accessList(WALLET);
+        const asked = fake.requests.length;
+
+        const sample = await fake.webhook('subscription.stopped', {
+            subscription: { wallet: WALLET, plan: 'pro', access: false },
+        });
+        const { body: raw, headers } = await signWebhook(
+            { ...(JSON.parse(sample.body) as object), test: true },
+            { secret: fake.webhookSecret },
+        );
+        const event = await mesub.webhooks.verify(raw, headers);
+        await mesub.hasAccess(WALLET, 'pro');
+        await mesub.accessList(WALLET);
+
+        const flagged: true | undefined = event.test;
+        expect(flagged).toBe(true);
         expect(fake.requests.length).toBe(asked);
     });
 

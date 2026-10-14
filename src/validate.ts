@@ -443,6 +443,8 @@ const WEBHOOK = {
     type: STRING,
     created_at: DATE,
     data: OBJECT,
+    // Only on a body sent by hand from the dashboard, and then true.
+    test: { check: (value) => value === true, expected: 'true', optional: true },
 } satisfies Record<Exclude<keyof WebhookEvent, 'id'>, Field>;
 
 const DETAILS: Partial<Record<string, Record<string, Field>>> = {

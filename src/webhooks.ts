@@ -34,15 +34,22 @@ export type WebhookEventType = WebhookEvent['type'];
  */
 interface WebhookEventOf<Type extends string, Detail> {
     /**
-     * The `webhook-id` header: the same on every retry and resend of this
-     * delivery, so a handler drops one it has already done. Another
-     * endpoint gets the same event under its own id.
+     * The delivery id, from the `webhook-id` header. It stays the same on
+     * every retry and resend of this delivery: drop one you already handled.
+     * It is not an event id. Each endpoint gets its own delivery, so two
+     * endpoints get the same event under two ids.
      */
     id: string;
     type: Type;
     /** When the event happened (ISO 8601), not when it was sent. */
     created_at: string;
     data: ServerSubscription & { detail: Detail };
+    /**
+     * True on a body sent by hand from the dashboard: the `test` event, or
+     * a sample of a real type on a made-up subscription (`sub_test`,
+     * `user_123`). Absent on a real event. Change nothing for it.
+     */
+    test?: true;
 }
 
 /** No detail: the subscription says it all. */
@@ -133,7 +140,10 @@ export type SubscriptionResumedEvent = WebhookEventOf<'subscription.resumed', No
 export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', NoDetail>;
 /** A checkout nobody signed in time. */
 export type SubscriptionExpiredEvent = WebhookEventOf<'subscription.expired', NoDetail>;
-/** Sent from the dashboard on request, with a made-up subscription (`sub_test`). */
+/**
+ * Sent from the dashboard on request, with a made-up subscription (`sub_test`).
+ * The dashboard also sends samples of the other types, with `test: true`.
+ */
 export type TestEvent = WebhookEventOf<'test', NoDetail>;
 
 /**
@@ -201,9 +211,11 @@ export class Webhooks {
 
     /**
      * `verifyWebhook`, with `webhookSecret` unless `options.secret` says
-     * otherwise. An event whose subscription grants access also drops the
-     * client's cached no for that customer, as a submit that lands does.
-     * `subscription.renewal_upcoming` drops nothing: it moves no access.
+     * otherwise. A verified event also drops every access answer cached for
+     * its customer, the yes and the no, so the next check asks Mesub.
+     * Three drop nothing: `subscription.renewal_upcoming`, which moves no
+     * access, the `test` event, and any body with `test: true`, whose
+     * subscription is made up.
      */
     async verify(
         body: WebhookBody,
@@ -213,7 +225,11 @@ export class Webhooks {
         const event = await verify(body, headers, options, this.#secret);
 
         // A charge to come changes no answer: dropping it would cost the outage fallback.
-        const moves = event.type !== 'test' && event.type !== 'subscription.renewal_upcoming';
+        // A sample from the dashboard names a made-up customer: it moves nobody's access.
+        const moves =
+            event.test !== true &&
+            event.type !== 'test' &&
+            event.type !== 'subscription.renewal_upcoming';
 
         if (moves) await this.#received(event);
 

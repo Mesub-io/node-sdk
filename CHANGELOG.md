@@ -284,6 +284,9 @@ answer this request.`: never the SDK's own message, which may name your
   pay and, when it cannot, why (`RenewalIssue`). Its detail is checked,
   `fake.webhook` makes one, and verifying it drops no cached answer: it moves
   no access (#121).
+- A webhook sent by hand from the dashboard carries `test: true`, now typed
+  on every event. The dashboard sends one for any event type, on a made-up
+  subscription. `verify` drops no cached answer for it (#135).
 
 ### Testing your integration
 
