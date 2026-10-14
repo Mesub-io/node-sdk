@@ -526,9 +526,16 @@ function hex(bytes: ArrayBuffer): string {
  * A stale answer's access, past what it paid for (#35): an answer with no
  * charge or retry ahead (cancelled, parked) ends at `access_until`. One with a
  * renewal ahead keeps the fallback: it was likely paid while Mesub was down.
+ * A blocked one (`blocked_since`) ends there too, whatever is ahead: Mesub
+ * keeps retrying it, which says nothing of a payment, and never grants it
+ * past `access_until` (#132).
  */
 function stillGrants(answer: AccessAnswer, now: number = Date.now()): boolean {
     if (!answer.access || !answer.access_until) return answer.access;
-    if (answer.next_charge_at || answer.next_retry_at) return true;
+
+    // Truthy, not non-null: an entry an older release wrote to a shared store may lack them.
+    const renewing = Boolean(answer.next_charge_at || answer.next_retry_at);
+
+    if (renewing && !answer.blocked_since) return true;
     return Date.parse(answer.access_until) > now;
 }

@@ -930,6 +930,43 @@ describe('hasAccess', () => {
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
         });
 
+        // Mesub keeps retrying a blocked subscription, which says nothing of a
+        // payment: it never grants one past access_until, nor does the fallback (#132).
+        it.each([
+            ['a retry', { next_charge_at: null, next_retry_at: later }],
+            ['a charge', { next_charge_at: later, next_retry_at: null }],
+        ])(
+            'keeps out a blocked subscriber once access_until is past, %s ahead',
+            async (_label, ahead) => {
+                const mesub = await staleThen(
+                    answer({
+                        blocked_since: '2026-09-30T11:00:00.000Z',
+                        blocked_reason: 'receiver_not_allowed',
+                        access_until: ended,
+                        ...ahead,
+                    }),
+                    nest(503, 'Service Unavailable'),
+                );
+
+                await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
+            },
+        );
+
+        it('keeps a blocked subscriber in before access_until', async () => {
+            const mesub = await staleThen(
+                answer({
+                    blocked_since: '2026-09-30T11:00:00.000Z',
+                    blocked_reason: 'mesub',
+                    access_until: later,
+                    next_charge_at: null,
+                    next_retry_at: later,
+                }),
+                nest(503, 'Service Unavailable'),
+            );
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+        });
+
         it('falls back on the answer of that plan only', async () => {
             const mesub = await staleThen(answer(), nest(503, 'Service Unavailable'));
 
