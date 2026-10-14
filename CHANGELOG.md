@@ -211,6 +211,9 @@ The first version published to npm. Requires Node 22 or later.
   setup. The subscriber reads that nothing is theirs to do, the merchant
   what to fix, and both when access ends. A blocked one whose access ended
   no longer reads `ended_plan_ended` (#128).
+- `blocked_mint_gone` no longer says access comes back with the first payment
+  that goes through: the token no longer exists, so no payment can. Both
+  sentences say access does not come back once it ends (#136).
 
 ### Routes for the React widget
 

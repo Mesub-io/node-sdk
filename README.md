@@ -127,7 +127,8 @@ then carries `blocked_since` and `blocked_reason`, both null otherwise:
 `puller_not_allowed`, `receiver_not_allowed`, `receiver_account_missing` or
 `mint_gone`. `status` and `payment_status` do not move for it and Mesub keeps
 trying; `access` ends at `access_until` if nothing is collected by then, and
-comes back with the first charge that goes through, nothing to sign.
+comes back with the first charge that goes through, nothing to sign. On
+`mint_gone` no charge can go through again, so access does not come back.
 
 Everything else, the answer's fields, the errors, who to ask about:
 [Check access](https://docs.mesub.io/docs/access). What each status means:
