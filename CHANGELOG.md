@@ -339,6 +339,20 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   its fields are enough) or a null `symbol` is unverified with no symbol and
   no dollar value unless told. An attempt of `setAttempts` is priced `9.99`,
   and not priced when given another `amount` and no `amount_usd` (#130).
+- `FakeMesub` serves the `revalidate_after` Mesub does: 10 for a no, and for
+  a yes the seconds to its next charge, retry or end, from 10 to 300; a list
+  gets its soonest yes, or 10. A client keeps a yes up to five minutes, as
+  against Mesub: `new FakeMesub({ revalidateAfter: 0 })` shows every change
+  on the next call (#134).
+- `FakeMesub` refuses as Mesub does. `create` and `transaction` beside a
+  subscription the wallet holds answer by its status: `already_subscribed`,
+  `subscription_cancelled` or `payment_pending`. `close` of a stopped
+  subscription nobody cancelled answers `subscription_not_cancelled`, and
+  one ended with its plan closes. A wallet that is not base58 (32 to 44
+  characters) or an invalid email is a 400 `invalid_request` (#134).
+- `FakeMesub` lists as Mesub does: no `superseded` subscription, and a 400
+  for a `starting_after` it does not hold. An error's `retryable` follows its
+  code, true for `subscription_changed` (#134).
 
 ### Errors
 

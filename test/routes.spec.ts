@@ -2644,7 +2644,9 @@ describe('mesubRouteHandlers for Next', () => {
         );
         const { request } = streamed(Array.from(bytes, (byte) => Uint8Array.of(byte)));
 
-        expect((await POST(request, context('subscriptions'))).status).toBe(201);
+        // Read whole: Mesub gets the wallet as sent, and refuses it as no
+        // base58 address, a 400 the route hands on.
+        expect((await POST(request, context('subscriptions'))).status).toBe(400);
         expect(fake.requests.at(-1)?.body).toMatchObject({ wallet: `${WALLET}é€` });
     });
 
