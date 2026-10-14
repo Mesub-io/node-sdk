@@ -3,6 +3,7 @@ import request from 'supertest';
 
 import { requirePlan } from '../src/express.js';
 import { Mesub, MesubError, explain } from '../src/index.js';
+import type { ServerSubscription } from '../src/subscriptions.js';
 import { FakeMesub } from '../src/testing.js';
 
 const WALLET = 'SysvarRent111111111111111111111111111111111';
@@ -423,6 +424,44 @@ describe('FakeMesub', () => {
         ).resolves.toMatchObject({ status: 'pending' });
     });
 
+    // Mesub's reserveSubscription answers liveRefusal of the wallet's live row
+    // on the plan, by its status; a STOPPED one nothing cancelled is a
+    // comeback, a new checkout beside it (#211).
+    it('refuses a create over a subscription the wallet holds, by its status', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const create = (plan: string) => mesub.subscriptions.create({ plan, wallet: WALLET });
+        const later = new Date(Date.now() + 3600 * 1000).toISOString();
+        const past = '2020-01-01T00:00:00.000Z';
+        const held = (plan: string, fields: Partial<ServerSubscription>) =>
+            fake.addSubscription({ wallet: WALLET, plan, ...fields });
+
+        held('active', { status: 'active' });
+        held('cancelled', { status: 'cancelled', access_until: later });
+        held('cancelled-over', { status: 'cancelled', access: false, access_until: past });
+        // Cancelled and past its end, not closed yet: Mesub reads it ended.
+        held('ran-out', { status: 'ended', end_reason: 'cancelled', access: false });
+        held('unpaid', { status: 'unpaid', payment_status: 'late' });
+        const stopped = held('stopped', { status: 'stopped', access: false });
+        held('closed', { status: 'ended', end_reason: 'closed', access: false });
+
+        expect(await codeOf(create('active'))).toBe('already_subscribed');
+        const resume = await create('cancelled').catch((caught: unknown) => caught);
+        expect(resume).toMatchObject({ apiCode: 'subscription_cancelled' });
+        expect((resume as MesubError).message).toContain('resume it');
+        const close = await create('cancelled-over').catch((caught: unknown) => caught);
+        expect(close).toMatchObject({ apiCode: 'subscription_cancelled' });
+        expect((close as MesubError).message).toContain('close it');
+        expect(await codeOf(create('ran-out'))).toBe('subscription_cancelled');
+        expect(await codeOf(create('unpaid'))).toBe('payment_pending');
+
+        const comeback = await create('stopped');
+        expect(comeback.subscription.id).not.toBe(stopped.id);
+        await expect(create('closed')).resolves.toMatchObject({
+            subscription: { status: 'pending' },
+        });
+    });
+
     it('subscribes: create, submit, then access, retrieve and list', async () => {
         const fake = new FakeMesub();
         const mesub = fake.client();
@@ -581,6 +620,19 @@ describe('FakeMesub', () => {
             await expect(mesub.subscriptions.transaction(other.id)).resolves.toMatchObject({
                 subscription: { id: other.id },
             });
+        });
+
+        // Mesub's subscribeTransaction answers liveRefusal of the row that landed, by its status.
+        it('refuses it by the status of the subscription that landed', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await waiting(fake);
+            const landed = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+
+            expect(await codeOf(mesub.subscriptions.transaction(id))).toBe('payment_pending');
+            landed.status = 'cancelled';
+            expect(await codeOf(mesub.subscriptions.transaction(id))).toBe(
+                'subscription_cancelled',
+            );
         });
 
         it('refuses once the plan ended, and not before', async () => {

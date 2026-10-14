@@ -666,9 +666,8 @@ export class FakeMesub {
             external_id: typeof external_id === 'string' ? external_id.trim() : null,
         };
         const held = this.#subscriptions.filter((s) => s.plan === plan && s.wallet === wallet);
-        if (held.some((s) => RUNNING.includes(s.status))) {
-            return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
-        }
+        const refusal = liveRefusal(held);
+        if (refusal) return refusal;
 
         // One checkout per customer on a wallet, as Mesub keeps them: the same
         // customer gets its own back, another one never does.
@@ -704,15 +703,12 @@ export class FakeMesub {
         }
         if (this.#over(subscription.plan)) return error(409, 'plan_ended', 'This plan has ended.');
 
-        const landed = this.#subscriptions.some(
-            (s) =>
-                s.plan === subscription.plan &&
-                s.wallet === subscription.wallet &&
-                RUNNING.includes(s.status),
+        const refusal = liveRefusal(
+            this.#subscriptions.filter(
+                (s) => s.plan === subscription.plan && s.wallet === subscription.wallet,
+            ),
         );
-        if (landed) {
-            return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
-        }
+        if (refusal) return refusal;
 
         return Response.json(handedOut(subscription), { status: 201 });
     }
@@ -1046,8 +1042,41 @@ function refusalOf(
         : error(409, 'close_too_early', `This subscription runs until ${access_until}.`);
 }
 
-/** The statuses a wallet holds a plan in: no new checkout beside one. */
-const RUNNING: ServerSubscription['status'][] = ['active', 'cancelled', 'unpaid'];
+/**
+ * Mesub's 409 for a checkout beside the subscription a wallet holds on the
+ * plan, by its status, as the back's `liveRefusal` words it; null when it
+ * holds none. A cancelled one past its end is held until it is closed: it
+ * reads `ended`, with `end_reason` `cancelled`. A stopped one is not: the
+ * fake's is one nothing cancelled, which the wallet comes back over
+ * (Mesub-io/backend#211).
+ */
+function liveRefusal(held: ServerSubscription[]): Response | null {
+    const live = held.find(
+        (s) =>
+            ['active', 'cancelled', 'unpaid'].includes(s.status) ||
+            (s.status === 'ended' && s.end_reason === 'cancelled'),
+    );
+
+    if (!live) return null;
+    if (live.status === 'active') {
+        return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
+    }
+    if (live.status === 'unpaid') {
+        return error(
+            409,
+            'payment_pending',
+            'You already have a subscription to this plan, and its last payment is late. Open it in your subscriptions to see how to fix it, or cancel it.',
+        );
+    }
+    const until = live.status === 'cancelled' ? live.access_until : null;
+    return error(
+        409,
+        'subscription_cancelled',
+        until !== null && Date.parse(until) > Date.now()
+            ? `Your subscription to this plan is cancelled but runs until ${until}: resume it instead of subscribing again.`
+            : 'Your cancelled subscription to this plan must be closed first: close it, then subscribe again.',
+    );
+}
 
 /** Whose checkout it is, as Mesub tells them apart: the external id, else the email, else nobody. */
 function holderOf(contact: Pick<ServerSubscription, 'email' | 'external_id'>): string {
