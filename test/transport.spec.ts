@@ -388,33 +388,29 @@ describe('backoff', () => {
     });
 });
 
+// Mesub never sends `x-should-retry`: the body's `retryable` and the status decide alone.
 describe('x-should-retry', () => {
-    it('forces a retry on a status that is not retried', async () => {
-        const forced = json(400, { message: 'x' }, { 'x-should-retry': 'true' });
-        const { fetch } = mockFetch(forced, json(200, { ok: 1 }));
+    it('does not force a retry on a status that is not retried', async () => {
+        const { fetch } = mockFetch(
+            json(400, { message: 'x' }, { 'x-should-retry': 'true' }),
+            json(200, { ok: 1 }),
+        );
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 400 });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not forbid a retry on a status that is retried', async () => {
+        const { fetch } = mockFetch(
+            json(503, { message: 'down' }, { 'x-should-retry': 'false' }),
+            json(200, { ok: 1 }),
+        );
 
         const result = settle(transport(fetch).get('/v1/access'));
         await vi.runAllTimersAsync();
 
         expect((await result).value).toEqual({ ok: 1 });
         expect(fetch).toHaveBeenCalledTimes(2);
-    });
-
-    it('forbids a retry on a status that is retried', async () => {
-        const { fetch } = mockFetch(json(503, { message: 'down' }, { 'x-should-retry': 'false' }));
-
-        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
-            status: 503,
-            code: 'unavailable',
-        });
-        expect(fetch).toHaveBeenCalledTimes(1);
-    });
-
-    it('ignores any other value', async () => {
-        const { fetch } = mockFetch(json(400, { message: 'x' }, { 'x-should-retry': 'maybe' }));
-
-        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 400 });
-        expect(fetch).toHaveBeenCalledTimes(1);
     });
 });
 
@@ -438,13 +434,6 @@ describe("the body's retryable", () => {
 
         expect((await result).value).toEqual({ ok: 1 });
         expect(fetch).toHaveBeenCalledTimes(2);
-    });
-
-    it('gives way to x-should-retry', async () => {
-        const { fetch } = mockFetch(json(503, { retryable: true }, { 'x-should-retry': 'false' }));
-
-        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ status: 503 });
-        expect(fetch).toHaveBeenCalledTimes(1);
     });
 
     it('is ignored when it is not a boolean', async () => {
@@ -843,13 +832,9 @@ describe('Transport.post', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('does not retry even when the body or a header says it may', async () => {
+    it('does not retry even when the body says it may', async () => {
         const { fetch } = mockFetch(
-            json(
-                429,
-                { code: 'pending_cap_reached', retryable: true },
-                { 'x-should-retry': 'true' },
-            ),
+            json(429, { code: 'pending_cap_reached', retryable: true }),
             json(201, {}),
         );
 

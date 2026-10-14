@@ -85,16 +85,19 @@ export class Plans {
     }
 }
 
-/** A slug as Mesub writes them: lowercase letters, digits and single hyphens. */
-const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/**
+ * A slug as Mesub writes them: lowercase letters, digits and single hyphens,
+ * with at least one letter, so a slug never reads as a number.
+ */
+const SLUG = /^(?=.*[a-z])[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function pathOf(slug: string): string {
     // Anything else would reach another route, or the list: refused before it is sent.
     if (typeof slug !== 'string' || !SLUG.test(slug)) {
-        throw new MesubError('A plan slug is lowercase letters, digits and hyphens.', {
-            status: null,
-            code: 'invalid_request',
-        });
+        throw new MesubError(
+            'A plan slug is lowercase letters, digits and hyphens, with at least one letter.',
+            { status: null, code: 'invalid_request' },
+        );
     }
     return `/v1/plans/${slug}`;
 }

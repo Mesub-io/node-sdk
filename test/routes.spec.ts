@@ -10,7 +10,7 @@ import {
     widgetCustomer,
     type WidgetRequest,
 } from '../src/routes.js';
-import { FakeMesub } from '../src/testing.js';
+import { FakeMesub, type FakeMesubOptions } from '../src/testing.js';
 
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 const OTHER_WALLET = 'SysvarC1ock11111111111111111111111111111111';
@@ -24,7 +24,7 @@ const LOGO = 'https://img.example/bonk.png';
 const ada = { kind: 'external_id', value: 'user_ada' } as const;
 const bob = { kind: 'external_id', value: 'user_bob' } as const;
 
-function setup(options: { attemptsRoute?: boolean } = {}) {
+function setup(options: Pick<FakeMesubOptions, 'attemptsRoute' | 'plans'> = {}) {
     const fake = new FakeMesub({ plans: ['pro', 'team'], ...options });
     const client = fake.client();
     const call = (
@@ -142,7 +142,7 @@ describe('the widget routes: a plan', () => {
         });
     });
 
-    it.each(['/plans/nope', '/plans/..', '/plans/Pro', '/plans/a%2Fb'])(
+    it.each(['/plans/nope', '/plans/..', '/plans/Pro', '/plans/a%2Fb', '/plans/123'])(
         'answers 404 for %s',
         async (path) => {
             const { call, fake } = setup();
@@ -1276,10 +1276,25 @@ describe('the widget routes: one subscription in full', () => {
                 due_at: SOON,
                 amount: '9990000',
                 amount_display: '9.99',
+                amount_usd: '9.99',
                 retry_number: null,
                 retries_allowed: null,
             },
         ]);
+    });
+
+    it("carries the plan's dollar estimate, and null when Mesub knows no price", async () => {
+        const priced = await detailOf(
+            { status: 'active', next_charge_at: SOON },
+            { plans: [{ slug: 'pro', amount_usd: '10.02' }] },
+        );
+        const unpriced = await detailOf(
+            { status: 'active', next_charge_at: SOON },
+            { plans: [{ slug: 'pro', amount_usd: null }] },
+        );
+
+        expect(priced.body.upcoming).toMatchObject([{ amount_usd: '10.02' }]);
+        expect(unpriced.body.upcoming).toMatchObject([{ amount_usd: null }]);
     });
 
     it('announces the next retry of a late one, as a retry', async () => {
@@ -1299,6 +1314,7 @@ describe('the widget routes: one subscription in full', () => {
                 due_at: SOON,
                 amount: '9990000',
                 amount_display: '9.99',
+                amount_usd: '9.99',
                 retry_number: 2,
                 retries_allowed: 3,
             },
@@ -1401,6 +1417,7 @@ describe('the widget routes: one subscription in full', () => {
                 due_at: SOON,
                 amount: null,
                 amount_display: null,
+                amount_usd: null,
                 retry_number: null,
                 retries_allowed: null,
             },
@@ -2212,7 +2229,11 @@ describe('the widget routes: your auth', () => {
         expect(() => checkWidgetOptions({ customer: () => null, plans: ['Pro!'] })).toThrow(
             TypeError,
         );
+        expect(() => checkWidgetOptions({ customer: () => null, plans: ['123'] })).toThrow(
+            TypeError,
+        );
         expect(() => checkWidgetOptions({ customer: () => null, plans: ['pro'] })).not.toThrow();
+        expect(() => checkWidgetOptions({ customer: () => null, plans: ['pro-2'] })).not.toThrow();
     });
 });
 

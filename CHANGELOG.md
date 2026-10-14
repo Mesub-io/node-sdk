@@ -102,6 +102,10 @@ The first version published to npm. Requires Node 22 or later.
   stablecoin. The top-level `symbol` is unchanged: set only for a vouched
   mint. Read as an unverified token with nothing known and `amount_usd: null`
   from a Mesub that predates them; `PlanToken` is exported (#130).
+- A plan slug needs at least one letter, as Mesub requires: `retrieve('123')`
+  throws `invalid_request` before anything is sent, the widget routes answer
+  `GET /plans/123` 404 without a call, and `mesubRoutes({ plans: ['123'] })`
+  throws (#136).
 
 ### Guards
 
@@ -184,6 +188,10 @@ The first version published to npm. Requires Node 22 or later.
   90 s by default and answers the subscription, with Mesub's `reason` when
   nothing changed. A confirm that settled drops every cached access answer
   for that customer on that plan, the yes too (#50).
+- A subscription id is checked as Mesub writes them, letters, digits, `-`
+  and `_`, 64 at most, before any method builds a path with it: anything else
+  throws `invalid_request` and sends nothing. `retrieve('.')` asked the list
+  and `cancel('..')` reached `POST /v1/cancel` (#136).
 
 ### Situations
 
@@ -210,6 +218,13 @@ The first version published to npm. Requires Node 22 or later.
   setup. The subscriber reads that nothing is theirs to do, the merchant
   what to fix, and both when access ends. A blocked one whose access ended
   no longer reads `ended_plan_ended` (#128).
+- `blocked_mint_gone` no longer says access comes back with the first payment
+  that goes through: the token no longer exists, so no payment can. Both
+  sentences say access does not come back once it ends (#136).
+- `pending` offers `transaction` before `submit`
+  (`subscriptions.transaction`, `POST /v1/subscriptions/:id/transaction`): a
+  fresh transaction when the wallet is ready to sign, or after
+  `transaction_expired`. `SituationActionId` gains `transaction` (#136).
 
 ### Routes for the React widget
 
@@ -245,6 +260,9 @@ The first version published to npm. Requires Node 22 or later.
 - `GET /plans/:slug` hands on the plan's `token` and `amount_usd`, and each
   of `payments` its `amount_usd`, null from a Mesub that does not price it
   (#130).
+- `upcoming` carries `amount_usd`, the plan's amount in dollars at the latest
+  price Mesub knows, null when it knows none or the plan could not be read
+  (#136).
 - `GET /subscriptions` reads the customer's subscriptions by pages of 100 and
   5 pages at most, so one browser request is never more than 5 calls to
   Mesub. It answers `has_more` beside `subscriptions`: true when the customer
@@ -331,6 +349,12 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 - `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
   `total`, as it is typed: amounts are whole numbers as strings, and
   `rent.authority` may be null (#101).
+- An answer to `subscriptions.retry` it cannot read names
+  `POST /v1/subscriptions/:id/retry` and status 202, no longer
+  `GET /v1/subscriptions/:id` and 200 (#136).
+- Whether a GET is sent again comes from Mesub's `retryable`, or the status
+  without one: an `x-should-retry` header, which Mesub never sends, is no
+  longer read (#136).
 
 ### Releases and CI
 

@@ -692,6 +692,8 @@ export class Subscriptions {
     async retry(id: string, options: RequestOptions = {}): Promise<ServerSubscription> {
         return serverSubscriptionFrom(
             await this.#transport.post(`${pathOf(id)}/retry`, undefined, options),
+            'POST /v1/subscriptions/:id/retry',
+            202,
         );
     }
 
@@ -842,6 +844,9 @@ export class Subscriptions {
     }
 }
 
+/** An id as Mesub writes them, and the only kind it reads (`RESOURCE_ID`). */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+
 function pathOf(id: string): string {
     // An empty id would reach the list route and read as a missing customer.
     if (typeof id !== 'string' || id === '') {
@@ -850,7 +855,15 @@ function pathOf(id: string): string {
             code: 'invalid_request',
         });
     }
-    return `/v1/subscriptions/${encodeURIComponent(id)}`;
+    // `.` and `..` survive encoding and the URL resolves them: `retrieve('.')` would
+    // ask the list, `cancel('..')` another route. Refused before it is sent.
+    if (!ID.test(id)) {
+        throw new MesubError(
+            'A subscription id is letters, digits, hyphens and underscores, 64 at most.',
+            { status: null, code: 'invalid_request' },
+        );
+    }
+    return `/v1/subscriptions/${id}`;
 }
 
 /** Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never a subscription's. */
