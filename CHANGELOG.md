@@ -181,6 +181,10 @@ The first version published to npm. Requires Node 22 or later.
   90 s by default and answers the subscription, with Mesub's `reason` when
   nothing changed. A confirm that settled drops every cached access answer
   for that customer on that plan, the yes too (#50).
+- A subscription id is checked as Mesub writes them, letters, digits, `-`
+  and `_`, 64 at most, before any method builds a path with it: anything else
+  throws `invalid_request` and sends nothing. `retrieve('.')` asked the list
+  and `cancel('..')` reached `POST /v1/cancel` (#136).
 
 ### Situations
 
