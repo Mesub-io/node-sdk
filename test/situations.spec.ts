@@ -329,7 +329,7 @@ const CASES = {
         subscriber:
             'Not signed yet. Approve it in your wallet to pay the first 9.99 USDC and start the subscription.',
         merchant: 'Checkout started, not signed yet: nothing is on chain and nothing was charged.',
-        actions: ['merchant:submit'],
+        actions: ['merchant:transaction', 'merchant:submit'],
     },
     expired: {
         input: subscription({ status: 'expired', payment_status: 'none', ...OVER }),

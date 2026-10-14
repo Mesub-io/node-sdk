@@ -19,13 +19,16 @@ import type { ServerSubscription } from './subscriptions.js';
 export type SituationActor = 'subscriber' | 'merchant';
 
 /**
- * What can be done. `add_funds` has no route (the wallet does it). `retry` is
+ * What can be done. `add_funds` has no route (the wallet does it).
+ * `transaction` hands a pending checkout a fresh transaction to sign
+ * (`subscriptions.transaction`, Mesub-io/backend#427). `retry` is
  * the subscriber's "Pay now" with the API key (`subscriptions.retry`,
  * Mesub-io/backend#354), and the merchant's on the Mesub dashboard; `upgrade`
  * exists on the dashboard only.
  */
 export type SituationActionId =
     | 'subscribe'
+    | 'transaction'
     | 'submit'
     | 'cancel'
     | 'resume'
@@ -361,7 +364,14 @@ export const SITUATIONS = {
         subscriber:
             'Not signed yet. Approve it in your wallet to pay the first {amount} and start the subscription.',
         merchant: 'Checkout started, not signed yet: nothing is on chain and nothing was charged.',
+        // A fresh transaction when the wallet is ready, or after `transaction_expired`.
         actions: [
+            {
+                by: 'merchant',
+                action: 'transaction',
+                sdk: 'subscriptions.transaction',
+                route: 'POST /v1/subscriptions/:id/transaction',
+            },
             {
                 by: 'merchant',
                 action: 'submit',

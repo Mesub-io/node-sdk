@@ -214,6 +214,10 @@ The first version published to npm. Requires Node 22 or later.
 - `blocked_mint_gone` no longer says access comes back with the first payment
   that goes through: the token no longer exists, so no payment can. Both
   sentences say access does not come back once it ends (#136).
+- `pending` offers `transaction` before `submit`
+  (`subscriptions.transaction`, `POST /v1/subscriptions/:id/transaction`): a
+  fresh transaction when the wallet is ready to sign, or after
+  `transaction_expired`. `SituationActionId` gains `transaction` (#136).
 
 ### Routes for the React widget
 
