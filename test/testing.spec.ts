@@ -1382,6 +1382,35 @@ describe('FakeMesub', () => {
         expect(all).toEqual([second.id, first.id]);
     });
 
+    // Mesub's ServerSubscriptionsService.list: SUPERSEDED rows are left out
+    // (#254), still answered by id; the cursor is a position among every
+    // subscription it holds, and one it does not hold is a 400.
+    it('lists as Mesub does: no superseded row, and no cursor it does not hold', async () => {
+        const fake = new FakeMesub();
+        const old = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'superseded' });
+        const comeback = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+        const elsewhere = fake.addSubscription({ wallet: OTHER, plan: 'pro' });
+        const newest = fake.addSubscription({ wallet: WALLET, plan: 'team' });
+        const { subscriptions } = fake.client();
+
+        await expect(subscriptions.list({ wallet: WALLET })).resolves.toMatchObject({
+            data: [{ id: newest.id }, { id: comeback.id }],
+            has_more: false,
+        });
+        await expect(subscriptions.retrieve(old.id)).resolves.toMatchObject({
+            status: 'superseded',
+        });
+        // Another customer's id is still a position.
+        await expect(
+            subscriptions.list({ wallet: WALLET, starting_after: elsewhere.id }),
+        ).resolves.toMatchObject({ data: [{ id: comeback.id }] });
+
+        const error = await subscriptions
+            .list({ wallet: WALLET, starting_after: 'sub_nope' })
+            .catch((caught: unknown) => caught);
+        expect(error).toMatchObject({ status: 400, apiCode: 'invalid_request' });
+    });
+
     it('records every call', async () => {
         const fake = new FakeMesub();
         await fake.client().access({ email: 'ada@example.com' }, 'pro');

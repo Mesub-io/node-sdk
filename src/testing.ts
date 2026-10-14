@@ -604,12 +604,20 @@ export class FakeMesub {
             return error(400, 'invalid_request', 'Name one of wallet, external_id or email.');
 
         const limit = Number(query['limit'] ?? 20);
-        let data = this.#subscriptions
-            .filter((s) => s[asked.kind] === asked.value)
-            .filter((s) => query['plan'] === undefined || s.plan === query['plan'])
-            .reverse();
+        // Newest first. The cursor is a position among every subscription
+        // held, whoever it is for, and one not held is a 400, as on Mesub.
+        const all = [...this.#subscriptions].reverse();
         const after = query['starting_after'];
-        if (after !== undefined) data = data.slice(data.findIndex((s) => s.id === after) + 1);
+        const from = after === undefined ? 0 : all.findIndex((s) => s.id === after) + 1;
+        if (after !== undefined && from === 0) {
+            return error(400, 'invalid_request', 'starting_after is not a subscription of yours.');
+        }
+        const data = all
+            .slice(from)
+            // The comeback that replaced it stands for the customer (Mesub-io/backend#254).
+            .filter((s) => s.status !== 'superseded')
+            .filter((s) => s[asked.kind] === asked.value)
+            .filter((s) => query['plan'] === undefined || s.plan === query['plan']);
 
         const page: ServerSubscriptionList = {
             data: data.slice(0, limit).map((s) => bounded(s, this.#endOf(s.plan))),
