@@ -317,6 +317,31 @@ describe('FakeMesub', () => {
         expect(error).toMatchObject({ status: 429, code: 'rate_limited', retryAfter: 2000 });
     });
 
+    // Mesub's error body takes `retryable` from its code (ERROR_CODES), never from the status.
+    it('says retryable by the code, as Mesub does, else by the status', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const retryableOf = async (failure: Parameters<FakeMesub['fail']>[0]) => {
+            fake.fail(failure);
+            const error = await mesub.access(WALLET, 'pro').catch((caught: unknown) => caught);
+            return (error as MesubError).retryable;
+        };
+
+        await expect(retryableOf({ status: 409, code: 'subscription_changed' })).resolves.toBe(
+            true,
+        );
+        await expect(retryableOf({ status: 409, code: 'comeback_in_flight' })).resolves.toBe(true);
+        await expect(retryableOf({ status: 409, code: 'already_subscribed' })).resolves.toBe(false);
+        await expect(retryableOf({ status: 503, code: 'network_unavailable' })).resolves.toBe(true);
+        // A code Mesub does not have: the status says.
+        await expect(retryableOf({ status: 502, code: 'bad_gateway' })).resolves.toBe(true);
+        await expect(retryableOf({ status: 409, code: 'made_up' })).resolves.toBe(false);
+        // What the test says wins.
+        await expect(
+            retryableOf({ status: 409, code: 'subscription_changed', retryable: false }),
+        ).resolves.toBe(false);
+    });
+
     it('drives a guard end to end', async () => {
         const fake = new FakeMesub();
         fake.grant(WALLET, 'pro');

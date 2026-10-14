@@ -111,7 +111,11 @@ export interface FakeFailure {
     /** Mesub's own code, e.g. `network_unavailable`. */
     code: string;
     message?: string;
-    /** Defaults to what the status says: true for 408, 429 and 5xx. */
+    /**
+     * Defaults to what Mesub says of the code, e.g. true for
+     * `subscription_changed`; for a code Mesub does not have, to what the
+     * status says: true for 408, 429 and 5xx.
+     */
     retryable?: boolean;
     /** Seconds, sent as `Retry-After`. */
     retryAfter?: number;
@@ -1182,7 +1186,6 @@ function withAttempts(answer: AccessAnswer, attempts: boolean): AccessAnswer {
     return light;
 }
 
-/** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
 /**
  * A plan as `/v1/plans` serves one: 9.99 USDC a month on devnet, unless told
  * otherwise. Its token follows its `symbol`, which only a vouched mint has:
@@ -1221,6 +1224,26 @@ function fakePlan(slug: string, { token, ...over }: Omit<FakePlanFields, 'slug'>
     };
 }
 
+/**
+ * The codes Mesub answers `retryable: true`, from the back's `ERROR_CODES`,
+ * which sets the flag by code alone. Every other code it has is false, and
+ * none of those is ever answered as a 408, a 429 or a 5xx, so the status
+ * says the same of them.
+ */
+const RETRYABLE_CODES = new Set([
+    'rate_limited',
+    'internal_error',
+    'unavailable',
+    'comeback_in_flight',
+    'comeback_period_rolling',
+    'pending_cap_reached',
+    'subscription_changed',
+    'retry_too_soon',
+    'pull_running',
+    'network_unavailable',
+]);
+
+/** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
 function error(
     status: number,
     code: string,
@@ -1233,7 +1256,9 @@ function error(
             error: REASONS[status] ?? 'Error',
             message,
             code,
-            retryable: retryable ?? (status === 408 || status === 429 || status >= 500),
+            retryable:
+                retryable ??
+                (RETRYABLE_CODES.has(code) || status === 408 || status === 429 || status >= 500),
         },
         {
             status,
