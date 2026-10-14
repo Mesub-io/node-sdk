@@ -42,8 +42,21 @@ export const DENIAL_STATUS: Record<DenialReason, number> = {
     unavailable: 503,
 };
 
-/** Seconds a client should wait before asking again when Mesub is unreachable. */
+/**
+ * Seconds a client should wait before asking again when Mesub is unreachable
+ * and did not say how long itself.
+ */
 export const UNAVAILABLE_RETRY_AFTER_S = 30;
+
+/**
+ * The `Retry-After` of a guard's 503, in seconds: the one Mesub sent with its
+ * 429 or 503 when it sent one, `UNAVAILABLE_RETRY_AFTER_S` otherwise (#132).
+ */
+export function retryAfterOf(outcome: Extract<GuardOutcome, { allowed: false }>): string {
+    const asked = outcome.decision?.retryAfter;
+
+    return String(asked === undefined ? UNAVAILABLE_RETRY_AFTER_S : Math.ceil(asked / 1000));
+}
 
 let shared: Mesub | undefined;
 

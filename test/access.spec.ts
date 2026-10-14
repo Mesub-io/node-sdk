@@ -1,6 +1,12 @@
 import { createHash, createHmac } from 'node:crypto';
 
-import type { AccessAnswer, AccessList, CacheStore, MesubOptions } from '../src/index.js';
+import type {
+    AccessAnswer,
+    AccessList,
+    CacheEntry,
+    CacheStore,
+    MesubOptions,
+} from '../src/index.js';
 import { Mesub, MemoryStore, MesubError } from '../src/index.js';
 import { coded, json, mockFetch, nest } from './helpers.js';
 
@@ -1096,9 +1102,96 @@ describe('decide, for the guards', () => {
         const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
         await vi.advanceTimersByTimeAsync(0);
 
+        // Handed on to the guard's 503 rather than waited.
         expect(decision).toEqual({
             at: 0,
-            value: { access: false, answer: null, stale: true, unavailable: true },
+            value: {
+                access: false,
+                answer: null,
+                stale: true,
+                unavailable: true,
+                retryAfter: 30_000,
+            },
+        });
+    });
+
+    it("keeps Mesub's Retry-After for the guard's 503", async () => {
+        const { fetch } = mockFetch(
+            coded(429, 'rate_limited', 'Slow down.', true, { 'retry-after': '5' }),
+        );
+
+        const decision = timed((await guarded(fetch)).decide(WALLET, 'pro'));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(decision.value).toEqual({
+            access: false,
+            answer: null,
+            stale: true,
+            unavailable: true,
+            retryAfter: 5_000,
+        });
+    });
+
+    // A store that hangs without failing, as a saturated Redis, must not hold
+    // a guard past its budget (#132).
+    describe('with a cache store that never answers', () => {
+        const never = () => new Promise<never>(() => undefined);
+
+        it('reads a get that never answers as a miss, within the budget', async () => {
+            const store: CacheStore<AccessAnswer | AccessList> = {
+                get: never,
+                set: () => undefined,
+            };
+            const { fetch } = mockFetch('hang');
+            const mesub = await hashed(client(fetch, store, { maxRetries: 2 }));
+
+            const decision = timed(mesub.decide(WALLET, 'pro'));
+            await vi.advanceTimersByTimeAsync(2_000);
+
+            expect(decision).toEqual({
+                at: 2_000,
+                value: { access: false, answer: null, stale: true, unavailable: true },
+            });
+        });
+
+        // The stale answer is the one read before asking Mesub: nothing is read
+        // again once the budget is spent, which an async store would miss.
+        it('keeps a known subscriber in from an async store when Mesub hangs', async () => {
+            const entries = new Map<string, CacheEntry<AccessAnswer | AccessList>>();
+            const store: CacheStore<AccessAnswer | AccessList> = {
+                get: async (key) => entries.get(key),
+                set: async (key, entry) => {
+                    entries.set(key, entry);
+                },
+            };
+            const { fetch } = mockFetch(json(200, answer({ revalidate_after: 0 })), 'hang', 'hang');
+            const mesub = await hashed(client(fetch, store, { maxRetries: 2 }));
+            await mesub.decide(WALLET, 'pro');
+
+            const decision = timed(mesub.decide(WALLET, 'pro'));
+            await vi.advanceTimersByTimeAsync(2_000);
+
+            expect(decision).toEqual({
+                at: 2_000,
+                value: { access: true, answer: answer({ revalidate_after: 0 }), stale: true },
+            });
+        });
+
+        it('answers without waiting for set', async () => {
+            const store: CacheStore<AccessAnswer | AccessList> = {
+                get: () => undefined,
+                set: never,
+            };
+            const { fetch } = mockFetch(json(200, answer()));
+            const mesub = await hashed(client(fetch, store, { maxRetries: 2 }));
+
+            const decision = timed(mesub.decide(WALLET, 'pro'));
+            await vi.advanceTimersByTimeAsync(0);
+
+            expect(decision).toEqual({
+                at: 0,
+                value: { access: true, answer: answer(), stale: false },
+            });
         });
     });
 

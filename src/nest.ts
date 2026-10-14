@@ -23,7 +23,7 @@ import {
     type MesubAccess as Access,
     type PlanOption,
     plansOf,
-    UNAVAILABLE_RETRY_AFTER_S,
+    retryAfterOf,
 } from './guard.js';
 import type { HeaderSource } from './webhooks.js';
 
@@ -116,11 +116,7 @@ export function RequirePlan<Req extends MesubRequest = MesubRequest>(
             await options.onDenied?.(denial, request);
 
             if (outcome.reason === 'unavailable') {
-                setHeader(
-                    http.getResponse<HeaderSink>(),
-                    'Retry-After',
-                    String(UNAVAILABLE_RETRY_AFTER_S),
-                );
+                setHeader(http.getResponse<HeaderSink>(), 'Retry-After', retryAfterOf(outcome));
             }
 
             throw new HttpException(denialBody(outcome), denial.status);

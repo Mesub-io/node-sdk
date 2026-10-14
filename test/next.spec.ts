@@ -347,6 +347,22 @@ describe('withMesub', () => {
             expect(await response.json()).toEqual({ access: false, reason: 'unavailable' });
         });
 
+        // Mesub knows when to ask again better than a fixed 30 s (#132).
+        it("answers 503 with Mesub's own Retry-After when it sent one", async () => {
+            const { client } = mesub({
+                access: () =>
+                    Response.json(
+                        { message: 'slow down' },
+                        { status: 429, headers: { 'Retry-After': '5' } },
+                    ),
+            });
+
+            const response = await route(client)(get(SIGNED_IN), context);
+
+            expect(response.status).toBe(503);
+            expect(response.headers.get('retry-after')).toBe('5');
+        });
+
         // A guard holds a request for guardTimeout at most, never for an outage (#24).
         it('answers 503 with Retry-After when Mesub does not answer within guardTimeout', async () => {
             const { client } = mesub({ access: hang }, { guardTimeout: 50 });

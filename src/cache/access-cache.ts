@@ -24,7 +24,8 @@ export interface CachedAnswer<T> {
  *
  * A store that fails never breaks a request: a read that throws is a miss,
  * a write that throws is dropped. A merchant whose Redis is down still gets
- * answers, straight from Mesub.
+ * answers, straight from Mesub. Nor does one that hangs hold a guard: given a
+ * deadline, a read not answered by then is a miss too (#132).
  */
 export class AccessCache<T extends Revalidating> {
     private readonly maxStaleMs: number;
@@ -54,15 +55,19 @@ export class AccessCache<T extends Revalidating> {
         return scope === undefined ? `${prefix}:${path}` : `${prefix}:${scope}:${path}`;
     }
 
+    /** With a `deadline` (epoch ms), a store that has not answered by then is a miss. */
     async read(
         who: string,
         plan: string | null,
         scope?: string,
+        deadline?: number,
     ): Promise<CachedAnswer<T> | undefined> {
         let entry: CacheEntry<T> | undefined;
 
         try {
-            entry = await this.store.get(AccessCache.key(who, plan, scope));
+            const pending = this.store.get(AccessCache.key(who, plan, scope));
+
+            entry = deadline === undefined ? await pending : await this.within(pending, deadline);
         } catch {
             return undefined;
         }
@@ -73,6 +78,21 @@ export class AccessCache<T extends Revalidating> {
         if (!entry || now > entry.keepUntil) return undefined;
 
         return { value: entry.value, fresh: now < entry.freshUntil };
+    }
+
+    /** What `pending` gives by `deadline`, or undefined, as a miss, when it has not answered. */
+    private async within<V>(pending: V | Promise<V>, deadline: number): Promise<V | undefined> {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const late = new Promise<undefined>((resolve) => {
+            timer = setTimeout(resolve, Math.max(0, deadline - this.now()), undefined);
+        });
+
+        try {
+            // Promise.race handles a late rejection of `pending`: never unhandled.
+            return await Promise.race([pending, late]);
+        } finally {
+            clearTimeout(timer);
+        }
     }
 
     async write(who: string, plan: string | null, value: T, scope?: string): Promise<void> {
