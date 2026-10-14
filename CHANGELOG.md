@@ -338,6 +338,9 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 - An answer to `subscriptions.retry` it cannot read names
   `POST /v1/subscriptions/:id/retry` and status 202, no longer
   `GET /v1/subscriptions/:id` and 200 (#136).
+- Whether a GET is sent again comes from Mesub's `retryable`, or the status
+  without one: an `x-should-retry` header, which Mesub never sends, is no
+  longer read (#136).
 
 ### Releases and CI
 
