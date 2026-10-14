@@ -19,13 +19,16 @@ import type { ServerSubscription } from './subscriptions.js';
 export type SituationActor = 'subscriber' | 'merchant';
 
 /**
- * What can be done. `add_funds` has no route (the wallet does it). `retry` is
+ * What can be done. `add_funds` has no route (the wallet does it).
+ * `transaction` hands a pending checkout a fresh transaction to sign
+ * (`subscriptions.transaction`, Mesub-io/backend#427). `retry` is
  * the subscriber's "Pay now" with the API key (`subscriptions.retry`,
  * Mesub-io/backend#354), and the merchant's on the Mesub dashboard; `upgrade`
  * exists on the dashboard only.
  */
 export type SituationActionId =
     | 'subscribe'
+    | 'transaction'
     | 'submit'
     | 'cancel'
     | 'resume'
@@ -118,12 +121,21 @@ const UPGRADE = {
 } as const;
 const CANCEL_PAID = { ...CANCEL, confirm: 'confirm_cancel_paid' } as const;
 
-/** A block of the merchant's setup, as the subscriber reads it: one sentence for the five. */
+/**
+ * A block of the merchant's setup, as the subscriber reads it: one sentence for
+ * all but a gone token, which no payment can lift.
+ */
 const BLOCKED_BY_SETUP =
     'Mesub cannot take your payments for {plan_name} for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying.[ You keep access until {access_until} if no payment goes through by then.] Access comes back on its own with the first payment that goes through.';
-/** How a merchant's sentence on a block ends, whatever the cause. */
+/** How a merchant's sentence on a block ends, whatever the cause but a gone token. */
 const BLOCKED_ACCESS =
     '[ Access ends on {access_until} if nothing is collected by then.] Access comes back with the first payment that goes through, with nothing for the subscriber to sign.';
+/**
+ * How both sentences on a gone token end: Mesub still tries, and no payment
+ * can land on a token that no longer exists.
+ */
+const NEVER_BACK =
+    'No payment can go through on this plan again, so once access ends it does not come back.';
 const CANCEL_BEHIND = { ...CANCEL, confirm: 'confirm_cancel_behind' } as const;
 
 /**
@@ -247,8 +259,8 @@ export const SITUATIONS = {
         actions: [CANCEL],
     },
     blocked_mint_gone: {
-        subscriber: BLOCKED_BY_SETUP,
-        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token.${BLOCKED_ACCESS}`,
+        subscriber: `Mesub can no longer take your payments for {plan_name}: the token it is paid in no longer exists. This is not because of anything you did, and there is nothing for you to do or sign.[ You keep access until {access_until}.] ${NEVER_BACK}`,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token.[ Access ends on {access_until}.] ${NEVER_BACK}`,
         actions: [CANCEL],
     },
 
@@ -357,7 +369,14 @@ export const SITUATIONS = {
         subscriber:
             'Not signed yet. Approve it in your wallet to pay the first {amount} and start the subscription.',
         merchant: 'Checkout started, not signed yet: nothing is on chain and nothing was charged.',
+        // A fresh transaction when the wallet is ready, or after `transaction_expired`.
         actions: [
+            {
+                by: 'merchant',
+                action: 'transaction',
+                sdk: 'subscriptions.transaction',
+                route: 'POST /v1/subscriptions/:id/transaction',
+            },
             {
                 by: 'merchant',
                 action: 'submit',

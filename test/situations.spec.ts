@@ -79,6 +79,9 @@ const SINCE = '2026-10-04T08:00:00.000Z';
 /** How every sentence on a block ends while the access still runs. */
 const BLOCKED_SUBSCRIBER = `You keep access until ${UNTIL} if no payment goes through by then. Access comes back on its own with the first payment that goes through.`;
 const BLOCKED_MERCHANT = `Access ends on ${UNTIL} if nothing is collected by then. Access comes back with the first payment that goes through, with nothing for the subscriber to sign.`;
+/** How a sentence on a gone token ends: no payment can bring access back. */
+const NEVER_BACK =
+    'No payment can go through on this plan again, so once access ends it does not come back.';
 const BY_SETUP = `Mesub cannot take your payments for Pro for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying. ${BLOCKED_SUBSCRIBER}`;
 
 function blocked(reason: string, over: Partial<ServerSubscription> = {}): ServerSubscription {
@@ -272,8 +275,8 @@ const CASES = {
     },
     blocked_mint_gone: {
         input: blocked('mint_gone'),
-        subscriber: BY_SETUP,
-        merchant: `Payments blocked since ${SINCE} by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token. ${BLOCKED_MERCHANT}`,
+        subscriber: `Mesub can no longer take your payments for Pro: the token it is paid in no longer exists. This is not because of anything you did, and there is nothing for you to do or sign. You keep access until ${UNTIL}. ${NEVER_BACK}`,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the plan's token no longer exists on chain, so nothing can be collected on it. Create a new plan with another token. Access ends on ${UNTIL}. ${NEVER_BACK}`,
         actions: ['subscriber:cancel'],
     },
     paused_cancelled: {
@@ -332,7 +335,7 @@ const CASES = {
         subscriber:
             'Not signed yet. Approve it in your wallet to pay the first 9.99 USDC and start the subscription.',
         merchant: 'Checkout started, not signed yet: nothing is on chain and nothing was charged.',
-        actions: ['merchant:submit'],
+        actions: ['merchant:transaction', 'merchant:submit'],
     },
     expired: {
         input: subscription({ status: 'expired', payment_status: 'none', ...OVER }),
@@ -392,15 +395,35 @@ describe('explain', () => {
             expect(explained.key).toBe(`blocked_${reason}`);
             expect(explained.access).toBe('No access');
             expect(explained.subscriber).not.toContain('You keep access');
-            expect(explained.subscriber).toMatch(
-                /Mesub keeps trying\. Access comes back on its own with the first payment that goes through\.$/,
-            );
             expect(explained.merchant).not.toContain('Access ends on');
-            expect(explained.merchant).toMatch(
-                /\. Access comes back with the first payment that goes through, with nothing for the subscriber to sign\.$/,
-            );
             expect(explained.missing).toEqual([]);
             expect(explained.subscriber + explained.merchant).not.toMatch(/[{}[\]]|  /);
+        });
+
+        it.each(REASONS.filter((reason) => reason !== 'mint_gone'))(
+            'tells both that %s lifts with the first payment that goes through',
+            (reason) => {
+                const explained = explain(blocked(reason, OVER), { names: NAMES, now: NOW });
+
+                expect(explained.subscriber).toMatch(
+                    /Mesub keeps trying\. Access comes back on its own with the first payment that goes through\.$/,
+                );
+                expect(explained.merchant).toMatch(
+                    /\. Access comes back with the first payment that goes through, with nothing for the subscriber to sign\.$/,
+                );
+            },
+        );
+
+        // The token is closed on chain: Mesub still tries, and no payment can ever land.
+        it('never tells either one that access comes back on a gone token', () => {
+            for (const input of [blocked('mint_gone'), blocked('mint_gone', OVER)]) {
+                const explained = explain(input, { names: NAMES, now: NOW });
+
+                for (const sentence of [explained.subscriber, explained.merchant]) {
+                    expect(sentence).not.toMatch(/comes back with|keeps trying/);
+                    expect(sentence.endsWith(` ${NEVER_BACK}`)).toBe(true);
+                }
+            }
         });
 
         it.each(REASONS)(
@@ -474,7 +497,7 @@ describe('explain', () => {
             });
 
             expect(explained.merchant).toContain('Payments blocked since 2026-10-04 by');
-            expect(explained.merchant).toContain('Access ends on 2026-11-01 if');
+            expect(explained.merchant).toContain('Access ends on 2026-11-01.');
         });
 
         it('reads a reason newer than this release as unknown, with the access line', () => {

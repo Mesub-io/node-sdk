@@ -56,6 +56,14 @@ export interface FakeMesubOptions {
      * it does not have, and attempts are only served through `/v1/access`.
      */
     attemptsRoute?: boolean;
+    /**
+     * The `revalidate_after` of every `/v1/access` answer, in seconds: 0 for
+     * a test that wants each change seen on the next call of the same
+     * client. Left out, Mesub's own: 10 for a no, and for a yes the time to
+     * its next charge, retry or end, from 10 to 300, so a client keeps a yes
+     * up to five minutes. One set on an answer with `setAccess` wins.
+     */
+    revalidateAfter?: number;
 }
 
 /** A plan as declared to the fake: its slug, and any field to set, a token's included. */
@@ -111,7 +119,11 @@ export interface FakeFailure {
     /** Mesub's own code, e.g. `network_unavailable`. */
     code: string;
     message?: string;
-    /** Defaults to what the status says: true for 408, 429 and 5xx. */
+    /**
+     * Defaults to what Mesub says of the code, e.g. true for
+     * `subscription_changed`; for a code Mesub does not have, to what the
+     * status says: true for 408, 429 and 5xx.
+     */
     retryable?: boolean;
     /** Seconds, sent as `Retry-After`. */
     retryAfter?: number;
@@ -120,8 +132,14 @@ export interface FakeFailure {
 /** What a test may set of an access answer: all but the plan, named apart. */
 export type FakeAccess = Partial<Omit<AccessAnswer, 'plan'>>;
 
+/**
+ * An access answer as the fake holds it: `revalidate_after` only when a test
+ * set it, worked out when served otherwise.
+ */
+type Held = Omit<AccessAnswer, 'revalidate_after'> & { revalidate_after?: number };
+
 /** What Mesub answers a customer with nothing on a plan. */
-const NOTHING: Omit<AccessAnswer, 'wallet' | 'plan'> = {
+const NOTHING: Omit<Held, 'wallet' | 'plan'> = {
     access: false,
     status: 'none',
     paused: false,
@@ -138,10 +156,11 @@ const NOTHING: Omit<AccessAnswer, 'wallet' | 'plan'> = {
     next_charge_at: null,
     next_retry_at: null,
     retry_deadline: null,
-    // Stale at once, so a change shows on the next call; the outage fallback
-    // still keeps it. Set it to test the cache itself.
-    revalidate_after: 0,
 };
+
+/** The freshest and the stalest Mesub serves an answer, in seconds (the back's `AccessService`). */
+const REVALIDATE_MIN_S = 10;
+const REVALIDATE_MAX_S = 300;
 
 const OUTAGE: FakeFailure = {
     status: 503,
@@ -170,6 +189,11 @@ const REASONS: Record<number, string> = {
  * or `setAccess`, gets a client wired to it with `client()`, and makes it
  * fail with `fail()`. A plan with an end is `grantLastPeriod`, `endPlan`, or
  * an `ends_at` in `plans`.
+ *
+ * It answers and refuses as Mesub does, `revalidate_after` included: a
+ * client keeps a yes up to five minutes and a no 10 seconds, so a change
+ * made after a client asked shows to a new client, or to every client with
+ * `revalidateAfter: 0`.
  */
 export class FakeMesub {
     readonly baseUrl: string;
@@ -182,15 +206,18 @@ export class FakeMesub {
 
     readonly #plans: Set<string> | null;
     readonly #planList: Plan[];
-    readonly #answers = new Map<string, AccessAnswer>();
+    readonly #answers = new Map<string, Held>();
     /** The ends `grantLastPeriod` and `endPlan` gave a plan, by slug: they win over `plans`. */
     readonly #ends = new Map<string, string>();
     #subscriptions: ServerSubscription[] = [];
     /** The subscriptions a cancel, resume or close transaction was built for, by id. */
     readonly #built = new Map<string, Set<FakeAction>>();
+    /** The rows ended with their plan whose close landed: nothing of them is left on chain. */
+    readonly #gone = new Set<string>();
     /** The attempts `setAttempts` gave each subscription, newest first, by id. */
     readonly #attempts = new Map<string, SubscriptionAttempt[]>();
     readonly #attemptsRoute: boolean;
+    readonly #revalidateAfter: number | undefined;
     #attemptIds = 0;
     #failure: FakeFailure | null = null;
     #ids = 0;
@@ -205,6 +232,7 @@ export class FakeMesub {
         this.#planList = (plans ?? []).sort((a, b) => a.slug.localeCompare(b.slug));
         this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
         this.#attemptsRoute = options.attemptsRoute ?? true;
+        this.#revalidateAfter = options.revalidateAfter;
         this.fetch = (input, init) => this.#handle(input, init);
     }
 
@@ -289,10 +317,10 @@ export class FakeMesub {
      */
     setAccess(customer: Customer | string, plan: string, fields: FakeAccess): AccessAnswer {
         const asked = customerOf(customer);
-        const answer: AccessAnswer = { ...nothing(asked, plan), ...fields, plan };
+        const answer: Held = { ...nothing(asked, plan), ...fields, plan };
 
         this.#answers.set(keyOf(asked, plan), answer);
-        return answer;
+        return this.#fresh(answer);
     }
 
     /**
@@ -395,6 +423,7 @@ export class FakeMesub {
         this.#ends.clear();
         this.#subscriptions = [];
         this.#built.clear();
+        this.#gone.clear();
         this.#attempts.clear();
         this.#failure = null;
         this.requests.length = 0;
@@ -428,6 +457,21 @@ export class FakeMesub {
             created_at: now,
             confirmed_at: now,
             ...fields,
+        };
+    }
+
+    /**
+     * An answer as `/v1/access` serves it now: bounded by its plan's end, and
+     * fresh for as long as Mesub keeps it, unless a test said otherwise.
+     */
+    #fresh(answer: Held): AccessAnswer {
+        const end = this.#endOf(answer.plan);
+        const served = bounded(answer, end);
+
+        return {
+            ...served,
+            revalidate_after:
+                served.revalidate_after ?? this.#revalidateAfter ?? revalidateAfter(served, end),
         };
     }
 
@@ -566,6 +610,8 @@ export class FakeMesub {
     }
 
     #access(query: Record<string, string>): Response {
+        const invalid = invalidContact(query);
+        if (invalid) return invalid;
         const asked = askedIn(query);
         if (!asked)
             return error(400, 'invalid_request', 'Name one of wallet, external_id or email.');
@@ -576,33 +622,48 @@ export class FakeMesub {
         if (plan === undefined) {
             const plans = [...this.#answers.entries()]
                 .filter(([key]) => key.startsWith(keyOf(asked, '')))
-                .map(([, answer]) =>
-                    withAttempts(bounded(answer, this.#endOf(answer.plan)), attempts),
-                );
-            const soonest = Math.min(...plans.map((answer) => answer.revalidate_after));
+                .map(([, answer]) => withAttempts(this.#fresh(answer), attempts));
+            // As Mesub: stale with the first yes that changes; a no would hold
+            // the whole list to 10, so with no yes it is the list's own 10.
+            const granted = plans.filter((answer) => answer.access);
 
-            return Response.json({ plans, revalidate_after: plans.length ? soonest : 0 });
+            return Response.json({
+                plans,
+                revalidate_after: granted.length
+                    ? Math.min(...granted.map((answer) => answer.revalidate_after))
+                    : (this.#revalidateAfter ?? REVALIDATE_MIN_S),
+            });
         }
         if (this.#plans && !this.#plans.has(plan)) {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
 
         const answer = this.#answers.get(keyOf(asked, plan)) ?? nothing(asked, plan);
-        return Response.json(withAttempts(bounded(answer, this.#endOf(plan)), attempts));
+        return Response.json(withAttempts(this.#fresh(answer), attempts));
     }
 
     #list(query: Record<string, string>): Response {
+        const invalid = invalidContact(query);
+        if (invalid) return invalid;
         const asked = askedIn(query);
         if (!asked)
             return error(400, 'invalid_request', 'Name one of wallet, external_id or email.');
 
         const limit = Number(query['limit'] ?? 20);
-        let data = this.#subscriptions
-            .filter((s) => s[asked.kind] === asked.value)
-            .filter((s) => query['plan'] === undefined || s.plan === query['plan'])
-            .reverse();
+        // Newest first. The cursor is a position among every subscription
+        // held, whoever it is for, and one not held is a 400, as on Mesub.
+        const all = [...this.#subscriptions].reverse();
         const after = query['starting_after'];
-        if (after !== undefined) data = data.slice(data.findIndex((s) => s.id === after) + 1);
+        const from = after === undefined ? 0 : all.findIndex((s) => s.id === after) + 1;
+        if (after !== undefined && from === 0) {
+            return error(400, 'invalid_request', 'starting_after is not a subscription of yours.');
+        }
+        const data = all
+            .slice(from)
+            // The comeback that replaced it stands for the customer (Mesub-io/backend#254).
+            .filter((s) => s.status !== 'superseded')
+            .filter((s) => s[asked.kind] === asked.value)
+            .filter((s) => query['plan'] === undefined || s.plan === query['plan']);
 
         const page: ServerSubscriptionList = {
             data: data.slice(0, limit).map((s) => bounded(s, this.#endOf(s.plan))),
@@ -652,6 +713,8 @@ export class FakeMesub {
         if (typeof plan !== 'string' || typeof wallet !== 'string') {
             return error(400, 'invalid_request', 'plan and wallet are required.');
         }
+        const invalid = invalidContact({ wallet, email });
+        if (invalid) return invalid;
         if (this.#plans && !this.#plans.has(plan)) {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
@@ -663,9 +726,8 @@ export class FakeMesub {
             external_id: typeof external_id === 'string' ? external_id.trim() : null,
         };
         const held = this.#subscriptions.filter((s) => s.plan === plan && s.wallet === wallet);
-        if (held.some((s) => RUNNING.includes(s.status))) {
-            return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
-        }
+        const refusal = liveRefusal(held);
+        if (refusal) return refusal;
 
         // One checkout per customer on a wallet, as Mesub keeps them: the same
         // customer gets its own back, another one never does.
@@ -701,15 +763,12 @@ export class FakeMesub {
         }
         if (this.#over(subscription.plan)) return error(409, 'plan_ended', 'This plan has ended.');
 
-        const landed = this.#subscriptions.some(
-            (s) =>
-                s.plan === subscription.plan &&
-                s.wallet === subscription.wallet &&
-                RUNNING.includes(s.status),
+        const refusal = liveRefusal(
+            this.#subscriptions.filter(
+                (s) => s.plan === subscription.plan && s.wallet === subscription.wallet,
+            ),
         );
-        if (landed) {
-            return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
-        }
+        if (refusal) return refusal;
 
         return Response.json(handedOut(subscription), { status: 201 });
     }
@@ -765,7 +824,7 @@ export class FakeMesub {
 
     /** The transaction of a cancel, resume or close, or Mesub's refusal of it. */
     #build(action: FakeAction, subscription: ServerSubscription): Response {
-        const refusal = refusalOf(action, subscription);
+        const refusal = refusalOf(action, subscription, this.#gone.has(subscription.id));
         if (refusal) return refusal;
 
         const built = this.#built.get(subscription.id) ?? new Set();
@@ -785,8 +844,11 @@ export class FakeMesub {
         if (typeof signature !== 'string' || signature === '') {
             return error(400, 'invalid_request', 'signature must be a transaction signature.');
         }
-        const done = subscription.status === DONE[action];
-        const refusal = done ? null : refusalOf(action, subscription);
+        const gone = this.#gone.has(subscription.id);
+        // One ended with its plan is ended before its close and after it (#344).
+        const done =
+            subscription.status === DONE[action] && !(endedWithPlan(subscription) && !gone);
+        const refusal = done ? null : refusalOf(action, subscription, gone);
         if (refusal) return refusal;
         if (!this.#built.get(subscription.id)?.has(action)) {
             return error(400, 'nothing_to_confirm', 'There is no transaction to confirm yet.');
@@ -799,6 +861,12 @@ export class FakeMesub {
         const now = new Date().toISOString();
         const end = subscription.current_period_end;
 
+        if (action === 'close' && endedWithPlan(subscription)) {
+            // As Mesub's confirmClose: its account is gone, and the row stays
+            // ended with the reason it ended for. Nothing ends twice.
+            this.#gone.add(subscription.id);
+            return Response.json({ subscription }, { status: 201 });
+        }
         if (action === 'cancel') {
             // Paid up, it keeps its access to the end of the period.
             Object.assign(subscription, {
@@ -881,6 +949,44 @@ export class FakeMesub {
             });
         }
     }
+}
+
+/**
+ * How long Mesub keeps an answer fresh, as the back's `AccessService` works
+ * it out: 10 s for a no, which a subscribe may lift any second; for a yes,
+ * until the first moment it changes on its own (the next retry, else the
+ * next charge, else a cancellation's or a parked period's end; the plan's
+ * end; a blocked row's `access_until`), from 10 s to 300 s, and 300 with
+ * none ahead.
+ */
+function revalidateAfter(answer: Omit<AccessAnswer, 'revalidate_after'>, planEnd: string | null) {
+    if (!answer.access) return REVALIDATE_MIN_S;
+
+    const next = soonest(
+        answer.next_retry_at ??
+            answer.next_charge_at ??
+            soonest(
+                answer.paused ? answer.current_period_end : null,
+                answer.status === 'cancelled' ? answer.access_until : null,
+            ),
+        planEnd,
+        answer.blocked_since === null ? null : answer.access_until,
+    );
+    if (next === null) return REVALIDATE_MAX_S;
+
+    const seconds = Math.floor((Date.parse(next) - Date.now()) / 1000);
+    return Math.min(REVALIDATE_MAX_S, Math.max(REVALIDATE_MIN_S, seconds));
+}
+
+/** The earliest of these dates, null when none is given. */
+function soonest(...dates: Array<string | null>): string | null {
+    return dates.reduce<string | null>(
+        (first, date) =>
+            date === null || (first !== null && Date.parse(first) <= Date.parse(date))
+                ? first
+                : date,
+        null,
+    );
 }
 
 /** What an access answer and a subscription both say of access and of the pulls ahead. */
@@ -968,8 +1074,15 @@ const DONE: Record<FakeAction, ServerSubscription['status']> = {
     close: 'ended',
 };
 
-/** Mesub's 409 for an action a subscription's status does not allow, or null. */
-function refusalOf(action: FakeAction, subscription: ServerSubscription): Response | null {
+/**
+ * Mesub's 409 for an action a subscription's status does not allow, or null.
+ * `gone`: a row ended with its plan whose close landed already.
+ */
+function refusalOf(
+    action: FakeAction,
+    subscription: ServerSubscription,
+    gone = false,
+): Response | null {
     const { status, access_until } = subscription;
     const over = access_until === null || Date.parse(access_until) <= Date.now();
     const cancelled =
@@ -991,10 +1104,31 @@ function refusalOf(action: FakeAction, subscription: ServerSubscription): Respon
             ? error(409, 'subscription_ended', 'The period paid for is over: subscribe again.')
             : null;
     }
+    // A close, as Mesub's buildCloseTransaction answers it. Ended with its
+    // plan, the delegation still holds the deposit (#344): it closes, once.
+    if (endedWithPlan(subscription)) {
+        return gone
+            ? error(
+                  409,
+                  'subscription_not_on_chain',
+                  'This subscription was closed outside Mesub, so it has ended.',
+              )
+            : null;
+    }
     if (isClosed(subscription)) {
         return error(409, 'subscription_not_on_chain', 'This subscription is closed already.');
     }
-    if (!cancelled && status !== 'stopped') {
+    if (status === 'ended' && !cancelled) {
+        return error(
+            409,
+            'subscription_not_on_chain',
+            'This subscription has ended and cannot be closed through Mesub.',
+        );
+    }
+    // A stopped one included: the fake's is one nothing cancelled, which
+    // Mesub cancels first. Neither a cancellation signed without Mesub nor an
+    // authority closed for good (Mesub-io/backend#394) is modelled here.
+    if (!cancelled) {
         return error(
             409,
             'subscription_not_cancelled',
@@ -1006,14 +1140,59 @@ function refusalOf(action: FakeAction, subscription: ServerSubscription): Respon
         : error(409, 'close_too_early', `This subscription runs until ${access_until}.`);
 }
 
-/** The statuses a wallet holds a plan in: no new checkout beside one. */
-const RUNNING: ServerSubscription['status'][] = ['active', 'cancelled', 'unpaid'];
+/**
+ * Mesub's 409 for a checkout beside the subscription a wallet holds on the
+ * plan, by its status, as the back's `liveRefusal` words it; null when it
+ * holds none. A cancelled one past its end is held until it is closed: it
+ * reads `ended`, with `end_reason` `cancelled`. A stopped one is not: the
+ * fake's is one nothing cancelled, which the wallet comes back over
+ * (Mesub-io/backend#211).
+ */
+function liveRefusal(held: ServerSubscription[]): Response | null {
+    const live = held.find(
+        (s) =>
+            ['active', 'cancelled', 'unpaid'].includes(s.status) ||
+            (s.status === 'ended' && s.end_reason === 'cancelled'),
+    );
+
+    if (!live) return null;
+    if (live.status === 'active') {
+        return error(409, 'already_subscribed', 'You are already subscribed to this plan.');
+    }
+    if (live.status === 'unpaid') {
+        return error(
+            409,
+            'payment_pending',
+            'You already have a subscription to this plan, and its last payment is late. Open it in your subscriptions to see how to fix it, or cancel it.',
+        );
+    }
+    const until = live.status === 'cancelled' ? live.access_until : null;
+    return error(
+        409,
+        'subscription_cancelled',
+        until !== null && Date.parse(until) > Date.now()
+            ? `Your subscription to this plan is cancelled but runs until ${until}: resume it instead of subscribing again.`
+            : 'Your cancelled subscription to this plan must be closed first: close it, then subscribe again.',
+    );
+}
 
 /** Whose checkout it is, as Mesub tells them apart: the external id, else the email, else nobody. */
 function holderOf(contact: Pick<ServerSubscription, 'email' | 'external_id'>): string {
     if (contact.external_id) return `x:${contact.external_id}`;
 
     return contact.email ? `e:${contact.email}` : '-';
+}
+
+/** The reasons a row ends with its plan: removed, replaced, or past its end. */
+const WITH_ITS_PLAN: Array<ServerSubscription['end_reason']> = [
+    'plan_removed',
+    'plan_replaced',
+    'plan_ended',
+];
+
+/** A row ended with its plan, which Mesub still closes (Mesub-io/backend#344). */
+function endedWithPlan(subscription: ServerSubscription): boolean {
+    return subscription.status === 'ended' && WITH_ITS_PLAN.includes(subscription.end_reason);
 }
 
 function isClosed(subscription: ServerSubscription): boolean {
@@ -1076,8 +1255,40 @@ function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
     }
 }
 
-function nothing(asked: Asked, plan: string): AccessAnswer {
+function nothing(asked: Asked, plan: string): Held {
     return { wallet: asked.kind === 'wallet' ? asked.value : null, plan, ...NOTHING };
+}
+
+/** A Solana address's shape, as Mesub's DTOs hold a wallet to: base58, 32 to 44 characters. */
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * Close to the `IsEmail` Mesub checks an email with, validator.js's
+ * defaults: no space, one @, and a domain ending in a top-level one of two
+ * letters or more, so `ops@localhost` is refused. Not every edge of it.
+ */
+const EMAIL = /^[^\s@]+@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/;
+
+/**
+ * Mesub's 400 for a wallet or an email its DTOs refuse (`CustomerQueryDto`,
+ * `ServerSubscribeDto`), before anything is looked up; null for those it
+ * takes, or that are not given. The email is trimmed and lowercased first,
+ * as Mesub does.
+ */
+function invalidContact({ wallet, email }: { wallet?: unknown; email?: unknown }): Response | null {
+    const reasons: string[] = [];
+    if (typeof wallet === 'string' && !BASE58_ADDRESS.test(wallet)) {
+        reasons.push('wallet must be a base58 Solana address');
+    }
+    if (typeof email === 'string') {
+        const normalised = email.trim().toLowerCase();
+        if (!EMAIL.test(normalised)) reasons.push('email must be an email address');
+        if (normalised.length > 254) {
+            reasons.push('email must be shorter than or equal to 254 characters');
+        }
+    }
+
+    return reasons.length ? error(400, 'invalid_request', reasons) : null;
 }
 
 /** The one customer a query names, or null when it names none or several. */
@@ -1101,7 +1312,6 @@ function withAttempts(answer: AccessAnswer, attempts: boolean): AccessAnswer {
     return light;
 }
 
-/** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
 /**
  * A plan as `/v1/plans` serves one: 9.99 USDC a month on devnet, unless told
  * otherwise. Its token follows its `symbol`, which only a vouched mint has:
@@ -1140,10 +1350,31 @@ function fakePlan(slug: string, { token, ...over }: Omit<FakePlanFields, 'slug'>
     };
 }
 
+/**
+ * The codes Mesub answers `retryable: true`, from the back's `ERROR_CODES`,
+ * which sets the flag by code alone. Every other code it has is false, and
+ * none of those is ever answered as a 408, a 429 or a 5xx, so the status
+ * says the same of them.
+ */
+const RETRYABLE_CODES = new Set([
+    'rate_limited',
+    'internal_error',
+    'unavailable',
+    'comeback_in_flight',
+    'comeback_period_rolling',
+    'pending_cap_reached',
+    'subscription_changed',
+    'retry_too_soon',
+    'pull_running',
+    'network_unavailable',
+]);
+
+/** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
 function error(
     status: number,
     code: string,
-    message: string,
+    // A list for what Mesub's validation refused, as Nest answers it.
+    message: string | string[],
     { retryable, retryAfter }: { retryable?: boolean; retryAfter?: number } = {},
 ): Response {
     return Response.json(
@@ -1152,7 +1383,9 @@ function error(
             error: REASONS[status] ?? 'Error',
             message,
             code,
-            retryable: retryable ?? (status === 408 || status === 429 || status >= 500),
+            retryable:
+                retryable ??
+                (RETRYABLE_CODES.has(code) || status === 408 || status === 429 || status >= 500),
         },
         {
             status,

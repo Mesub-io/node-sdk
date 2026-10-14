@@ -335,11 +335,15 @@ export function planListFrom(body: unknown): Plan[] {
     return (body as { plans: Plan[] }).plans;
 }
 
-/** One subscription, from `retrieve`, or read back after a submit. */
-export function serverSubscriptionFrom(body: unknown): ServerSubscription {
+/** One subscription, from `retrieve`, `retry`, or read back after a submit. */
+export function serverSubscriptionFrom(
+    body: unknown,
+    route = 'GET /v1/subscriptions/:id',
+    status = 200,
+): ServerSubscription {
     const problem = problemWith(body, SUBSCRIPTION);
 
-    if (problem !== null) throw unreadable(problem, body, 'GET /v1/subscriptions/:id');
+    if (problem !== null) throw unreadable(problem, body, route, status);
 
     return body as ServerSubscription;
 }
@@ -443,6 +447,8 @@ const WEBHOOK = {
     type: STRING,
     created_at: DATE,
     data: OBJECT,
+    // Only on a body sent by hand from the dashboard, and then true.
+    test: { check: (value) => value === true, expected: 'true', optional: true },
 } satisfies Record<Exclude<keyof WebhookEvent, 'id'>, Field>;
 
 const DETAILS: Partial<Record<string, Record<string, Field>>> = {

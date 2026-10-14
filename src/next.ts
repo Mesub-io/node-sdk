@@ -14,7 +14,7 @@ import {
     type MesubAccess,
     type PlanOption,
     plansOf,
-    UNAVAILABLE_RETRY_AFTER_S,
+    retryAfterOf,
 } from './guard.js';
 
 import {
@@ -95,9 +95,7 @@ export function withMesub<Context = unknown>(
         if (options.onDenied) return await options.onDenied(denial, request);
 
         const headers: Record<string, string> =
-            outcome.reason === 'unavailable'
-                ? { 'Retry-After': String(UNAVAILABLE_RETRY_AFTER_S) }
-                : {};
+            outcome.reason === 'unavailable' ? { 'Retry-After': retryAfterOf(outcome) } : {};
 
         return Response.json(denialBody(outcome), { status: denial.status, headers });
     };

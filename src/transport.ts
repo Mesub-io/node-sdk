@@ -181,7 +181,9 @@ export class Transport {
             return {
                 ok: false,
                 error,
-                retry: shouldRetry(response, error),
+                // Sent again (a GET only, a POST never is) when the error is `retryable`:
+                // Mesub's flag when the body has one, the status's otherwise.
+                retry: error.retryable,
                 retryAfter: asked === null ? null : Math.min(asked, MAX_RETRY_AFTER),
             };
         } catch (cause) {
@@ -215,20 +217,6 @@ export class Transport {
  */
 function endpoint(baseUrl: string, path: string): URL {
     return new URL(baseUrl + path);
-}
-
-/**
- * Whether a GET is sent again (a POST never is): `x-should-retry` first, as
- * the Stainless-generated clients (OpenAI, Anthropic) read it, then the
- * error's own `retryable`, which is Mesub's flag when the body has one and
- * the status's otherwise. The pending cap (`pending_cap_reached`) is only
- * ever a create's, a POST, so it needs no rule of its own here.
- */
-function shouldRetry(response: Response, error: MesubError): boolean {
-    const header = response.headers.get('x-should-retry');
-    if (header === 'true') return true;
-    if (header === 'false') return false;
-    return error.retryable;
 }
 
 /**

@@ -654,10 +654,14 @@ export class Subscriptions {
 
     /**
      * Builds the transaction that closes the wallet's authorisation on a
-     * subscription that is over, a cancelled or stopped one past its end:
-     * its rent goes back to the wallet. Hand it to your front: the wallet
-     * signs and sends it, then `confirmClose` takes the signature. Sent once,
-     * never retried.
+     * subscription that is over: its rent goes back to the wallet. Mesub
+     * builds it for a cancelled one past its end; for a stopped one
+     * cancelled on chain and past its end, or whose authority is closed for
+     * good; and for one `ended` with its plan (`end_reason` `plan_removed`,
+     * `plan_replaced` or `plan_ended`). A stopped one that nothing cancelled
+     * is refused with `subscription_not_cancelled`: cancel it first.
+     * Hand the transaction to your front: the wallet signs and sends it,
+     * then `confirmClose` takes the signature. Sent once, never retried.
      */
     async close(id: string, options: RequestOptions = {}): Promise<WalletTransaction> {
         return this.#build('close', id, options);
@@ -684,14 +688,20 @@ export class Subscriptions {
      * and Business it runs beside the schedule, the wait between two doubling.
      * Mesub refuses it first when it cannot succeed, so it never spends a
      * retry for nothing: `apiCode` `insufficient_balance` (top up, then pay
-     * again), `retry_cannot_succeed` (the wallet no longer approves it),
-     * `retry_too_soon` (`retryAfter` says when), `retries_spent`,
-     * `retry_deadline_passed`, `subscription_not_late`, `subscription_paused`,
-     * `plan_ended`. Sent once, never retried: a second one is a second retry.
+     * again), `retry_cannot_succeed` (the wallet no longer approves it, its
+     * token account is frozen, or its authority is closed), `retry_too_soon`
+     * (`retryAfter` says when), `retries_spent`, `retry_deadline_passed`,
+     * `subscription_not_late`, `subscription_paused`, `plan_ended`. Two more
+     * are `retryable`: `subscription_changed` (two retries met, or a pull
+     * moved the subscription on) and, on Free, `pull_running` (a pull runs
+     * now). Read the subscription back before you ask again. Sent once,
+     * never retried: a second one is a second retry.
      */
     async retry(id: string, options: RequestOptions = {}): Promise<ServerSubscription> {
         return serverSubscriptionFrom(
             await this.#transport.post(`${pathOf(id)}/retry`, undefined, options),
+            'POST /v1/subscriptions/:id/retry',
+            202,
         );
     }
 
@@ -842,6 +852,9 @@ export class Subscriptions {
     }
 }
 
+/** An id as Mesub writes them, and the only kind it reads (`RESOURCE_ID`). */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+
 function pathOf(id: string): string {
     // An empty id would reach the list route and read as a missing customer.
     if (typeof id !== 'string' || id === '') {
@@ -850,7 +863,15 @@ function pathOf(id: string): string {
             code: 'invalid_request',
         });
     }
-    return `/v1/subscriptions/${encodeURIComponent(id)}`;
+    // `.` and `..` survive encoding and the URL resolves them: `retrieve('.')` would
+    // ask the list, `cancel('..')` another route. Refused before it is sent.
+    if (!ID.test(id)) {
+        throw new MesubError(
+            'A subscription id is letters, digits, hyphens and underscores, 64 at most.',
+            { status: null, code: 'invalid_request' },
+        );
+    }
+    return `/v1/subscriptions/${id}`;
 }
 
 /** Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never a subscription's. */
