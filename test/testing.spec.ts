@@ -66,17 +66,108 @@ describe('FakeMesub', () => {
         expect(new FakeMesub().client()).toBeInstanceOf(Mesub);
     });
 
-    it('answers a change on the next call', async () => {
-        const fake = new FakeMesub();
-        const mesub = fake.client();
-        fake.grant(WALLET, 'pro');
-        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+    // Mesub's AccessService: a no is fresh 10 s (REVALIDATE_MIN_S), a yes
+    // until the next retry, charge, expiry or parked period end, the plan's
+    // end, or a blocked row's access_until, from 10 s to 300 s
+    // (revalidateAfter); a list for the soonest yes, 10 with none.
+    describe('revalidate_after', () => {
+        const at = (seconds: number) => new Date(Date.now() + seconds * 1000).toISOString();
+        const near = (seconds: number) => expect.closeTo(seconds, -1);
 
-        fake.deny(WALLET, 'pro', { status: 'stopped' });
+        it('serves Mesub’s: 10 for a no, up to 300 for a yes', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const freshness = async (customer: string, plan: string) =>
+                (await mesub.access(customer, plan)).revalidate_after;
 
-        await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
-            access: false,
-            status: 'stopped',
+            fake.grant(WALLET, 'pro');
+            fake.grant(WALLET, 'charge', { next_charge_at: at(120) });
+            fake.grant(WALLET, 'soon', { next_charge_at: at(2) });
+            fake.grant(WALLET, 'late', {
+                status: 'unpaid',
+                next_retry_at: at(200),
+                next_charge_at: null,
+            });
+            fake.grant(WALLET, 'cancelled', { status: 'cancelled', access_until: at(150) });
+            fake.grant(WALLET, 'parked', { paused: true, current_period_end: at(90) });
+            fake.grant(WALLET, 'blocked', {
+                blocked_since: at(-60),
+                blocked_reason: 'receiver_not_allowed',
+                access_until: at(100),
+                next_retry_at: at(250),
+            });
+            fake.grantLastPeriod(WALLET, 'ending', at(80));
+            fake.deny(WALLET, 'stopped', { status: 'stopped' });
+
+            await expect(freshness(OTHER, 'pro')).resolves.toBe(10);
+            await expect(freshness(WALLET, 'stopped')).resolves.toBe(10);
+            await expect(freshness(WALLET, 'pro')).resolves.toBe(300);
+            await expect(freshness(WALLET, 'charge')).resolves.toEqual(near(120));
+            await expect(freshness(WALLET, 'soon')).resolves.toBe(10);
+            await expect(freshness(WALLET, 'late')).resolves.toEqual(near(200));
+            await expect(freshness(WALLET, 'cancelled')).resolves.toEqual(near(150));
+            await expect(freshness(WALLET, 'parked')).resolves.toEqual(near(90));
+            await expect(freshness(WALLET, 'blocked')).resolves.toEqual(near(100));
+            await expect(freshness(WALLET, 'ending')).resolves.toEqual(near(80));
+        });
+
+        it('serves a list the soonest yes, and 10 with none', async () => {
+            const fake = new FakeMesub();
+            // A new client each time: one keeps a list as long as it is fresh.
+            const mesub = { accessList: (wallet: string) => fake.client().accessList(wallet) };
+
+            await expect(mesub.accessList(WALLET)).resolves.toEqual({
+                plans: [],
+                revalidate_after: 10,
+            });
+
+            fake.deny(OTHER, 'team', { status: 'stopped' });
+            await expect(mesub.accessList(OTHER)).resolves.toMatchObject({
+                revalidate_after: 10,
+            });
+
+            fake.grant(WALLET, 'pro');
+            fake.grant(WALLET, 'charge', { next_charge_at: at(120) });
+            fake.deny(WALLET, 'team', { status: 'stopped' });
+            await expect(mesub.accessList(WALLET)).resolves.toMatchObject({
+                revalidate_after: near(120),
+            });
+        });
+
+        it('keeps a yes cached as a real client does: a later no shows once it is stale', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro');
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+
+            fake.deny(WALLET, 'pro', { status: 'stopped' });
+
+            await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
+            await expect(fake.client().hasAccess(WALLET, 'pro')).resolves.toBe(false);
+        });
+
+        it('serves the one asked for, 0 to answer a change on the next call', async () => {
+            const fake = new FakeMesub({ revalidateAfter: 0 });
+            const mesub = fake.client();
+            fake.grant(WALLET, 'pro');
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: true,
+                revalidate_after: 0,
+            });
+
+            fake.deny(WALLET, 'pro', { status: 'stopped' });
+
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                access: false,
+                status: 'stopped',
+                revalidate_after: 0,
+            });
+            await expect(mesub.accessList(OTHER)).resolves.toMatchObject({ revalidate_after: 0 });
+            // One a test sets on an answer wins.
+            fake.grant(WALLET, 'team', { revalidate_after: 3600 });
+            await expect(mesub.access(WALLET, 'team')).resolves.toMatchObject({
+                revalidate_after: 3600,
+            });
         });
     });
 
@@ -290,7 +381,8 @@ describe('FakeMesub', () => {
     });
 
     it('fails as told, and the outage fallback serves what was cached', async () => {
-        const fake = new FakeMesub();
+        // Stale at once, so the client asks again and meets the failure.
+        const fake = new FakeMesub({ revalidateAfter: 0 });
         fake.grant(WALLET, 'pro');
         const mesub = fake.client();
         await mesub.hasAccess(WALLET, 'pro');
@@ -889,7 +981,8 @@ describe('FakeMesub', () => {
 
         it('refuses everyone from the end on, whatever the status still reads', async () => {
             vi.useFakeTimers({ toFake: ['Date'] });
-            const fake = new FakeMesub();
+            // Stale at once: Mesub's yes just before the end is fresh 10 s.
+            const fake = new FakeMesub({ revalidateAfter: 0 });
             const mesub = fake.client();
             const end = soon();
             fake.grantLastPeriod(WALLET, 'pro', end);

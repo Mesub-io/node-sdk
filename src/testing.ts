@@ -56,6 +56,14 @@ export interface FakeMesubOptions {
      * it does not have, and attempts are only served through `/v1/access`.
      */
     attemptsRoute?: boolean;
+    /**
+     * The `revalidate_after` of every `/v1/access` answer, in seconds: 0 for
+     * a test that wants each change seen on the next call of the same
+     * client. Left out, Mesub's own: 10 for a no, and for a yes the time to
+     * its next charge, retry or end, from 10 to 300, so a client keeps a yes
+     * up to five minutes. One set on an answer with `setAccess` wins.
+     */
+    revalidateAfter?: number;
 }
 
 /** A plan as declared to the fake: its slug, and any field to set, a token's included. */
@@ -124,8 +132,14 @@ export interface FakeFailure {
 /** What a test may set of an access answer: all but the plan, named apart. */
 export type FakeAccess = Partial<Omit<AccessAnswer, 'plan'>>;
 
+/**
+ * An access answer as the fake holds it: `revalidate_after` only when a test
+ * set it, worked out when served otherwise.
+ */
+type Held = Omit<AccessAnswer, 'revalidate_after'> & { revalidate_after?: number };
+
 /** What Mesub answers a customer with nothing on a plan. */
-const NOTHING: Omit<AccessAnswer, 'wallet' | 'plan'> = {
+const NOTHING: Omit<Held, 'wallet' | 'plan'> = {
     access: false,
     status: 'none',
     paused: false,
@@ -142,10 +156,11 @@ const NOTHING: Omit<AccessAnswer, 'wallet' | 'plan'> = {
     next_charge_at: null,
     next_retry_at: null,
     retry_deadline: null,
-    // Stale at once, so a change shows on the next call; the outage fallback
-    // still keeps it. Set it to test the cache itself.
-    revalidate_after: 0,
 };
+
+/** The freshest and the stalest Mesub serves an answer, in seconds (the back's `AccessService`). */
+const REVALIDATE_MIN_S = 10;
+const REVALIDATE_MAX_S = 300;
 
 const OUTAGE: FakeFailure = {
     status: 503,
@@ -186,7 +201,7 @@ export class FakeMesub {
 
     readonly #plans: Set<string> | null;
     readonly #planList: Plan[];
-    readonly #answers = new Map<string, AccessAnswer>();
+    readonly #answers = new Map<string, Held>();
     /** The ends `grantLastPeriod` and `endPlan` gave a plan, by slug: they win over `plans`. */
     readonly #ends = new Map<string, string>();
     #subscriptions: ServerSubscription[] = [];
@@ -197,6 +212,7 @@ export class FakeMesub {
     /** The attempts `setAttempts` gave each subscription, newest first, by id. */
     readonly #attempts = new Map<string, SubscriptionAttempt[]>();
     readonly #attemptsRoute: boolean;
+    readonly #revalidateAfter: number | undefined;
     #attemptIds = 0;
     #failure: FakeFailure | null = null;
     #ids = 0;
@@ -211,6 +227,7 @@ export class FakeMesub {
         this.#planList = (plans ?? []).sort((a, b) => a.slug.localeCompare(b.slug));
         this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
         this.#attemptsRoute = options.attemptsRoute ?? true;
+        this.#revalidateAfter = options.revalidateAfter;
         this.fetch = (input, init) => this.#handle(input, init);
     }
 
@@ -295,10 +312,10 @@ export class FakeMesub {
      */
     setAccess(customer: Customer | string, plan: string, fields: FakeAccess): AccessAnswer {
         const asked = customerOf(customer);
-        const answer: AccessAnswer = { ...nothing(asked, plan), ...fields, plan };
+        const answer: Held = { ...nothing(asked, plan), ...fields, plan };
 
         this.#answers.set(keyOf(asked, plan), answer);
-        return answer;
+        return this.#fresh(answer);
     }
 
     /**
@@ -435,6 +452,21 @@ export class FakeMesub {
             created_at: now,
             confirmed_at: now,
             ...fields,
+        };
+    }
+
+    /**
+     * An answer as `/v1/access` serves it now: bounded by its plan's end, and
+     * fresh for as long as Mesub keeps it, unless a test said otherwise.
+     */
+    #fresh(answer: Held): AccessAnswer {
+        const end = this.#endOf(answer.plan);
+        const served = bounded(answer, end);
+
+        return {
+            ...served,
+            revalidate_after:
+                served.revalidate_after ?? this.#revalidateAfter ?? revalidateAfter(served, end),
         };
     }
 
@@ -585,19 +617,24 @@ export class FakeMesub {
         if (plan === undefined) {
             const plans = [...this.#answers.entries()]
                 .filter(([key]) => key.startsWith(keyOf(asked, '')))
-                .map(([, answer]) =>
-                    withAttempts(bounded(answer, this.#endOf(answer.plan)), attempts),
-                );
-            const soonest = Math.min(...plans.map((answer) => answer.revalidate_after));
+                .map(([, answer]) => withAttempts(this.#fresh(answer), attempts));
+            // As Mesub: stale with the first yes that changes; a no would hold
+            // the whole list to 10, so with no yes it is the list's own 10.
+            const granted = plans.filter((answer) => answer.access);
 
-            return Response.json({ plans, revalidate_after: plans.length ? soonest : 0 });
+            return Response.json({
+                plans,
+                revalidate_after: granted.length
+                    ? Math.min(...granted.map((answer) => answer.revalidate_after))
+                    : (this.#revalidateAfter ?? REVALIDATE_MIN_S),
+            });
         }
         if (this.#plans && !this.#plans.has(plan)) {
             return error(404, 'plan_not_found', `No plan under slug ${plan}`);
         }
 
         const answer = this.#answers.get(keyOf(asked, plan)) ?? nothing(asked, plan);
-        return Response.json(withAttempts(bounded(answer, this.#endOf(plan)), attempts));
+        return Response.json(withAttempts(this.#fresh(answer), attempts));
     }
 
     #list(query: Record<string, string>): Response {
@@ -909,6 +946,44 @@ export class FakeMesub {
     }
 }
 
+/**
+ * How long Mesub keeps an answer fresh, as the back's `AccessService` works
+ * it out: 10 s for a no, which a subscribe may lift any second; for a yes,
+ * until the first moment it changes on its own (the next retry, else the
+ * next charge, else a cancellation's or a parked period's end; the plan's
+ * end; a blocked row's `access_until`), from 10 s to 300 s, and 300 with
+ * none ahead.
+ */
+function revalidateAfter(answer: Omit<AccessAnswer, 'revalidate_after'>, planEnd: string | null) {
+    if (!answer.access) return REVALIDATE_MIN_S;
+
+    const next = soonest(
+        answer.next_retry_at ??
+            answer.next_charge_at ??
+            soonest(
+                answer.paused ? answer.current_period_end : null,
+                answer.status === 'cancelled' ? answer.access_until : null,
+            ),
+        planEnd,
+        answer.blocked_since === null ? null : answer.access_until,
+    );
+    if (next === null) return REVALIDATE_MAX_S;
+
+    const seconds = Math.floor((Date.parse(next) - Date.now()) / 1000);
+    return Math.min(REVALIDATE_MAX_S, Math.max(REVALIDATE_MIN_S, seconds));
+}
+
+/** The earliest of these dates, null when none is given. */
+function soonest(...dates: Array<string | null>): string | null {
+    return dates.reduce<string | null>(
+        (first, date) =>
+            date === null || (first !== null && Date.parse(first) <= Date.parse(date))
+                ? first
+                : date,
+        null,
+    );
+}
+
 /** What an access answer and a subscription both say of access and of the pulls ahead. */
 type Dated = Pick<AccessAnswer, 'access' | 'access_until' | 'next_charge_at' | 'next_retry_at'>;
 
@@ -1175,7 +1250,7 @@ function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
     }
 }
 
-function nothing(asked: Asked, plan: string): AccessAnswer {
+function nothing(asked: Asked, plan: string): Held {
     return { wallet: asked.kind === 'wallet' ? asked.value : null, plan, ...NOTHING };
 }
 
