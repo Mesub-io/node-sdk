@@ -118,7 +118,7 @@ const UPGRADE = {
 } as const;
 const CANCEL_PAID = { ...CANCEL, confirm: 'confirm_cancel_paid' } as const;
 
-/** A block of the merchant's setup, as the subscriber reads it: one sentence for the four. */
+/** A block of the merchant's setup, as the subscriber reads it: one sentence for the five. */
 const BLOCKED_BY_SETUP =
     'Mesub cannot take your payments for {plan_name} for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying.[ You keep access until {access_until} if no payment goes through by then.] Access comes back on its own with the first payment that goes through.';
 /** How a merchant's sentence on a block ends, whatever the cause. */
@@ -239,6 +239,11 @@ export const SITUATIONS = {
     blocked_receiver_account_missing: {
         subscriber: BLOCKED_BY_SETUP,
         merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the wallet that receives its payments has no token account for the plan's token, and nobody else on the plan can be paid. Open that account; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_receiver_account_frozen: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the token account of the wallet that receives its payments is frozen, so it cannot take payments. Choose another receiving wallet, or ask the token's issuer to unfreeze that account; Mesub keeps trying.${BLOCKED_ACCESS}`,
         actions: [CANCEL],
     },
     blocked_mint_gone: {
@@ -496,6 +501,7 @@ const BLOCKED_REASONS: Record<BlockedReason, keyof typeof SITUATIONS> = {
     puller_not_allowed: 'blocked_puller_not_allowed',
     receiver_not_allowed: 'blocked_receiver_not_allowed',
     receiver_account_missing: 'blocked_receiver_account_missing',
+    receiver_account_frozen: 'blocked_receiver_account_frozen',
     mint_gone: 'blocked_mint_gone',
 };
 

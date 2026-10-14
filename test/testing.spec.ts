@@ -642,6 +642,7 @@ describe('FakeMesub', () => {
             'puller_not_allowed',
             'receiver_not_allowed',
             'receiver_account_missing',
+            'receiver_account_frozen',
             'mint_gone',
         ] as const;
 

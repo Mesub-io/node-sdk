@@ -49,13 +49,15 @@ export type LateReason = 'insufficient_balance' | 'approval_revoked' | 'authorit
  * Why every charge of a subscription is blocked, none of it the subscriber's
  * doing (Mesub-io/backend#398). The merchant's own setup, theirs to fix, by
  * name: Mesub's puller taken off the plan on chain, a receiving wallet that
- * is not in the plan's destinations or has no token account for the plan's
- * token, a token that no longer exists. `mesub` for every cause of Mesub's.
+ * is not in the plan's destinations, has no token account for the plan's
+ * token or whose token account is frozen (Mesub-io/backend#395), a token
+ * that no longer exists. `mesub` for every cause of Mesub's.
  */
 export type BlockedReason =
     | 'puller_not_allowed'
     | 'receiver_not_allowed'
     | 'receiver_account_missing'
+    | 'receiver_account_frozen'
     | 'mint_gone'
     | 'mesub';
 

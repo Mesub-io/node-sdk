@@ -1398,6 +1398,7 @@ describe('subscriptions.retrieve', () => {
         'puller_not_allowed',
         'receiver_not_allowed',
         'receiver_account_missing',
+        'receiver_account_frozen',
         'mint_gone',
         'not_known_yet',
     ])('hands back a subscription blocked by %s, its status unmoved', async (blocked_reason) => {
