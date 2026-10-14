@@ -203,6 +203,12 @@ The first version published to npm. Requires Node 22 or later.
   setup. The subscriber reads that nothing is theirs to do, the merchant
   what to fix, and both when access ends. A blocked one whose access ended
   no longer reads `ended_plan_ended` (#128).
+- `blocked_reason` can be `receiver_account_frozen`: the token account of the
+  wallet that receives the plan's payments is frozen (Mesub-io/backend#395).
+  `BlockedReason` has it, and `explain()` reads it as
+  `blocked_receiver_account_frozen`: the subscriber reads that nothing is
+  theirs to do, the merchant to choose another receiving wallet or ask the
+  token's issuer to unfreeze that account (#133).
 
 ### Routes for the React widget
 
