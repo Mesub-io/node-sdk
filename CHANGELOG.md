@@ -85,7 +85,8 @@ The first version published to npm. Requires Node 22 or later.
   `headers` adds headers to every call, such as a Cloudflare Access service
   token (#63).
 - Every call sends `Mesub-Version`, the API version the release was written
-  against, exported as `API_VERSION` (#64).
+  against, exported as `API_VERSION` (#64). Mesub reads it: a version it no
+  longer serves is a 400, `unsupported_version` (#135).
 
 ### Plans
 
@@ -287,6 +288,12 @@ answer this request.`: never the SDK's own message, which may name your
 - A webhook sent by hand from the dashboard carries `test: true`, now typed
   on every event. The dashboard sends one for any event type, on a made-up
   subscription. `verify` drops no cached answer for it (#135).
+- The README's webhook handler answers 400 only for `invalid_webhook`. For
+  `unexpected`, a body Mesub signed that this release cannot read, it logs
+  and answers 500: Mesub retries it, and it gets through once you update.
+  `id` is documented as the delivery id, one per endpoint. No event comes
+  when a cancellation reaches its end, and `subscription.renewed` can come
+  late (#135).
 
 ### Testing your integration
 
@@ -327,6 +334,11 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 - `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
   `total`, as it is typed: amounts are whole numbers as strings, and
   `rent.authority` may be null (#101).
+- The docs say when `retryAfter` comes on a 409 (`retry_too_soon`,
+  `comeback_period_rolling`), and that `pending_cap_reached` is a quota, not
+  a rate. `retry` lists `pull_running` and `subscription_changed`; `close`
+  says which subscriptions Mesub closes. The README's snippets compile under
+  `strict` (#135).
 
 ### Releases and CI
 

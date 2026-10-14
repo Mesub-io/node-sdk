@@ -45,12 +45,22 @@ import { Mesub } from '@mesub/node';
 
 const mesub = new Mesub(); // reads MESUB_API_KEY
 
+// Your login sets req.user: declare it once. With Passport, add these fields to Express.User.
+declare global {
+    namespace Express {
+        interface Request {
+            user?: { id: string; email?: string };
+        }
+    }
+}
+
 app.get('/api/analytics', yourLogin, async (req, res) => {
-    if (!(await mesub.hasAccess({ external_id: req.user.id }, 'pro'))) {
+    const user = req.user!; // yourLogin answers 401 when nobody is signed in
+    if (!(await mesub.hasAccess({ external_id: user.id }, 'pro'))) {
         res.status(402).json({ error: 'The Pro plan is needed.' });
         return;
     }
-    res.json(buildAnalytics(req.user));
+    res.json(buildAnalytics(user));
 });
 ```
 
@@ -60,9 +70,10 @@ never saw):
 
 ```ts
 // Express
+import type { Request } from 'express';
 import { requirePlan } from '@mesub/node/express';
 
-const customer = (req) => (req.user ? { external_id: req.user.id } : null);
+const customer = (req: Request) => (req.user ? { external_id: req.user.id } : null);
 app.get('/api/analytics', yourLogin, requirePlan('pro', { customer }), handler);
 ```
 
@@ -233,8 +244,11 @@ shown to your customer as "Pay now". Mesub answers the subscription, still
 `unpaid`: the outcome comes with the pull, as the `subscription.renewed` or
 `subscription.payment_failed` webhook. It refuses with an `apiCode` when paying
 cannot succeed, so no retry is spent for nothing: `insufficient_balance` (top
-up first), `retry_cannot_succeed` (the wallet no longer approves it),
-`retry_too_soon` (`retryAfter` says when). Sent once, never retried.
+up first), `retry_cannot_succeed` (the wallet no longer approves it, its token
+account is frozen, or its authority is closed), `retry_too_soon` (`retryAfter`
+says when). Two refusals are `retryable`: `subscription_changed` (two retries
+met, or a pull moved it on) and, on Free, `pull_running` (a pull runs now).
+Read the subscription back before you ask again. Sent once, never retried.
 
 ```ts
 await mesub.subscriptions.retrieve(id);
@@ -357,10 +371,15 @@ app.post('/webhooks/mesub', express.raw({ type: 'application/json' }), async (re
     try {
         event = await mesub.webhooks.verify(req.body, req.headers);
     } catch (error) {
-        if (error instanceof MesubError) return res.status(400).end();
-        throw error;
+        if (!(error instanceof MesubError)) throw error;
+        // Not Mesub's, or not now: refuse it.
+        if (error.code === 'invalid_webhook') return res.status(400).end();
+        // Mesub signed it, but this release cannot read it: update @mesub/node.
+        console.error(error);
+        return res.status(500).end();
     }
 
+    if (event.test) return res.status(200).end(); // sent from the dashboard
     if (await alreadyHandled(event.id)) return res.status(200).end();
     // event.type, event.data (the subscription), event.data.detail
     res.status(200).end();
@@ -368,10 +387,28 @@ app.post('/webhooks/mesub', express.raw({ type: 'application/json' }), async (re
 ```
 
 In a Next route handler: `await verifyWebhook(await request.text(),
-request.headers)`. A delivery can arrive twice or out of order: drop an
-`event.id` you already handled, and ask `hasAccess` before granting or
-revoking. The events, their bodies and how to test:
-[Webhooks](https://docs.mesub.io/docs/webhooks).
+request.headers)`.
+
+Answer 400 only for `invalid_webhook`. An `unexpected` error is a body Mesub
+signed that this release cannot read: log it, and answer a 5xx. Mesub then
+retries the same body for 3 days, so the event still gets through once you
+update `@mesub/node`; a 2xx would lose it. After 3 days of failures, Mesub
+disables the endpoint.
+
+`event.id` is the delivery id, from the `webhook-id` header. It stays the same
+on every retry and resend: drop one you already handled. It is not an event
+id: each endpoint gets its own delivery, so two endpoints see the same event
+under two ids. A delivery can also arrive out of order: ask `hasAccess` before
+granting or revoking.
+
+A body sent from the dashboard carries `test: true`, on a made-up subscription
+(`sub_test`, `user_123`), whatever its `type`. Change nothing for it: `verify`
+keeps the access cache as it is.
+
+No event comes when a cancellation reaches its end: the subscription reads
+`ended` from its `access_until` on. A `subscription.renewed` can come late, on
+a subscription that is no longer `active`. The events, their bodies and how to
+test: [Webhooks](https://docs.mesub.io/docs/webhooks).
 
 `subscription.renewal_upcoming` comes once per period, in its last quarter and
 three days before the charge at most. Its detail says whether the wallet, as
@@ -399,7 +436,7 @@ and a stable `code` to branch on:
 | `plan_not_found`  | 404, no plan of yours under that slug                                   |
 | `not_found`       | any other 404 Mesub answered, e.g. an unknown subscription id           |
 | `conflict`        | 409, e.g. a wallet already subscribed                                   |
-| `rate_limited`    | 429, after the retries                                                  |
+| `rate_limited`    | 429, after the retries, or a quota on create (`pending_cap_reached`)    |
 | `unavailable`     | 5xx, a timeout or a network error, after the retries                    |
 | `invalid_webhook` | a webhook that fails verification: signature, headers or timestamp      |
 | `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
@@ -408,6 +445,10 @@ It also carries `apiCode`, Mesub's own finer code (`already_subscribed`,
 `close_too_early`, ...), `retryable`, `retryAfter` in milliseconds, and the
 parsed `body`. New codes are added: keep a default branch. Every code:
 [Errors](https://docs.mesub.io/reference/errors).
+
+`pending_cap_reached` is a quota, not a rate: too many subscriptions wait for
+a signature. `create` is never retried for it, and `retryAfter` says when the
+oldest stops counting, up to an hour. Do not hold a request that long.
 
 Reads time out after 5 s and are retried twice. `create`, `transaction` and
 the six manage calls are sent once and never retried.
@@ -473,6 +514,8 @@ Behind a proxy, `baseUrl` may carry a path: every call goes under it
 for, such as a Cloudflare Access service token:
 
 ```ts
+import { Mesub } from '@mesub/node';
+
 new Mesub({
     baseUrl: 'https://proxy.example.com/mesub',
     headers: {
@@ -490,7 +533,7 @@ methods, so Redis is a few lines, and keeps the outage fallback across
 restarts and servers:
 
 ```ts
-import type { AccessAnswer, AccessList, CacheStore } from '@mesub/node';
+import { type AccessAnswer, type AccessList, type CacheStore, Mesub } from '@mesub/node';
 
 const redisStore: CacheStore<AccessAnswer | AccessList> = {
     get: async (key) => JSON.parse((await redis.get(key)) ?? 'null') ?? undefined,
@@ -526,7 +569,10 @@ Every call sends `Mesub-Version: 2026-10-02`, the version of the API this
 release was written against, exported as `API_VERSION`. It is pinned per
 release and cannot be set, so Mesub can change an answer for newer releases
 without breaking one already installed: upgrading the package is what moves
-you to a newer version. Mesub does not read it yet.
+you to a newer version. Mesub reads it. A version Mesub no longer serves is
+refused with a 400 (`invalid_request`, `apiCode` `unsupported_version`), and
+every call throws, guards included. Mesub keeps a version while releases that
+send it are in use.
 
 ## Requirements
 

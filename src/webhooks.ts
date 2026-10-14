@@ -61,7 +61,12 @@ export interface CreatedDetail {
     previous_id?: string;
 }
 
-/** `subscription.renewed`: a period paid. Amounts in the mint's base units, as strings. */
+/**
+ * `subscription.renewed`: a period paid. Amounts in the mint's base units, as
+ * strings. It can come late: a transfer whose send failed may land later, and
+ * Mesub sends `renewed` then. By that time the subscription may no longer be
+ * `active`. Ask `hasAccess` before granting access.
+ */
 export interface RenewedDetail {
     amount: string;
     mint: string;
@@ -137,6 +142,12 @@ export type SubscriptionPaymentFailedEvent = WebhookEventOf<
 export type SubscriptionStoppedEvent = WebhookEventOf<'subscription.stopped', StoppedDetail>;
 export type SubscriptionCancelledEvent = WebhookEventOf<'subscription.cancelled', NoDetail>;
 export type SubscriptionResumedEvent = WebhookEventOf<'subscription.resumed', NoDetail>;
+/**
+ * Sent when the plan ends, is removed or replaced, and when a subscription is
+ * closed. No event comes when a cancellation reaches its end: it reads
+ * `ended`, `end_reason` `cancelled`, and `subscription.cancelled` came
+ * before. Its `access_until` says when access stops.
+ */
 export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', NoDetail>;
 /** A checkout nobody signed in time. */
 export type SubscriptionExpiredEvent = WebhookEventOf<'subscription.expired', NoDetail>;
@@ -186,9 +197,16 @@ export interface VerifyWebhookOptions {
  *
  * Throws a MesubError `invalid_webhook` when it is not Mesub's, or not now:
  * a header missing, no signature matching, a timestamp outside `tolerance`.
- * Answer it with a 400. Throws `unexpected` for a body Mesub signed that
- * this release cannot read. A TypeError is an integration error: a body
- * already parsed, no secret, one that is not `whsec_...`.
+ * Answer it with a 400.
+ *
+ * Throws `unexpected` for a body Mesub signed that this release cannot read.
+ * Never answer it with a 400. Log it, update `@mesub/node`, and answer a
+ * 5xx: Mesub retries the same body for 3 days, so the event gets through
+ * once the update is out. Past 3 days of failures, Mesub disables the
+ * endpoint.
+ *
+ * A TypeError is an integration error: a body already parsed, no secret,
+ * one that is not `whsec_...`.
  */
 export async function verifyWebhook(
     body: WebhookBody,
