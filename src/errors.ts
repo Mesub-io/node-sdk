@@ -64,10 +64,13 @@ export class MesubError extends Error {
     readonly body: unknown;
     /**
      * How long Mesub asked to wait before the same call is sent again, in
-     * milliseconds, from the response's `Retry-After`, as sent: a 429
-     * (`rate_limited`, or `pending_cap_reached` on create, which may be most
-     * of an hour) or a 503 (`network_unavailable`, about 10 s). Null when
-     * the response had none, or none came back.
+     * milliseconds, from the response's `Retry-After`, as sent. It comes on
+     * a 429 (`rate_limited`, or `pending_cap_reached` on create: a quota,
+     * not a rate, and the wait may be most of an hour), on a 503
+     * (`network_unavailable`, about 10 s), and on two 409s:
+     * `retry_too_soon` on `retry`, and `comeback_period_rolling` on
+     * `create`, `transaction` and `submit`. Null when the response had none,
+     * or none came back.
      */
     readonly retryAfter: number | null;
 

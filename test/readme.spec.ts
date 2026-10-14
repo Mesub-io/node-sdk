@@ -1,18 +1,20 @@
 import type { Request } from 'express';
 
-import { requirePlan } from '../src/express.js';
+import { mesubRoutes, requirePlan } from '../src/express.js';
 import { type MesubRequest, RequirePlan } from '../src/nest.js';
 import { withMesub } from '../src/next.js';
 import { FakeMesub } from '../src/testing.js';
 
 /**
  * The README's "your own login" snippets, compiled: they read `req.user`,
- * which neither Express's request nor ours declares. If one stops
- * typechecking, `pnpm typecheck` fails here before a merchant copies it.
+ * which neither Express's request nor ours declares. The README declares it
+ * once on `Express.Request`; here a cast stands for that, so the declaration
+ * does not leak into the other tests. If one stops typechecking,
+ * `pnpm typecheck` fails here before a merchant copies it.
  */
 
-/** What a merchant's own login leaves on an Express request. */
-type WithUser = Request & { user?: { id: string } };
+/** What a merchant's own login leaves on an Express request, as the README declares it. */
+type WithUser = Request & { user?: { id: string; email?: string } };
 
 /** The request as a merchant's own Nest guard leaves it. */
 interface AuthedRequest extends MesubRequest {
@@ -33,6 +35,20 @@ describe('the README snippets for your own login', () => {
         });
 
         expect(guard).toBeTypeOf('function');
+    });
+
+    it('builds the widget routes from req.user, its email included', () => {
+        const routes = mesubRoutes({
+            client,
+            customer: (req) => {
+                const { user } = req as WithUser;
+
+                return user ? { external_id: user.id } : null;
+            },
+            email: (req) => (req as WithUser).user?.email,
+        });
+
+        expect(routes).toBeTypeOf('function');
     });
 
     it('builds the Nest guard from a request typed by the merchant, with no cast', () => {
