@@ -188,7 +188,11 @@ export interface SubscriptionAttempt {
     attempted_at: string;
     /** One of `PullOutcome` today; a newer one is handed on as is. */
     outcome: PullOutcome;
-    /** Mesub's short reason, null on a paid one. */
+    /**
+     * Mesub's short reason, null on a paid one, as on `ServedAttempt`: snake
+     * case, an open string with the `program_${number}` and
+     * `solana_${number}` families.
+     */
     reason: string | null;
     /**
      * In the mint's smallest unit, as a string. What was asked for; on a

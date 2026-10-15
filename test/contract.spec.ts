@@ -145,6 +145,8 @@ const END_REASONS = [
     'plan_removed',
     'plan_replaced',
     'plan_ended',
+    'closed_elsewhere',
+    // `closed_elsewhere` before Mesub-io/backend#476, from a Mesub that predates it.
     'authority_closed',
     'closed',
 ];

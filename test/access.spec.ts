@@ -541,7 +541,7 @@ describe('access', () => {
                     attempts: [
                         {
                             outcome,
-                            reason: outcome === 'paid' ? null : 'fee-payer-empty',
+                            reason: outcome === 'paid' ? null : 'solana_7050005',
                             amount: '1000000',
                             attempted_at: START.toISOString(),
                             signature: null,

@@ -294,7 +294,7 @@ const CASES = {
         actions: ['subscriber:subscribe'],
     },
     ended_authority_closed: {
-        input: subscription({ status: 'ended', end_reason: 'authority_closed', ...OVER }),
+        input: subscription({ status: 'ended', end_reason: 'closed_elsewhere', ...OVER }),
         subscriber:
             "This subscription's account was closed outside Mesub, so it has ended and nothing more can be taken. You can subscribe to Pro again.",
         merchant:
@@ -376,6 +376,16 @@ describe('explain', () => {
         expect(explained.actions.map((a) => `${a.by}:${a.action}`)).toEqual(c.actions);
         expect(explained.missing).toEqual([]);
         expect(explained.subscriber + explained.merchant).not.toMatch(/[{}[\]]/);
+    });
+
+    it('reads authority_closed, its name before Mesub-io/backend#476, as closed_elsewhere', () => {
+        const before = subscription({ status: 'ended', end_reason: 'authority_closed', ...OVER });
+        const now = subscription({ status: 'ended', end_reason: 'closed_elsewhere', ...OVER });
+
+        expect(situationOf(before)).toBe('ended_authority_closed');
+        expect(explain(before, { names: NAMES, now: NOW })).toEqual(
+            explain(now, { names: NAMES, now: NOW }),
+        );
     });
 
     describe('a blocked subscription', () => {

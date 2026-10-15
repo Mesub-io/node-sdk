@@ -65,6 +65,16 @@ The first version published to npm. Requires Node 22 or later.
   for a customer and plan (or a customer's list), `access`, `hasAccess`,
   `decide` and `accessList` wait for its answer, or its error, instead of
   each sending their own. Guards share only with guards (#71).
+- `end_reason` can be `closed_elsewhere`: the subscription's account was
+  closed outside Mesub (Mesub-io/backend#476). Mesub served
+  `authority_closed` for it before; `EndReason` has both, read the same way,
+  and the old one goes once no Mesub serves it. `authority_closed` stays a
+  `late_reason`, a different fact. An attempt's `reason` is snake case
+  (`insufficient_balance`, Mesub-io/backend#475) and stays an open string:
+  its JSDoc names the `program_${number}` and `solana_${number}` families.
+  Two `apiCode`s are renamed: `plan_deleted` is `plan_removed`, and
+  `plan_rebuilt` is `plan_replaced`; branch on both until every Mesub serves
+  the new ones (#144).
 
 ### Options
 
@@ -232,6 +242,9 @@ The first version published to npm. Requires Node 22 or later.
   `blocked_receiver_account_frozen`: the subscriber reads that nothing is
   theirs to do, the merchant to choose another receiving wallet or ask the
   token's issuer to unfreeze that account (#133).
+- `explain()` reads `end_reason` `closed_elsewhere` as
+  `ended_authority_closed`, the situation `authority_closed` has: the key
+  keeps the old word, so code that branches on it does not change (#144).
 
 ### Routes for the React widget
 
@@ -308,6 +321,8 @@ answer this request.`: never the SDK's own message, which may name your
   (#77).
 - `@mesub/node/testing`: `fake.webhook(type)` makes a signed delivery the
   fake's client verifies; `signWebhook` signs a body of your own (#77).
+- The fake's `subscription.payment_failed` and `subscription.stopped` carry
+  `insufficient_balance`, snake case as Mesub sends it (#144).
 - A verified event drops every access answer cached for its customer, the
   yes too: after `subscription.stopped` or `subscription.ended`, `hasAccess`
   says no at once instead of the cached yes for up to five minutes (#84).

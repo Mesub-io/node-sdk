@@ -290,6 +290,9 @@ describe('subscriptions.transaction', () => {
         [404, 'subscription_not_found', 'not_found'],
         [409, 'not_awaiting_signature', 'conflict'],
         [409, 'plan_sunset', 'conflict'],
+        [409, 'plan_removed', 'conflict'],
+        [409, 'plan_replaced', 'conflict'],
+        // Their names before Mesub-io/backend#476.
         [409, 'plan_deleted', 'conflict'],
         [409, 'plan_rebuilt', 'conflict'],
         [409, 'plan_ended', 'conflict'],
@@ -1456,6 +1459,7 @@ describe('subscriptions.retrieve', () => {
         'plan_removed',
         'plan_replaced',
         'plan_ended',
+        'closed_elsewhere',
         'authority_closed',
         'closed',
     ] as const)('takes an ended subscription whose end_reason is %s', async (end_reason) => {
@@ -1859,7 +1863,7 @@ describe('subscriptions.attempts', () => {
     it('takes an attempt with no period, no signature and a reason', async () => {
         const blocked = attempt({
             outcome: 'blocked',
-            reason: 'fee-payer-empty',
+            reason: 'solana_7050005',
             signature: null,
             period_start: null,
         });

@@ -78,7 +78,7 @@ export interface RenewedDetail {
 
 /** `subscription.payment_failed`: a pull missed, and what comes next. */
 export interface PaymentFailedDetail {
-    /** Why, e.g. `insufficient-balance`. */
+    /** Why, e.g. `insufficient_balance`: an attempt's reason (`ServedAttempt`). */
     reason: string;
     amount: string;
     mint: string;
@@ -103,7 +103,7 @@ export interface PaymentFailedDetail {
 
 /** `subscription.stopped`: no more pulls. */
 export interface StoppedDetail {
-    /** Why, e.g. `insufficient-balance` or `grace-ended`. */
+    /** Why, e.g. `insufficient_balance` or, on Free, `retry_deadline_passed`. */
     reason: string;
 }
 
