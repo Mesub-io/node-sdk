@@ -221,9 +221,10 @@ lower for a serverless function. When no answer says what became of it, it
 throws a `MesubSubmitError`: read the subscription back with `retrieve` before
 creating a new one, since the wallet may have paid.
 
-A transaction lives about half a minute, the terms five. Have the terms
-signed first, then ask for the transaction when the wallet is ready, and
-after a submit refused with `transaction_expired`:
+A transaction lives about half a minute, the terms five:
+`transaction_expires_at` says when it should run out, an estimate that errs
+early. Have the terms signed first, then ask for the transaction when the
+wallet is ready, and after a submit refused with `transaction_expired`:
 
 ```ts
 const fresh = await mesub.subscriptions.transaction(subscription.id);
@@ -234,6 +235,11 @@ const fresh = await mesub.subscriptions.transaction(subscription.id);
 It answers what `create` answers for the same subscription, reserves nothing,
 and is refused with `not_awaiting_signature` once the subscription is signed
 or expired. Always sign the transaction of the last call.
+
+A `submit` or a confirm that settled nothing answers the subscription with a
+`reason`, a sentence for a person, and a `reason_code` for your code
+(`transaction_expired`, `nothing_landed`, ...): branch on `reason_code`, and
+keep a default branch, since Mesub adds codes.
 
 The signing code, what `create` answers, the refusals:
 [Subscribe from your server](https://docs.mesub.io/docs/subscribe).
@@ -249,6 +255,14 @@ your server confirms with the signature.
 | stop the renewals of a running one            | `cancel(id)` | `confirmCancel(id, { signature })` |
 | take a cancellation back before its end       | `resume(id)` | `confirmResume(id, { signature })` |
 | close one that is over, and get its rent back | `close(id)`  | `confirmClose(id, { signature })`  |
+
+Whether `close` can work now is on every subscription and access answer:
+`closable`, and `closable_from`, the date it can when not yet (null when no
+date is known: a running one is cancelled first). A subscription stopped
+because the wallet closed its approval for good (`stop_reason`
+`authority_closed`) can be closed at once, and cannot come back. An access
+answer names its subscription in `subscription_id`, so you can act on it
+without listing first.
 
 A late payment is paid now in one call, with nothing to sign: `retry(id)`,
 shown to your customer as "Pay now". Mesub answers the subscription, still
@@ -298,6 +312,11 @@ newer than this release gives `key: 'unknown'` and the access line, never an
 error. A blocked subscription has its own keys, `blocked_mesub` and one per
 cause of your setup (`blocked_puller_not_allowed`, ...): the subscriber reads
 that nothing is theirs to do, you read what to fix.
+
+`close` is offered only while Mesub says the subscription is `closable`, and
+the sentence names `closable_from` when it can be closed later. A
+subscription stopped for good (`stop_reason` `authority_closed`) reads
+`stopped_authority_closed`: no comeback, only the close.
 `@mesub/node/situations` imports nothing of Node, so your pages can use
 it too; `SITUATIONS` is the whole table.
 
@@ -391,8 +410,8 @@ app.post('/webhooks/mesub', express.raw({ type: 'application/json' }), async (re
     }
 
     if (event.test) return res.status(200).end(); // sent from the dashboard
-    if (await alreadyHandled(event.id)) return res.status(200).end();
-    // event.type, event.data (the subscription), event.data.detail
+    if (await alreadyHandled(event.delivery_id)) return res.status(200).end();
+    // event.type, event.data (the subscription), event.detail
     res.status(200).end();
 });
 ```
@@ -406,11 +425,17 @@ retries the same body for 3 days, so the event still gets through once you
 update `@mesub/node`; a 2xx would lose it. After 3 days of failures, Mesub
 disables the endpoint.
 
-`event.id` is the delivery id, from the `webhook-id` header. It stays the same
-on every retry and resend: drop one you already handled. It is not an event
-id: each endpoint gets its own delivery, so two endpoints see the same event
-under two ids. A delivery can also arrive out of order: ask `hasAccess` before
-granting or revoking.
+`event.delivery_id` is the `webhook-id` header: one per event and per
+endpoint, the same on every retry and resend. Drop a delivery you already
+handled by it. `event.id` is the event's own, the same for every endpoint:
+deduplicate on it across endpoints, and read the event again with
+`events.retrieve(event.id)`. A delivery can also arrive out of order: compare
+`created_at`, or ask `hasAccess` before granting or revoking.
+
+`event.data` is the subscription as it stood right after the change, however
+late the delivery; `event.detail` says what the event is about. A body Mesub
+wrote before this shape, and retries as it was sent, is handed back in the
+same shape: its detail at the top, and `id`, `network` and `api_version` null.
 
 A body sent from the dashboard carries `test: true`, on a made-up subscription
 (`sub_test`, `user_123`), whatever its `type`. Change nothing for it: `verify`
@@ -426,13 +451,34 @@ three days before the charge at most. Its detail says whether the wallet, as
 Mesub just read it, can pay: a reading, not a promise.
 
 ```ts
-if (event.type === 'subscription.renewal_upcoming' && !event.data.detail.can_pay) {
+if (event.type === 'subscription.renewal_upcoming' && !event.detail.can_pay) {
     // renewal_issue: 'balance' (add funds) or 'authority' (the approval is gone)
-    await remind(event.data.external_id, event.data.detail.renewal_issue);
+    await remind(event.data.external_id, event.detail.renewal_issue);
 }
 ```
 
 It changes no access, so `verify` leaves the access cache as it is for it.
+
+### Catch up on missed events
+
+Mesub keeps the last 30 days of events, each the very body its webhooks
+carried. Read them after an endpoint was down or turned off:
+
+```ts
+const { data, has_more, available_since } = await mesub.events.list({
+    type: 'subscription.payment_failed', // optional
+    subscription: id, // optional
+    limit: 100, // 1 to 100, 25 by default
+});
+for (const event of data) await handle(event); // the same shape as a webhook's
+
+const one = await mesub.events.retrieve(eventId); // the id a webhook body carried
+```
+
+Newest first; page with `starting_after` set to the last id. Events before
+`available_since` are not served. An event can appear a moment after its
+`created_at`, so when polling, page on until `created_at` is a minute older
+than the newest you held, and skip the ids you have seen.
 
 ## Errors
 
@@ -453,8 +499,9 @@ and a stable `code` to branch on:
 | `unexpected`      | any other status, or an answer that is not Mesub's: is `baseUrl` right? |
 
 It also carries `apiCode`, Mesub's own finer code (`already_subscribed`,
-`close_too_early`, ...), `retryable`, `retryAfter` in milliseconds, and the
-parsed `body`. New codes are added: keep a default branch. Every code:
+`close_too_early`, ...), `retryable`, `retryAfter` in milliseconds, the
+parsed `body`, and `requestId`, the id Mesub gave the request
+(`Mesub-Request-Id`): log it, and quote it to Mesub support. New codes are added: keep a default branch. Every code:
 [Errors](https://docs.mesub.io/reference/errors).
 
 `pending_cap_reached` is a quota, not a rate: too many subscriptions wait for
@@ -491,6 +538,7 @@ new FakeMesub({ plans: ['pro', { slug: 'bonk', mint, token: { name: 'Bonk' } }] 
 
 fake.fail('outage'); // every call answers 503, until fail(null)
 const { body, headers } = await fake.webhook('subscription.renewed'); // signed
+fake.addEvent('subscription.payment_failed', { subscription: { id } }); // on /v1/events
 fake.reset(); // between tests
 ```
 
@@ -638,6 +686,11 @@ env $(cat /tmp/mesub-contract.env) pnpm test:contract
 
 Without `MESUB_CONTRACT_URL` it is skipped, which is why `pnpm test` never
 needs a back.
+
+`pnpm test` also holds what the fake serves to the back's own contract,
+`openapi/v1.json`, copied to `test/fixtures/openapi-v1.json` from the commit
+named in `test/openapi.spec.ts`. When the back's contract moves, copy it
+again and move the commit.
 
 The Contract workflow runs it on every push, every morning and by hand (with a
 back branch to try): it checks out Mesub-io/backend, starts Postgres and Redis,

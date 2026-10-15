@@ -75,6 +75,16 @@ The first version published to npm. Requires Node 22 or later.
   Two `apiCode`s are renamed: `plan_deleted` is `plan_removed`, and
   `plan_rebuilt` is `plan_replaced`; branch on both until every Mesub serves
   the new ones (#144).
+- The answer carries `subscription_id`, the subscription it is about, to
+  `cancel`, `close` or `retry` without listing first (null with `status`
+  `none`, Mesub-io/backend#469); `stop_reason`, why a `stopped` one stopped:
+  `out_of_retries`, `retry_deadline_passed` or `authority_closed`, typed as
+  `StopReason` (Mesub-io/backend#402); `late_reason` on a `stopped` one too,
+  for the payment it stopped on; and `closable` and `closable_from`, whether
+  the subscriber can close it now to get its deposit back, and from when if
+  not yet. A subscription carries `stop_reason`, `closable` and
+  `closable_from` too. All are read as null, and `closable` as false, from a
+  Mesub that predates them (#146).
 
 ### Options
 
@@ -203,6 +213,17 @@ The first version published to npm. Requires Node 22 or later.
   and `_`, 64 at most, before any method builds a path with it: anything else
   throws `invalid_request` and sends nothing. `retrieve('.')` asked the list
   and `cancel('..')` reached `POST /v1/cancel` (#136).
+- What `create`, `transaction`, `cancel`, `resume` and `close` answer carries
+  `transaction_expires_at`, when `last_valid_block_height` is expected to
+  pass, about half a minute ahead (Mesub-io/backend#471): an estimate that
+  errs early, for a countdown or to ask for a fresh transaction in time. Null
+  from a Mesub that predates it (#146).
+- A `submit` or a confirm that settled nothing carries `reason_code` beside
+  `reason` (Mesub-io/backend#470): `transaction_expired`, `nothing_landed`,
+  `cancellation_not_landed`, ... Branch on it, never on `reason`, which Mesub
+  may reword. An open family, typed as `ConfirmReasonCode`: a code newer than
+  this release is handed on, and a Mesub that predates it sends `reason`
+  alone (#146).
 
 ### Situations
 
@@ -245,6 +266,21 @@ The first version published to npm. Requires Node 22 or later.
 - `explain()` reads `end_reason` `closed_elsewhere` as
   `ended_authority_closed`, the situation `authority_closed` has: the key
   keeps the old word, so code that branches on it does not change (#144).
+- A stopped subscription whose `stop_reason` is `authority_closed` reads
+  `stopped_authority_closed`, a new key: nobody can charge it again and it
+  cannot be restarted, so the only action is `close`. It read `stopped` and
+  offered to subscribe again, which Mesub refuses over it
+  (`subscription_stopped`). `stopped` fills `{stop_cause}` from `stop_reason`
+  (`out_of_retries`, `retry_deadline_passed`); a stop reason newer than this
+  release reads `unknown` (#146).
+- `closable` decides `close`: it is offered only where Mesub says the
+  subscription can be closed now, and `{closable_from}` dates it in the
+  sentence when it cannot yet. `ended_plan_removed`, `ended_plan_replaced`
+  and `ended_plan_ended` offer `close` (Mesub closes them since
+  Mesub-io/backend#344), with a new confirmation, `confirm_close_over`, that
+  does not promise a new subscription; `stopped` offers it once `closable`.
+  `ended_plan_removed` no longer tells the merchant that Mesub cannot close
+  it (#146).
 
 ### Routes for the React widget
 
@@ -340,6 +376,22 @@ answer this request.`: never the SDK's own message, which may name your
   `id` is documented as the delivery id, one per endpoint. No event comes
   when a cancellation reaches its end, and `subscription.renewed` can come
   late (#135).
+- **Breaking.** `event.id` is the event's own id (Mesub-io/backend#482), the
+  same for every endpoint and every retry, the one `events.retrieve` takes.
+  The `webhook-id` header, which `event.id` was until now, is
+  `event.delivery_id`: deduplicate a delivery on it, or an event across
+  endpoints on `id`. `event.detail` moved to the top of the event, out of
+  `event.data`, which is the subscription alone; the event also carries
+  `object`, `network` and `api_version`. A body written before the event
+  shape, and kept as it was sent, is handed back in the same shape: its
+  detail at the top, and `id`, `network` and `api_version` null (#146).
+- `mesub.events.list({ type, subscription, limit, starting_after })` and
+  `mesub.events.retrieve(id)` read your project's events of the last 30
+  days over `GET /v1/events` (Mesub-io/backend#482), each the very body its
+  webhooks carried, to catch up on what an endpoint missed. A page carries
+  `available_since`: events before it are not served. Typed as `MesubEvent`
+  and `EventList`; a Mesub that predates the route throws a `not_found`
+  whose `apiCode` is null (#146).
 
 ### Testing your integration
 
@@ -384,11 +436,26 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 - `FakeMesub` lists as Mesub does: no `superseded` subscription, and a 400
   for a `starting_after` it does not hold. An error's `retryable` follows its
   code, true for `subscription_changed` (#134).
+- `FakeMesub` serves what Mesub-io/backend serves since #402, #469 to #472
+  and #482: `subscription_id` on an answer about a subscription it holds,
+  `stop_reason`, `closable` and `closable_from` worked out from what its
+  close takes (a test may set them on an answer), `transaction_expires_at`,
+  a `Mesub-Request-Id` on every answer and `request_id` in every error body.
+  A stopped subscription whose authority closed closes at once, and refuses
+  a comeback (`subscription_stopped`). It serves `/v1/events`: what its
+  submits and confirms raise, and what `addEvent(type, fields)` records,
+  within 30 days and from `eventsSince`. **Breaking:** `fake.webhook()`
+  signs the event shape, with an `evt_fake_...` id; its `id` field is the
+  event's, and `delivery_id` the `webhook-id` (#146).
 
 ### Errors
 
 - Every failure is a `MesubError` with a stable `code`, the back's own
   `apiCode`, `retryable`, `status`, `body` and `retryAfter` (#60).
+- A `MesubError` carries `requestId`, the id Mesub gave the request, from
+  its `Mesub-Request-Id` header, or the error body's `request_id` when a
+  proxy dropped the header (Mesub-io/backend#472): log it, and quote it to
+  Mesub support. Null when no response came back (#146).
 - Every answer is checked against the shape the SDK types before it is used
   or cached; anything else throws `unexpected` (#59).
 - `subscriptions.create` checks `costs` field by field, `rent`, `fee` and
@@ -415,3 +482,6 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   `/v1/plans` (#66).
 - Coverage is measured in CI, with a 90% floor (#68).
 - Tested on Node 22 and 24, Express 4 and 5.
+- What `FakeMesub` serves is checked, strictly, against the back's
+  `openapi/v1.json`, copied to `test/fixtures` with the commit it came from:
+  a field too many or one missing fails without a back running (#146).
