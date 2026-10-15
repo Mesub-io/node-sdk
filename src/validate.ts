@@ -1,4 +1,5 @@
 import type { AccessAnswer, AccessList, ServedAttempt } from './answer.js';
+import type { EventList } from './events.js';
 import { MesubError } from './errors.js';
 import type { Plan, PlanToken } from './plans.js';
 import type {
@@ -14,6 +15,7 @@ import type {
 } from './subscriptions.js';
 import type {
     CreatedDetail,
+    MesubEvent,
     PaymentFailedDetail,
     RenewalUpcomingDetail,
     RenewedDetail,
@@ -465,19 +467,33 @@ function reasonProblem({ reason, reason_code }: ConfirmResult): string | null {
 }
 
 /**
- * A webhook's body (Mesub-io/backend#144): its type, its date, the
- * subscription as `retrieve` answers it, and the event's detail, checked
- * field by field for the types this release knows. A type it does not know
- * is only checked to be a string, like a status: one the back adds later
- * must not turn every delivery into an error.
+ * An event (Mesub-io/backend#482), as `GET /v1/events` serves it and a
+ * webhook carries it: its id, type and date, the network, the version it is
+ * written in, the subscription as `retrieve` answers it, and the event's
+ * detail, checked field by field for the types this release knows. A type,
+ * a network or a version it does not know is only checked to be a string,
+ * like a status: one the back adds later must not turn every delivery into
+ * an error.
  */
-const WEBHOOK = {
+const EVENT = {
+    id: STRING,
+    object: { check: (value) => value === 'event', expected: '"event"' },
     type: STRING,
     created_at: DATE,
+    network: STRING,
+    api_version: STRING,
     data: OBJECT,
-    // Only on a body sent by hand from the dashboard, and then true.
-    test: { check: (value) => value === true, expected: 'true', optional: true },
-} satisfies Record<Exclude<keyof WebhookEvent, 'id'>, Field>;
+    detail: OBJECT,
+} satisfies Record<keyof MesubEvent, Field>;
+
+/** Only on a body sent by hand from the dashboard, and then true. */
+const TEST: Field = { check: (value) => value === true, expected: 'true', optional: true };
+
+/**
+ * A webhook body written before the event shape (Mesub-io/backend#144), and
+ * kept as it was sent: no id, and the detail inside `data`.
+ */
+const OLDER_WEBHOOK = { type: STRING, created_at: DATE, data: OBJECT, test: TEST };
 
 const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.created': {
@@ -513,19 +529,58 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     } satisfies Record<keyof StoppedDetail, Field>,
 };
 
-/**
- * A webhook whose signature verified, and `id`, its `webhook-id` header.
- * Throws a MesubError `unexpected` on a body of another shape: Mesub signed
- * it, so it is a back this release no longer agrees with.
- */
-export function webhookEventFrom(body: unknown, id: string): WebhookEvent {
-    const { type, data } = (isObject(body) ? body : {}) as { type: string; data: unknown };
-    const { detail } = (isObject(data) ? data : {}) as { detail?: unknown };
+/** An event's own fields, its subscription's, then its detail's for a type this release knows. */
+function eventProblem(body: unknown, label?: string): string | null {
+    const prefix = label === undefined ? '' : `${label}.`;
+    const { type, data, detail } = body as { type: string; data: unknown; detail: unknown };
     const fields = DETAILS[type];
+
+    return (
+        problemWith(body, EVENT, label) ??
+        problemWith(data, SUBSCRIPTION, `${prefix}data`) ??
+        (fields ? problemWith(detail, fields, `${prefix}detail`) : null)
+    );
+}
+
+/** One event, from `events.retrieve`. */
+export function eventFrom(body: unknown): MesubEvent {
+    const problem = eventProblem(body);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/events/:id');
+
+    return body as MesubEvent;
+}
+
+/** One page of `events.list`: each event checked like `retrieve`'s, and `available_since`. */
+export function eventListFrom(body: unknown): EventList {
     const problem =
-        problemWith(body, WEBHOOK) ??
-        problemWith(data, { ...SUBSCRIPTION, detail: OBJECT }, 'data') ??
-        (fields ? problemWith(detail, fields, 'data.detail') : null);
+        problemWith(body, EVENT_LIST) ??
+        firstProblem((body as EventList).data, 'data', eventProblem);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/events');
+
+    return body as EventList;
+}
+
+const EVENT_LIST = {
+    data: LIST_OF,
+    has_more: BOOLEAN,
+    available_since: DATE,
+} satisfies Record<keyof EventList, Field>;
+
+/**
+ * A webhook whose signature verified, and `delivery_id`, its `webhook-id`
+ * header. The event shape (Mesub-io/backend#482) is handed back as it came;
+ * a body written before it (no `id`, no `object`, the detail inside `data`)
+ * in the same shape, with its detail at the top and what it never carried
+ * null. Throws a MesubError `unexpected` on a body of another shape: Mesub
+ * signed it, so it is a back this release no longer agrees with.
+ */
+export function webhookEventFrom(body: unknown, deliveryId: string): WebhookEvent {
+    const older = isObject(body) && !('id' in (body as object)) && !('object' in (body as object));
+    const problem = older
+        ? olderWebhookProblem(body)
+        : (eventProblem(body) ?? problemWith(body, { test: TEST }));
 
     if (problem !== null) {
         throw new MesubError(`Mesub sent a webhook this SDK cannot read: ${problem}.`, {
@@ -535,7 +590,40 @@ export function webhookEventFrom(body: unknown, id: string): WebhookEvent {
         });
     }
 
-    return { ...(body as Omit<WebhookEvent, 'id'>), id } as WebhookEvent;
+    if (!older) return { ...(body as MesubEvent), delivery_id: deliveryId } as WebhookEvent;
+
+    const { type, created_at, data, test } = body as {
+        type: string;
+        created_at: string;
+        data: ServerSubscription & { detail: Record<string, unknown> };
+        test?: true;
+    };
+    const { detail, ...subscription } = data;
+
+    return {
+        id: null,
+        delivery_id: deliveryId,
+        object: 'event',
+        type,
+        created_at,
+        network: null,
+        api_version: null,
+        data: subscription,
+        detail,
+        ...(test !== undefined && { test }),
+    } as WebhookEvent;
+}
+
+/** A body of the shape webhooks had before the event's: the detail inside `data`. */
+function olderWebhookProblem(body: unknown): string | null {
+    const { type, data } = body as { type: string; data: unknown };
+    const fields = DETAILS[type];
+
+    return (
+        problemWith(body, OLDER_WEBHOOK) ??
+        problemWith(data, { ...SUBSCRIPTION, detail: OBJECT }, 'data') ??
+        (fields ? problemWith((data as { detail: unknown }).detail, fields, 'data.detail') : null)
+    );
 }
 
 /** The first item of a list that is not of those fields, or null when all are. */

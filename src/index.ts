@@ -45,9 +45,13 @@ export type {
 } from './subscriptions.js';
 export type { RequestOptions } from './transport.js';
 export { verifyWebhook } from './webhooks.js';
+export type { EventList, EventListParams } from './events.js';
 export type {
     CreatedDetail,
+    EventNetwork,
+    EventType,
     HeaderSource,
+    MesubEvent,
     NoDetail,
     PaymentFailedDetail,
     RenewalIssue,

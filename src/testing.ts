@@ -28,6 +28,7 @@ import type {
     SubscriptionAttemptList,
     WalletTransaction,
 } from './subscriptions.js';
+import { API_VERSION } from './version.js';
 import { signedHeaders, type WebhookEventType } from './webhooks.js';
 
 export interface FakeMesubOptions {
@@ -98,7 +99,14 @@ export interface FakeWebhookFields {
     detail?: Record<string, unknown>;
     /** When the event happened. Defaults to now. */
     created_at?: string;
+    /**
+     * The event's id. Defaults to a new `evt_fake_...`, and to `evt_test` for
+     * the `test` event, as Mesub's test deliveries carry.
+     */
     id?: string;
+    /** The delivery's id, the `webhook-id` header. Defaults to a new `msg_fake_...`. */
+    delivery_id?: string;
+    /** `webhook-timestamp`, Unix seconds. Defaults to now. */
     timestamp?: number;
 }
 
@@ -175,6 +183,8 @@ const OUTAGE: FakeFailure = {
 /** 24 bytes, as Mesub's secrets are. Only ever a test's. */
 const FAKE_WEBHOOK_SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
 const FAKE_WALLET = '11111111111111111111111111111111';
+/** The id every test delivery carries, as Mesub's: no event stands behind it. */
+const TEST_EVENT_ID = 'evt_test';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const PERIOD_MS = 30 * 24 * 3600 * 1000;
 /** About 150 blocks of 200 ms: how long Mesub says a transaction it built lives. */
@@ -225,6 +235,7 @@ export class FakeMesub {
     readonly #attemptsRoute: boolean;
     readonly #revalidateAfter: number | undefined;
     #attemptIds = 0;
+    #eventIds = 0;
     #failure: FakeFailure | null = null;
     #ids = 0;
 
@@ -392,25 +403,28 @@ export class FakeMesub {
     }
 
     /**
-     * A webhook of that type, as Mesub posts it to an endpoint: a made-up
-     * subscription and detail, unless `fields` say otherwise, signed with
-     * `webhookSecret`. Post it to your own handler, or hand it to
-     * `webhooks.verify` of a `client()`. Nothing is added to the fake.
+     * A webhook of that type, as Mesub posts it to an endpoint: the event's
+     * body (Mesub-io/backend#482), on a made-up subscription and detail
+     * unless `fields` say otherwise, signed with `webhookSecret`. Post it to
+     * your own handler, or hand it to `webhooks.verify` of a `client()`.
+     * Nothing is added to the fake.
      */
     async webhook(type: WebhookEventType, fields: FakeWebhookFields = {}): Promise<SignedWebhook> {
         const now = new Date();
         const payload = {
+            id: fields.id ?? (type === 'test' ? TEST_EVENT_ID : this.#nextEventId()),
+            object: 'event',
             type,
             created_at: fields.created_at ?? now.toISOString(),
-            data: {
-                ...this.#subscription({ wallet: FAKE_WALLET, plan: 'pro', ...fields.subscription }),
-                detail: fields.detail ?? detailOf(type, now),
-            },
+            network: 'devnet',
+            api_version: API_VERSION,
+            data: this.#subscription({ wallet: FAKE_WALLET, plan: 'pro', ...fields.subscription }),
+            detail: fields.detail ?? detailOf(type, now),
         };
 
         return signWebhook(payload, {
             secret: this.webhookSecret,
-            ...(fields.id !== undefined && { id: fields.id }),
+            ...(fields.delivery_id !== undefined && { id: fields.delivery_id }),
             ...(fields.timestamp !== undefined && { timestamp: fields.timestamp }),
         });
     }
@@ -512,6 +526,11 @@ export class FakeMesub {
     #nextId(): string {
         this.#ids += 1;
         return `sub_fake_${this.#ids}`;
+    }
+
+    #nextEventId(): string {
+        this.#eventIds += 1;
+        return `evt_fake_${this.#eventIds}`;
     }
 
     async #handle(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {

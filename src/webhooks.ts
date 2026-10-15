@@ -6,9 +6,10 @@ import { webhookEventFrom } from './validate.js';
 /**
  * Webhooks, as Mesub-io/backend#144 sends them: Standard Webhooks
  * (https://www.standardwebhooks.com), a POST whose body is signed with the
- * endpoint's secret. The types copy the back's `webhook-payload.ts`,
- * `webhook-events.ts` and `pull-events.ts`, which stay the source of truth.
- * Snake case, as the API serves it.
+ * endpoint's secret. Since Mesub-io/backend#482 the body is the event, as
+ * `GET /v1/events` serves it. The types copy the back's `event-body.ts`,
+ * `webhook-payload.ts`, `webhook-events.ts` and `pull-events.ts`, which stay
+ * the source of truth. Snake case, as the API serves it.
  */
 
 /** A Fetch `Headers` (Next, route handlers) or Node's plain object (Express). */
@@ -26,28 +27,74 @@ const TIMESTAMP = /^[0-9]{1,15}$/;
 /** The v1 events an endpoint subscribes to, and `test`, sent from the dashboard on request. */
 export type WebhookEventType = WebhookEvent['type'];
 
+/** The v1 events `GET /v1/events` serves: every type but `test`. */
+export type EventType = MesubEvent['type'];
+
+/** The Solana network a subscription is on, as `/v1` spells it. */
+export type EventNetwork = 'devnet' | 'mainnet-beta';
+
 /**
- * One event as `verify` hands it back: the body Mesub signed, and `id`, the
- * `webhook-id` header. `data` is the subscription as `GET /v1/subscriptions/:id`
- * answers it when the delivery was first attempted, which may be later than
- * the event: `type`, `created_at` and `data.detail` are the event's own.
+ * One event, as `GET /v1/events` serves it and its webhooks carry it
+ * (Mesub-io/backend#482): written once, the same bytes for every endpoint,
+ * every retry and every read.
  */
-interface WebhookEventOf<Type extends string, Detail> {
+interface EventOf<Type extends string, Detail> {
     /**
-     * The delivery id, from the `webhook-id` header. It stays the same on
-     * every retry and resend of this delivery: drop one you already handled.
-     * It is not an event id. Each endpoint gets its own delivery, so two
-     * endpoints get the same event under two ids.
+     * The event's own id, the same for every endpoint and every delivery:
+     * what `events.retrieve` takes.
      */
     id: string;
+    object: 'event';
     type: Type;
     /** When the event happened (ISO 8601), not when it was sent. */
     created_at: string;
-    data: ServerSubscription & { detail: Detail };
+    /** The Solana network the subscription is on. */
+    network: EventNetwork;
+    /** The `Mesub-Version` `data` and `detail` are written in, kept with the body. */
+    api_version: string;
+    /**
+     * The subscription as it stood right after the change that raised the
+     * event, as `GET /v1/subscriptions/:id` would have answered it then,
+     * however late the delivery. Events raised by one change share it:
+     * `detail` says what each is about.
+     */
+    data: ServerSubscription;
+    /** What the event is about, beyond its type. */
+    detail: Detail;
+}
+
+/**
+ * One event as `verify` hands it back: the body Mesub signed, and
+ * `delivery_id`, its `webhook-id` header.
+ *
+ * A body written before the event shape (before `available_since`, see
+ * `events.list`) keeps the shape it was sent in, `{ type, created_at, data }`
+ * with the detail inside `data`. It is handed back in this shape all the
+ * same: `detail` moved to the top, and `id`, `network` and `api_version`
+ * null, since it carried none. Its `data` is the subscription as it stood at
+ * the delivery's first attempt.
+ */
+interface WebhookEventOf<Type extends string, Detail> extends Omit<
+    EventOf<Type, Detail>,
+    'id' | 'network' | 'api_version'
+> {
+    /** The event's id, as `EventOf`'s; null on a body written in the older shape. */
+    id: string | null;
+    /**
+     * The delivery's id, from the `webhook-id` header: one per event and per
+     * endpoint, the same on every retry and resend. Drop a delivery you
+     * already handled by it; across endpoints, by `id`.
+     */
+    delivery_id: string;
+    /** Null on a body written in the older shape. */
+    network: EventNetwork | null;
+    /** Null on a body written in the older shape. */
+    api_version: string | null;
     /**
      * True on a body sent by hand from the dashboard: the `test` event, or
      * a sample of a real type on a made-up subscription (`sub_test`,
-     * `user_123`). Absent on a real event. Change nothing for it.
+     * `user_123`), with the id `evt_test`. Absent on a real event. Change
+     * nothing for it.
      */
     test?: true;
 }
@@ -101,7 +148,10 @@ export interface PaymentFailedDetail {
     retry_mode: 'scheduled' | 'manual' | null;
 }
 
-/** `subscription.stopped`: no more pulls. */
+/**
+ * `subscription.stopped`: no more pulls. `data.stop_reason` says why it
+ * stopped, the reading a program branches on.
+ */
 export interface StoppedDetail {
     /** Why, e.g. `insufficient_balance` or, on Free, `retry_deadline_passed`. */
     reason: string;
@@ -127,6 +177,28 @@ export interface RenewalUpcomingDetail {
     /** When the charge is due. */
     due_at: string;
 }
+
+/** Each event type and its `detail`. */
+interface EventDetails {
+    'subscription.created': CreatedDetail;
+    'subscription.renewal_upcoming': RenewalUpcomingDetail;
+    'subscription.renewed': RenewedDetail;
+    'subscription.payment_failed': PaymentFailedDetail;
+    'subscription.stopped': StoppedDetail;
+    'subscription.cancelled': NoDetail;
+    'subscription.resumed': NoDetail;
+    'subscription.ended': NoDetail;
+    'subscription.expired': NoDetail;
+}
+
+/**
+ * Every event `GET /v1/events` serves. Narrow it with `switch (event.type)`,
+ * and keep a default branch: a type newer than this release is handed back
+ * too, its subscription checked.
+ */
+export type MesubEvent = {
+    [Type in keyof EventDetails]: EventOf<Type, EventDetails[Type]>;
+}[keyof EventDetails];
 
 export type SubscriptionCreatedEvent = WebhookEventOf<'subscription.created', CreatedDetail>;
 /** Once per period, in its last quarter and three days before the charge at most. */
