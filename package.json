@@ -122,6 +122,7 @@
     }
   },
   "devDependencies": {
+    "@cfworker/json-schema": "^4.1.1",
     "@nestjs/common": "^12.1.1",
     "@nestjs/core": "^12.1.1",
     "@nestjs/platform-express": "^12.1.1",
