@@ -644,6 +644,7 @@ export class Subscriptions {
                 retryable,
                 body: from.body,
                 retryAfter: from.retryAfter,
+                requestId: from.requestId,
                 cause,
                 subscription,
                 sends,
@@ -898,7 +899,13 @@ export class Subscriptions {
             // Said for what it is, not as a wrong baseUrl.
             throw new MesubError(
                 'This Mesub does not serve GET /v1/subscriptions/:id/attempts yet.',
-                { status: 404, code: 'not_found', body: error.body, cause: error },
+                {
+                    status: 404,
+                    code: 'not_found',
+                    body: error.body,
+                    requestId: error.requestId,
+                    cause: error,
+                },
             );
         }
     }

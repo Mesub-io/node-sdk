@@ -540,6 +540,66 @@ describe('Retry-After', () => {
     });
 });
 
+// Mesub-io/backend#472: every answer carries Mesub-Request-Id, every error body request_id.
+describe('the request id', () => {
+    const ID = 'req_7Hq2LxVb9TzK4mWc1RpN6sYd';
+    const OTHER = 'req_000000000000000000000000';
+
+    it("is the error's, from the Mesub-Request-Id header", async () => {
+        const { fetch } = mockFetch(
+            json(
+                409,
+                { statusCode: 409, code: 'already_subscribed', message: 'x', request_id: OTHER },
+                { 'Mesub-Request-Id': ID },
+            ),
+        );
+
+        await expect(transport(fetch).post('/v1/subscriptions', {})).rejects.toMatchObject({
+            requestId: ID,
+        });
+    });
+
+    it("falls back to the body's request_id when a proxy dropped the header", async () => {
+        const { fetch } = mockFetch(
+            json(400, { statusCode: 400, code: 'invalid_request', message: 'x', request_id: ID }),
+        );
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({ requestId: ID });
+    });
+
+    it('is on a 2xx that is not JSON, and on a 404 that is not Mesub', async () => {
+        const headers = { 'Mesub-Request-Id': ID };
+        const { fetch } = mockFetch(
+            new Response('<html>', { status: 200, headers }),
+            new Response('Not Found', { status: 404, headers }),
+        );
+
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            code: 'unexpected',
+            requestId: ID,
+        });
+        await expect(transport(fetch).get('/v1/access')).rejects.toMatchObject({
+            code: 'unexpected',
+            requestId: ID,
+        });
+    });
+
+    it('is null without either, and when no response came back', async () => {
+        const { fetch } = mockFetch(
+            coded(409, 'already_subscribed', 'Already subscribed.'),
+            new TypeError('fetch failed'),
+        );
+
+        await expect(transport(fetch).post('/v1/subscriptions', {})).rejects.toMatchObject({
+            requestId: null,
+        });
+        await expect(transport(fetch).post('/v1/subscriptions', {})).rejects.toMatchObject({
+            status: null,
+            requestId: null,
+        });
+    });
+});
+
 describe('timeouts and network errors', () => {
     it('marks them retryable, with no apiCode and no body', async () => {
         const { fetch } = mockFetch(new TypeError('fetch failed'));

@@ -31,6 +31,8 @@ export interface MesubErrorOptions {
     body?: unknown;
     /** Milliseconds, from the response's `Retry-After`. Defaults to null. */
     retryAfter?: number | null;
+    /** The response's `Mesub-Request-Id`, or the body's `request_id`. Defaults to null. */
+    requestId?: string | null;
     cause?: unknown;
 }
 
@@ -73,6 +75,14 @@ export class MesubError extends Error {
      * or none came back.
      */
     readonly retryAfter: number | null;
+    /**
+     * The id Mesub gave the request (`req_` and 24 letters or digits), from
+     * the response's `Mesub-Request-Id` header, or the error body's
+     * `request_id` when a proxy dropped the header (Mesub-io/backend#472).
+     * Log it, and quote it to Mesub support: it finds the request in Mesub's
+     * logs. Null when no response came back, or one that is not Mesub's.
+     */
+    readonly requestId: string | null;
 
     constructor(message: string, options: MesubErrorOptions) {
         super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -84,6 +94,7 @@ export class MesubError extends Error {
             (options.code === 'unavailable' || options.code === 'rate_limited');
         this.body = options.body;
         this.retryAfter = options.retryAfter ?? null;
+        this.requestId = options.requestId ?? null;
     }
 }
 
@@ -104,7 +115,7 @@ export interface MesubSubmitErrorOptions extends MesubErrorOptions {
  *   after the replays): `code` is `unavailable` and `retryable` true, since
  *   the same submit, sent again with the same transaction and terms
  *   signature, co-signs nothing more and is answered from the chain
- *   (Mesub-io/backend#190). `status`, `apiCode`, `body` and `retryAfter` are
+ *   (Mesub-io/backend#190). `status`, `apiCode`, `body`, `retryAfter` and `requestId` are
  *   those of the last send that got a response (a 503, a 429), or all null
  *   when none did (timeouts, network errors);
  * - a replay refused with `not_awaiting_signature` after a send that got no

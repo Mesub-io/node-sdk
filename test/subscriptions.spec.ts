@@ -602,6 +602,30 @@ describe('subscriptions.submit', () => {
             expect((await result).value).toEqual({ subscription: pending(), reason });
         });
 
+        it('keeps the request id of the last send that got a response', async () => {
+            const { fetch } = mockFetch(
+                coded(503, 'network_unavailable', 'Try again.', true, {
+                    'Mesub-Request-Id': 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
+                }),
+                'hang',
+                'hang',
+                json(200, pending()),
+            );
+            const result = settle(
+                mesub(fetch).subscriptions.submit('sub_1', signed, {
+                    timeout: 10_000,
+                    budget: 60_000,
+                }),
+            );
+            await vi.runAllTimersAsync();
+
+            expect((await result).error).toMatchObject({
+                status: 503,
+                requestId: 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
+                sends: 3,
+            });
+        });
+
         it('replays an error Mesub marks retryable, then reads back', async () => {
             const { fetch, calls } = mockFetch(
                 coded(500, 'internal_error', 'Something broke.', true),
