@@ -58,6 +58,7 @@ function forNext(error: unknown): unknown {
         retryable: error.retryable,
         body: error.body,
         retryAfter: error.retryAfter,
+        requestId: error.requestId,
         cause: error,
     });
 }

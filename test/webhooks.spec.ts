@@ -40,6 +40,7 @@ const SUBSCRIPTION = {
     paused: false,
     end_reason: null,
     late_reason: null,
+    stop_reason: null,
     access: true,
     payment_status: 'paid',
     blocked_since: null,
@@ -56,16 +57,41 @@ const SUBSCRIPTION = {
     next_retry_number: null,
     retries_allowed: null,
     access_until: '2026-01-31T00:00:00.000Z',
+    closable: false,
+    closable_from: null,
     created_at: '2026-01-01T00:00:00.000Z',
     confirmed_at: '2026-01-01T00:00:00.000Z',
 };
 
-/** As the back's `webhookPayload` builds a body, and the processor serializes it. */
+/** The event id the bodies below carry, as the back's `eventBody` writes one. */
+const EVENT_ID = 'evt_cmg1x0evt0001';
+
+/** As the back's `eventBody` renders a body (Mesub-io/backend#482), and the processor sends it. */
 function body(type: string, detail: Record<string, unknown> = {}, data = SUBSCRIPTION): string {
+    return JSON.stringify({
+        id: EVENT_ID,
+        object: 'event',
+        type,
+        created_at: '2026-01-15T12:00:00.000Z',
+        network: 'devnet',
+        api_version: '2026-10-02',
+        data,
+        detail,
+    });
+}
+
+/**
+ * As the back's `legacyPayload` wrote a body before Mesub-io/backend#482,
+ * frozen since: no id, the detail inside `data`, and `data` as it stood
+ * then, without the fields served since.
+ */
+function olderBody(type: string, detail: Record<string, unknown> = {}): string {
+    const { stop_reason: _, closable: __, closable_from: ___, ...then } = SUBSCRIPTION;
+
     return JSON.stringify({
         type,
         created_at: '2026-01-15T12:00:00.000Z',
-        data: { ...data, detail },
+        data: { ...then, detail },
     });
 }
 
@@ -123,19 +149,124 @@ afterEach(() => {
 });
 
 describe('verifyWebhook', () => {
-    it('accepts what the back signs, and hands back the event with its webhook-id', async () => {
+    it('accepts what the back signs, and hands back the event, its webhook-id as delivery_id', async () => {
         const raw = body('subscription.renewed', DETAILS['subscription.renewed']);
         const headers = backendHeaders(SECRET, 'cmdelivery1', NOW, raw);
 
         const event = await verifyWebhook(raw, headers, { secret: SECRET });
 
         expect(event).toEqual({
-            id: 'cmdelivery1',
+            id: EVENT_ID,
+            delivery_id: 'cmdelivery1',
+            object: 'event',
             type: 'subscription.renewed',
             created_at: '2026-01-15T12:00:00.000Z',
-            data: { ...SUBSCRIPTION, detail: DETAILS['subscription.renewed'] },
+            network: 'devnet',
+            api_version: '2026-10-02',
+            data: SUBSCRIPTION,
+            detail: DETAILS['subscription.renewed'],
         });
         expect(event.test).toBeUndefined();
+    });
+
+    // The event's id is the same for every endpoint, the delivery's is not.
+    it('keeps the event id when two endpoints get it under two delivery ids', async () => {
+        const raw = body('subscription.cancelled');
+
+        const first = await verifyWebhook(raw, backendHeaders(SECRET, 'cmdeliveryA', NOW, raw), {
+            secret: SECRET,
+        });
+        const second = await verifyWebhook(
+            raw,
+            backendHeaders(OTHER_SECRET, 'cmdeliveryB', NOW, raw),
+            { secret: OTHER_SECRET },
+        );
+
+        expect([first.id, first.delivery_id]).toEqual([EVENT_ID, 'cmdeliveryA']);
+        expect([second.id, second.delivery_id]).toEqual([EVENT_ID, 'cmdeliveryB']);
+    });
+
+    // Bodies written before Mesub-io/backend#482 keep their shape, retries and resends too.
+    describe('a body frozen in the older shape', () => {
+        it('is handed back in the event shape, its detail at the top, with no event id', async () => {
+            const raw = olderBody('subscription.renewed', DETAILS['subscription.renewed']);
+
+            const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+                secret: SECRET,
+            });
+
+            expect(event).toEqual({
+                id: null,
+                delivery_id: 'cm1',
+                object: 'event',
+                type: 'subscription.renewed',
+                created_at: '2026-01-15T12:00:00.000Z',
+                network: null,
+                api_version: null,
+                // What it lacked read as from an older back: null, and false.
+                data: { ...SUBSCRIPTION, stop_reason: null, closable: false, closable_from: null },
+                detail: DETAILS['subscription.renewed'],
+            });
+        });
+
+        it('keeps test: true, and checks the detail it carries inside data', async () => {
+            const sample = JSON.stringify({ ...JSON.parse(olderBody('test')), test: true });
+            const broken = olderBody('subscription.payment_failed', {
+                ...DETAILS['subscription.payment_failed'],
+                retries_left: null,
+            });
+
+            await expect(
+                verifyWebhook(sample, backendHeaders(SECRET, 'cm1', NOW, sample), {
+                    secret: SECRET,
+                }),
+            ).resolves.toMatchObject({ id: null, type: 'test', test: true, detail: {} });
+            await expect(
+                verifyWebhook(broken, backendHeaders(SECRET, 'cm2', NOW, broken), {
+                    secret: SECRET,
+                }),
+            ).rejects.toMatchObject({
+                code: 'unexpected',
+                message: expect.stringContaining('data.detail.retries_left is not a whole number'),
+            });
+        });
+
+        it('refuses one without its detail', async () => {
+            const raw = JSON.stringify({
+                type: 'subscription.cancelled',
+                created_at: '2026-01-15T12:00:00.000Z',
+                data: SUBSCRIPTION,
+            });
+
+            await expect(
+                verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+            ).rejects.toMatchObject({
+                code: 'unexpected',
+                message: expect.stringContaining('data.detail is missing'),
+            });
+        });
+    });
+
+    it.each([
+        ['an object that is not event', { object: 'subscription' }, 'object is not "event"'],
+        ['no network', { network: undefined }, 'network is missing'],
+        ['no api_version', { api_version: undefined }, 'api_version is missing'],
+        ['no detail', { detail: undefined }, 'detail is missing'],
+        ['an id that is not a string', { id: 7 }, 'id is not a string'],
+        [
+            'the detail still inside data',
+            { data: { ...SUBSCRIPTION, detail: 1 }, detail: undefined },
+            'detail is missing',
+        ],
+    ])('refuses an event body with %s', async (_label, over, problem) => {
+        const raw = JSON.stringify({ ...JSON.parse(body('subscription.cancelled')), ...over });
+
+        await expect(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        ).rejects.toMatchObject({
+            code: 'unexpected',
+            message: `Mesub sent a webhook this SDK cannot read: ${problem}.`,
+        });
     });
 
     // The back's `samplePayload`: a real event type, sent by hand, `test: true` at the root.
@@ -160,7 +291,7 @@ describe('verifyWebhook', () => {
             secret: SECRET,
         });
 
-        expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
+        expect(event.data).toEqual(SUBSCRIPTION);
     });
 
     it('reads a body from a back that predates the blocked fields', async () => {
@@ -171,7 +302,7 @@ describe('verifyWebhook', () => {
             secret: SECRET,
         });
 
-        expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
+        expect(event.data).toEqual(SUBSCRIPTION);
     });
 
     it('reads a body from a back that predates the retry numbers', async () => {
@@ -182,7 +313,7 @@ describe('verifyWebhook', () => {
             secret: SECRET,
         });
 
-        expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
+        expect(event.data).toEqual(SUBSCRIPTION);
     });
 
     it.each(['plan_removed', 'closed_elsewhere', 'authority_closed', 'closed', 'not_known_yet'])(
@@ -267,7 +398,7 @@ describe('verifyWebhook', () => {
         });
 
         expect(event.type).toBe(type);
-        expect(event.data.detail).toEqual(DETAILS[type]);
+        expect(event.detail).toEqual(DETAILS[type]);
         expect(event.data.id).toBe('sub_test');
     });
 
@@ -278,7 +409,7 @@ describe('verifyWebhook', () => {
             secret: SECRET,
         });
 
-        expect(event.data.detail).toEqual({});
+        expect(event.detail).toEqual({});
     });
 
     it('narrows the detail by type', async () => {
@@ -290,7 +421,7 @@ describe('verifyWebhook', () => {
         );
 
         if (event.type !== 'subscription.payment_failed') throw new Error('narrowed wrong');
-        expect(event.data.detail.retries_left).toBe(2);
+        expect(event.detail.retries_left).toBe(2);
     });
 
     // A plan that ends before the next pull (Mesub-io/backend#362): the
@@ -317,7 +448,7 @@ describe('verifyWebhook', () => {
             secret: SECRET,
         });
 
-        expect(event.data.detail).toEqual(detail);
+        expect(event.detail).toEqual(detail);
     });
 
     it('still refuses a payment_failed whose retries_left is missing or null', async () => {
@@ -342,7 +473,7 @@ describe('verifyWebhook', () => {
         );
 
         if (event.type !== 'subscription.renewal_upcoming') throw new Error('narrowed wrong');
-        const { can_pay, renewal_issue, amount, mint, due_at } = event.data.detail;
+        const { can_pay, renewal_issue, amount, mint, due_at } = event.detail;
         expect({ can_pay, renewal_issue, amount, mint, due_at }).toEqual(
             DETAILS['subscription.renewal_upcoming'],
         );
@@ -361,7 +492,7 @@ describe('verifyWebhook', () => {
                 secret: SECRET,
             });
 
-            expect(event.data.detail).toMatchObject({ renewal_issue: issue });
+            expect(event.detail).toMatchObject({ renewal_issue: issue });
         },
     );
 
@@ -398,9 +529,9 @@ describe('verifyWebhook', () => {
 
         await expect(
             verifyWebhook(raw, new Headers(headers), { secret: SECRET }),
-        ).resolves.toMatchObject({ id: 'cm1' });
+        ).resolves.toMatchObject({ delivery_id: 'cm1' });
         await expect(verifyWebhook(raw, shouted, { secret: SECRET })).resolves.toMatchObject({
-            id: 'cm1',
+            delivery_id: 'cm1',
         });
     });
 
@@ -468,7 +599,7 @@ describe('verifyWebhook', () => {
         };
 
         await expect(verifyWebhook(raw, headers, { secret: SECRET })).resolves.toMatchObject({
-            id: 'cm1',
+            delivery_id: 'cm1',
         });
     });
 
@@ -666,7 +797,7 @@ describe('verifyWebhook', () => {
         });
 
         expect(event.type).toBe('subscription.trial_ending');
-        expect(event.data.detail).toEqual({ days: 3 });
+        expect(event.detail).toEqual({ days: 3 });
     });
 });
 
@@ -841,9 +972,15 @@ describe('testing: signing webhooks', () => {
             const { body: raw, headers } = await fake.webhook(type);
             const event = await fake.client().webhooks.verify(raw, headers);
 
-            expect(event).toMatchObject({ id: headers['webhook-id'], type });
+            expect(event).toMatchObject({
+                id: type === 'test' ? 'evt_test' : expect.stringMatching(/^evt_fake_\d+$/),
+                delivery_id: headers['webhook-id'],
+                type,
+                network: 'devnet',
+                api_version: '2026-10-02',
+            });
             expect(headers['webhook-signature']).toBe(
-                backendSignatureOf(fake.webhookSecret, event.id, NOW, raw),
+                backendSignatureOf(fake.webhookSecret, event.delivery_id, NOW, raw),
             );
         },
     );
@@ -855,7 +992,7 @@ describe('testing: signing webhooks', () => {
         const event = await fake.client().webhooks.verify(raw, headers);
 
         expect(event.type).toBe('subscription.renewal_upcoming');
-        expect(event.data.detail).toEqual({
+        expect(event.detail).toEqual({
             can_pay: true,
             renewal_issue: null,
             amount: '9990000',
@@ -864,27 +1001,39 @@ describe('testing: signing webhooks', () => {
         });
     });
 
-    it('FakeMesub.webhook takes the subscription, detail, id and timestamp given', async () => {
+    it('FakeMesub.webhook gives each event an id of its own', async () => {
+        const fake = new FakeMesub();
+        const client = fake.client();
+
+        const first = await fake.webhook('subscription.renewed');
+        const second = await fake.webhook('subscription.renewed');
+
+        const ids = [
+            (await client.webhooks.verify(first.body, first.headers)).id,
+            (await client.webhooks.verify(second.body, second.headers)).id,
+        ];
+        expect(ids[0]).not.toBe(ids[1]);
+    });
+
+    it('FakeMesub.webhook takes the subscription, detail, ids and timestamp given', async () => {
         const fake = new FakeMesub({ webhookSecret: OTHER_SECRET });
 
         const { body: raw, headers } = await fake.webhook('subscription.stopped', {
             subscription: { status: 'stopped', access: false, external_id: 'user_42' },
             detail: { reason: 'retry_deadline_passed' },
             created_at: '2026-02-01T00:00:00.000Z',
-            id: 'msg_given',
+            id: 'evt_given',
+            delivery_id: 'msg_given',
             timestamp: NOW - 10,
         });
         const event = await verifyWebhook(raw, headers, { secret: OTHER_SECRET });
 
         expect(event).toMatchObject({
-            id: 'msg_given',
+            id: 'evt_given',
+            delivery_id: 'msg_given',
             created_at: '2026-02-01T00:00:00.000Z',
-            data: {
-                status: 'stopped',
-                access: false,
-                external_id: 'user_42',
-                detail: { reason: 'retry_deadline_passed' },
-            },
+            data: { status: 'stopped', access: false, external_id: 'user_42' },
+            detail: { reason: 'retry_deadline_passed' },
         });
         expect(headers['webhook-timestamp']).toBe(String(NOW - 10));
     });

@@ -637,6 +637,8 @@ describe('FakeMesub', () => {
 
             expect(fresh).toEqual({
                 ...created,
+                // A fresh transaction, dated from now.
+                transaction_expires_at: expect.any(String),
                 terms: { message: created.terms.message, expires_at: expect.any(String) },
             });
             expect(fresh.subscription).toEqual({ id, status: 'pending' });
@@ -1154,6 +1156,272 @@ describe('FakeMesub', () => {
         });
     });
 
+    describe('closable, and a stopped subscription', () => {
+        const signed = { signature: 'fake_signature' };
+        const AHEAD = new Date(Date.now() + 86_400_000).toISOString();
+        const PAST = '2020-01-01T00:00:00.000Z';
+
+        it('works closable out from what its close would take, on a subscription and an answer', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const running = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+            const ending = fake.addSubscription({
+                wallet: OTHER,
+                plan: 'pro',
+                status: 'cancelled',
+                access_until: AHEAD,
+            });
+            const over = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'team',
+                status: 'ended',
+                end_reason: 'cancelled',
+                access: false,
+            });
+            fake.deny(OTHER, 'team', { status: 'ended', end_reason: 'plan_ended' });
+
+            await expect(mesub.subscriptions.retrieve(running.id)).resolves.toMatchObject({
+                closable: false,
+                closable_from: null,
+            });
+            await expect(mesub.subscriptions.retrieve(ending.id)).resolves.toMatchObject({
+                closable: false,
+                closable_from: AHEAD,
+            });
+            await expect(mesub.subscriptions.retrieve(over.id)).resolves.toMatchObject({
+                closable: true,
+                closable_from: null,
+            });
+            await expect(mesub.access(OTHER, 'team')).resolves.toMatchObject({
+                closable: true,
+                closable_from: null,
+            });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                subscription_id: null,
+                closable: false,
+            });
+        });
+
+        it('keeps the closable a test set on an answer', async () => {
+            const fake = new FakeMesub();
+            fake.deny(WALLET, 'pro', { status: 'ended', end_reason: 'cancelled', closable: false });
+
+            await expect(fake.client().access(WALLET, 'pro')).resolves.toMatchObject({
+                closable: false,
+            });
+        });
+
+        it('closes a stopped one whose authority closed for good, and takes no comeback over it', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const dead = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'stopped',
+                access: false,
+                payment_status: 'none',
+                late_reason: 'authority_closed',
+                stop_reason: 'authority_closed',
+            });
+            fake.deny(WALLET, 'pro', {
+                status: 'stopped',
+                late_reason: 'authority_closed',
+                stop_reason: 'authority_closed',
+            });
+
+            expect(explain(await mesub.access(WALLET, 'pro')).key).toBe('stopped_authority_closed');
+            await expect(mesub.subscriptions.retrieve(dead.id)).resolves.toMatchObject({
+                closable: true,
+            });
+            expect(await codeOf(mesub.subscriptions.create({ plan: 'pro', wallet: WALLET }))).toBe(
+                'subscription_stopped',
+            );
+
+            await mesub.subscriptions.close(dead.id);
+            const { subscription } = await mesub.subscriptions.confirmClose(dead.id, signed);
+
+            expect(subscription).toMatchObject({
+                status: 'ended',
+                end_reason: 'closed',
+                stop_reason: null,
+                closable: false,
+            });
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({
+                status: 'ended',
+                stop_reason: null,
+                subscription_id: dead.id,
+                closable: false,
+            });
+        });
+
+        it('says a closed plan-ended row has nothing left to close', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const ended = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                status: 'ended',
+                end_reason: 'plan_ended',
+                access: false,
+                access_until: PAST,
+            });
+
+            await expect(mesub.subscriptions.retrieve(ended.id)).resolves.toMatchObject({
+                closable: true,
+            });
+            await mesub.subscriptions.close(ended.id);
+            await expect(mesub.subscriptions.confirmClose(ended.id, signed)).resolves.toMatchObject(
+                { subscription: { closable: false } },
+            );
+            await expect(mesub.access(WALLET, 'pro')).resolves.toMatchObject({ closable: false });
+        });
+    });
+
+    describe('events', () => {
+        const signed = { signature: 'fake_signature' };
+
+        async function subscribed(fake: FakeMesub) {
+            const mesub = fake.client();
+            const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+            const { subscription } = await mesub.subscriptions.submit(created.subscription.id, {
+                transaction: created.transaction,
+                terms_signature: 'signed',
+            });
+
+            return { mesub, id: subscription.id };
+        }
+
+        it('serves the events its own changes raise, newest first, with the subscription then', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+            await mesub.subscriptions.cancel(id);
+            await mesub.subscriptions.confirmCancel(id, signed);
+
+            const { data, has_more, available_since } = await mesub.events.list();
+
+            expect(data.map((event) => event.type)).toEqual([
+                'subscription.cancelled',
+                'subscription.created',
+            ]);
+            expect(data[0]).toMatchObject({
+                object: 'event',
+                network: 'devnet',
+                api_version: '2026-10-02',
+                data: { id, status: 'cancelled' },
+                detail: {},
+            });
+            expect(data[1]!.data).toMatchObject({ id, status: 'active' });
+            expect(has_more).toBe(false);
+            expect(Date.parse(available_since)).toBeLessThan(Date.now());
+            await expect(mesub.events.retrieve(data[0]!.id)).resolves.toEqual(data[0]);
+        });
+
+        it('narrows by type and subscription, and pages after an event', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const first = fake.addEvent('subscription.renewed', {
+                created_at: '2026-10-01T00:00:00.000Z',
+            });
+            const second = fake.addEvent('subscription.payment_failed', {
+                subscription: { id: 'sub_other' },
+                created_at: '2026-10-02T00:00:00.000Z',
+            });
+            const third = fake.addEvent('subscription.renewed', {
+                created_at: '2026-10-03T00:00:00.000Z',
+            });
+            vi.useFakeTimers({ toFake: ['Date'] });
+            vi.setSystemTime(new Date('2026-10-05T00:00:00.000Z'));
+
+            try {
+                await expect(
+                    mesub.events.list({ type: 'subscription.renewed' }),
+                ).resolves.toMatchObject({ data: [{ id: third.id }, { id: first.id }] });
+                await expect(
+                    mesub.events.list({ subscription: 'sub_other' }),
+                ).resolves.toMatchObject({ data: [{ id: second.id }] });
+                await expect(mesub.events.list({ limit: 1 })).resolves.toMatchObject({
+                    data: [{ id: third.id }],
+                    has_more: true,
+                });
+                await expect(
+                    mesub.events.list({ limit: 1, starting_after: third.id }),
+                ).resolves.toMatchObject({ data: [{ id: second.id }], has_more: true });
+                expect(await codeOf(mesub.events.list({ starting_after: 'evt_nobody' }))).toBe(
+                    'invalid_request',
+                );
+                expect(await codeOf(mesub.events.list({ limit: 101 }))).toBe('invalid_request');
+                expect(await codeOf(mesub.events.retrieve('evt_nobody'))).toBe('event_not_found');
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('serves nothing older than 30 days, nor than available_since', async () => {
+            const fake = new FakeMesub({ eventsSince: '2026-10-02T00:00:00.000Z' });
+            const mesub = fake.client();
+            const before = fake.addEvent('subscription.renewed', {
+                created_at: '2026-10-01T00:00:00.000Z',
+            });
+            const after = fake.addEvent('subscription.renewed', {
+                created_at: '2026-10-03T00:00:00.000Z',
+            });
+            vi.useFakeTimers({ toFake: ['Date'] });
+
+            try {
+                vi.setSystemTime(new Date('2026-10-05T00:00:00.000Z'));
+                await expect(mesub.events.list()).resolves.toEqual({
+                    data: [after],
+                    has_more: false,
+                    available_since: '2026-10-02T00:00:00.000Z',
+                });
+                expect(await codeOf(mesub.events.retrieve(before.id))).toBe('event_not_found');
+
+                vi.setSystemTime(new Date('2026-11-03T00:00:00.000Z'));
+                await expect(mesub.events.list()).resolves.toMatchObject({ data: [] });
+            } finally {
+                vi.useRealTimers();
+            }
+        });
+
+        it('adds an event on the subscription it holds, and moves nothing', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+
+            const event = fake.addEvent('subscription.payment_failed', {
+                subscription: { id, status: 'unpaid', payment_status: 'late' },
+            });
+
+            expect(event).toMatchObject({
+                data: { id, wallet: WALLET, status: 'unpaid' },
+                detail: { reason: 'insufficient_balance', retries_left: 1 },
+            });
+            await expect(mesub.subscriptions.retrieve(id)).resolves.toMatchObject({
+                status: 'active',
+            });
+            await expect(mesub.events.retrieve(event.id)).resolves.toEqual(event);
+        });
+
+        it('keeps what it serves apart from what a test holds', async () => {
+            const fake = new FakeMesub();
+            const event = fake.addEvent('subscription.renewed');
+
+            event.data.status = 'ended';
+
+            await expect(fake.client().events.retrieve(event.id)).resolves.toMatchObject({
+                data: { status: 'active' },
+            });
+        });
+
+        it('forgets them on reset', async () => {
+            const fake = new FakeMesub();
+            fake.addEvent('subscription.renewed');
+
+            fake.reset();
+
+            await expect(fake.client().events.list()).resolves.toMatchObject({ data: [] });
+        });
+    });
+
     describe('cancel, resume and close', () => {
         const PAST = '2020-01-01T00:00:00.000Z';
         const signed = { signature: 'fake_signature' };
@@ -1182,6 +1450,7 @@ describe('FakeMesub', () => {
             expect(unsigned).toEqual({
                 transaction: expect.any(String),
                 last_valid_block_height: expect.any(String),
+                transaction_expires_at: expect.any(String),
             });
             // Nothing moves until the wallet's signature is confirmed.
             await expect(mesub.subscriptions.retrieve(id)).resolves.toMatchObject({
@@ -1556,6 +1825,32 @@ describe('FakeMesub', () => {
 
         await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(true);
         expect(fake.requests.map((r) => r.path)).toEqual(['/v1/access']);
+    });
+
+    // Mesub-io/backend#472: an id on every answer, and in every error body.
+    it('names every request in Mesub-Request-Id, and an error body by the same id', async () => {
+        const fake = new FakeMesub();
+        const responses: Response[] = [];
+        const mesub = new Mesub({
+            apiKey: fake.apiKey,
+            baseUrl: fake.baseUrl,
+            maxRetries: 0,
+            fetch: async (input, init) => {
+                const response = await fake.fetch(input, init);
+                responses.push(response.clone());
+                return response;
+            },
+        });
+
+        await mesub.access(WALLET, 'pro');
+        const error = await mesub.subscriptions.retrieve('sub_nope').catch((caught) => caught);
+
+        const [first, second] = responses.map((each) => each.headers.get('mesub-request-id'));
+        expect(first).toMatch(/^req_[0-9A-Za-z]{24}$/);
+        expect(second).toMatch(/^req_[0-9A-Za-z]{24}$/);
+        expect(second).not.toBe(first);
+        expect(error).toMatchObject({ apiCode: 'subscription_not_found', requestId: second });
+        await expect(responses[1]!.json()).resolves.toMatchObject({ request_id: second });
     });
 
     it('forgets everything on reset', async () => {

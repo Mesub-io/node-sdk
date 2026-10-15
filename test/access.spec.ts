@@ -19,11 +19,13 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     return {
         wallet: WALLET,
         plan: 'pro',
+        subscription_id: 'sub_1',
         access: true,
         status: 'active',
         paused: false,
         end_reason: null,
         late_reason: null,
+        stop_reason: null,
         payment_status: 'paid',
         blocked_since: null,
         blocked_reason: null,
@@ -35,6 +37,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         next_charge_at: '2026-10-01T00:00:00.000Z',
         next_retry_at: null,
         retry_deadline: null,
+        closable: false,
+        closable_from: null,
         revalidate_after: 60,
         ...over,
     };
@@ -225,6 +229,17 @@ describe('access', () => {
                 'revalidate_after is not a finite number of seconds',
             ],
             ['no access', without('access'), 'access is missing'],
+            ['closable as a string', without('closable', 'true'), 'closable is not a boolean'],
+            [
+                'a closable_from that is no date',
+                without('closable_from', 'soon'),
+                'closable_from is not a date or null',
+            ],
+            [
+                'a numeric subscription_id',
+                without('subscription_id', 1),
+                'subscription_id is not a string or null',
+            ],
             ['access as a string', without('access', 'true'), 'access is not a boolean'],
             ['access as 1', without('access', 1), 'access is not a boolean'],
             ['a numeric wallet', without('wallet', 42), 'wallet is not a string or null'],
@@ -446,6 +461,19 @@ describe('access', () => {
                 expect.any(String),
                 expect.objectContaining({ value: answer() }),
                 expect.any(Number),
+            );
+        });
+
+        // Served since Mesub-io/backend#469 and #402: null, and false, before them.
+        it('reads an answer from a back that predates subscription_id, stop_reason and closable', async () => {
+            const older = without('subscription_id');
+            delete older['stop_reason'];
+            delete older['closable'];
+            delete older['closable_from'];
+            const { fetch } = mockFetch(json(200, older));
+
+            await expect(client(fetch).access(WALLET, 'pro')).resolves.toEqual(
+                answer({ subscription_id: null }),
             );
         });
 
@@ -2005,6 +2033,7 @@ describe('concurrent lookups', () => {
             id: 'sub_1',
             status: 'active',
             late_reason: null,
+            stop_reason: null,
             access: true,
             payment_status: 'paid',
             plan: 'pro',
@@ -2017,6 +2046,8 @@ describe('concurrent lookups', () => {
             next_retry_at: null,
             retry_deadline: null,
             access_until: '2026-10-30T12:00:00.000Z',
+            closable: false,
+            closable_from: null,
             created_at: '2026-09-30T11:58:00.000Z',
             confirmed_at: '2026-09-30T12:00:03.000Z',
         };

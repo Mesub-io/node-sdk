@@ -5,6 +5,7 @@ import type {
     LateReason,
     PaymentStatus,
     PullOutcome,
+    StopReason,
 } from './answer.js';
 import { customerOf } from './customer.js';
 import { type MesubErrorCode, MesubError, MesubSubmitError } from './errors.js';
@@ -54,8 +55,10 @@ export interface ServerSubscription {
     paused: boolean;
     /** Why it ended, only on `ended`, as `/v1/access` answers it. */
     end_reason: EndReason | null;
-    /** Why it is late, only on `unpaid`, as `/v1/access` answers it. */
+    /** Why it is late, on `unpaid` or `stopped`, as `/v1/access` answers it. */
     late_reason: LateReason | null;
+    /** Why it stopped, only on `stopped`, as `/v1/access` answers it. */
+    stop_reason: StopReason | null;
     /** Whether it grants access now, as `/v1/access` answers it. */
     access: boolean;
     /** `paid`, `late` or `none`, as `/v1/access` answers it. */
@@ -102,6 +105,10 @@ export interface ServerSubscription {
      * Never later than the plan's end.
      */
     access_until: string | null;
+    /** Whether the subscriber can close it now, as `/v1/access` answers it. */
+    closable: boolean;
+    /** When it can be closed, if not now and a date is known, as `/v1/access` answers it. */
+    closable_from: string | null;
     created_at: string;
     confirmed_at: string | null;
 }
@@ -121,6 +128,14 @@ export interface SubscribeTransaction {
     /** Base64, signed by nobody: the wallet signs it with signTransaction, without sending it. */
     transaction: string;
     last_valid_block_height: string;
+    /**
+     * When `last_valid_block_height` is expected to pass, about half a minute
+     * after the answer (Mesub-io/backend#471): an estimate that errs early,
+     * for a countdown or to ask `transaction` for a fresh one in time. The
+     * height is the truth: rebuild after `transaction_expired`, before this
+     * time as after it. Null from a back that predates it.
+     */
+    transaction_expires_at: string | null;
     costs: SubscribeCosts;
     /** Signed as is with the wallet's signMessage, over its UTF-8 bytes, before `expires_at`. */
     terms: { message: string; expires_at: string };
@@ -138,9 +153,12 @@ export interface SubmitResult {
     subscription: ServerSubscription;
     /**
      * Mesub's own, set when nothing landed (`pending`) or what landed is not
-     * Mesub's (`failed`). Never made up by the SDK.
+     * Mesub's (`failed`). Never made up by the SDK. A sentence for a person,
+     * which Mesub may reword: branch on `reason_code`.
      */
     reason?: string;
+    /** Why, for a program: set exactly when `reason` is, from a back that serves it. */
+    reason_code?: ConfirmReasonCode;
 }
 
 /**
@@ -152,6 +170,8 @@ export interface WalletTransaction {
     transaction: string;
     /** The block height past which it can no longer land. */
     last_valid_block_height: string;
+    /** When that height is expected to pass, as `SubscribeTransaction` says it. */
+    transaction_expires_at: string | null;
 }
 
 /** What the wallet answered when it sent the transaction of `cancel`, `resume` or `close`. */
@@ -166,10 +186,60 @@ export interface ConfirmResult {
     subscription: ServerSubscription;
     /**
      * Mesub's own, set when nothing changed: the transaction failed, expired
-     * before it landed, or the subscription moved on meanwhile.
+     * before it landed, or the subscription moved on meanwhile. A sentence
+     * for a person, which Mesub may reword: branch on `reason_code`.
      */
     reason?: string;
+    /** Why, for a program: set exactly when `reason` is, from a back that serves it. */
+    reason_code?: ConfirmReasonCode;
 }
+
+/**
+ * Why a submit or a confirm settled nothing, or not what was built
+ * (Mesub-io/backend#470): stable, snake case, never reworded. An open family:
+ * Mesub adds codes, so keep a default branch; one newer than this release is
+ * handed on as it is.
+ *
+ * - `not_our_transaction`: not a transaction Mesub co-signed over terms the
+ *   wallet signed for this subscription.
+ * - `transaction_failed`: it landed and the chain refused it.
+ * - `transaction_expired`: its blockhash ran out before it landed.
+ * - `nothing_landed`: on a submit, nothing stands at its address yet.
+ * - `subscription_not_on_chain`: on a cancel or a resume, it is gone on chain.
+ * - `subscription_mismatch`: what landed names another wallet, plan, amount
+ *   or period: now `failed`.
+ * - `dev_not_running`: Mesub's own Dev plan landed cancelled or part paid.
+ * - `earlier_subscription_running`: a comeback paid while the one it came
+ *   back over ran again.
+ * - `subscription_remade`: on a submit, closed and made again without Mesub.
+ * - `cancellation_not_landed`, `resume_not_landed`, `close_not_landed`: the
+ *   chain does not show the action.
+ * - `subscription_changed`: it moved on while the cancellation was read.
+ * - `subscription_not_cancelled`: on a resume, nothing to resume.
+ * - `cancelled_subscription_remade`: on a resume, closed and made again
+ *   without Mesub: it stays `cancelled`.
+ * - `resume_unverified`: on a resume, the one on chain cannot be told to be
+ *   the one cancelled: it stays `cancelled`.
+ */
+export type ConfirmReasonCode =
+    | 'not_our_transaction'
+    | 'transaction_failed'
+    | 'transaction_expired'
+    | 'nothing_landed'
+    | 'subscription_not_on_chain'
+    | 'subscription_mismatch'
+    | 'dev_not_running'
+    | 'earlier_subscription_running'
+    | 'subscription_remade'
+    | 'cancellation_not_landed'
+    | 'resume_not_landed'
+    | 'close_not_landed'
+    | 'subscription_changed'
+    | 'subscription_not_cancelled'
+    | 'cancelled_subscription_remade'
+    | 'resume_unverified'
+    // Any newer code, while the names above still complete.
+    | (string & {});
 
 /** One page of a customer's subscriptions, newest first. */
 export interface ServerSubscriptionList {
@@ -574,6 +644,7 @@ export class Subscriptions {
                 retryable,
                 body: from.body,
                 retryAfter: from.retryAfter,
+                requestId: from.requestId,
                 cause,
                 subscription,
                 sends,
@@ -828,7 +899,13 @@ export class Subscriptions {
             // Said for what it is, not as a wrong baseUrl.
             throw new MesubError(
                 'This Mesub does not serve GET /v1/subscriptions/:id/attempts yet.',
-                { status: 404, code: 'not_found', body: error.body, cause: error },
+                {
+                    status: 404,
+                    code: 'not_found',
+                    body: error.body,
+                    requestId: error.requestId,
+                    cause: error,
+                },
             );
         }
     }
@@ -878,8 +955,13 @@ function pathOf(id: string): string {
     return `/v1/subscriptions/${id}`;
 }
 
-/** Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never a subscription's. */
-function routeMissing(error: MesubError): boolean {
+/**
+ * Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never
+ * a subscription's nor an event's.
+ *
+ * @internal
+ */
+export function routeMissing(error: MesubError): boolean {
     const { message } = (error.body ?? {}) as { message?: unknown };
 
     return (

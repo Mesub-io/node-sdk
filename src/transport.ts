@@ -40,6 +40,9 @@ export interface CallOptions extends RequestOptions {
     retryRateLimited?: boolean;
 }
 
+/** The id Mesub gives every request, on every answer (Mesub-io/backend#472). */
+const REQUEST_ID_HEADER = 'Mesub-Request-Id';
+
 const INITIAL_RETRY_DELAY = 500;
 const MAX_RETRY_DELAY = 8_000;
 const MAX_RETRY_AFTER = 60_000;
@@ -152,6 +155,7 @@ export class Transport {
                 signal: controller.signal,
             });
             const text = await response.text();
+            const requestId = response.headers.get(REQUEST_ID_HEADER);
 
             if (response.ok) {
                 try {
@@ -161,6 +165,7 @@ export class Transport {
                         status: response.status,
                         code: 'unexpected',
                         body: text,
+                        requestId,
                         cause,
                     });
                     return { ok: false, error, retry: false, retryAfter: null };
@@ -174,9 +179,15 @@ export class Transport {
                     ? new MesubError(
                           `${url.pathname} answered 404 with no Mesub error: is baseUrl ` +
                               `(${this.#config.baseUrl}) the Mesub API?`,
-                          { status: 404, code: 'unexpected', body: answered, retryAfter: asked },
+                          {
+                              status: 404,
+                              code: 'unexpected',
+                              body: answered,
+                              retryAfter: asked,
+                              requestId,
+                          },
                       )
-                    : errorFrom(response.status, answered, asked);
+                    : errorFrom(response.status, answered, asked, requestId);
 
             return {
                 ok: false,
@@ -222,11 +233,16 @@ function endpoint(baseUrl: string, path: string): URL {
 /**
  * The error a Mesub error body describes since the back's error codes
  * (Mesub-io/backend#180): Nest's `statusCode`, `error` and `message`, plus a
- * stable `code` and a `retryable` flag. Without them, as from a proxy in
+ * stable `code`, a `retryable` flag and the `request_id`. Without them, as from a proxy in
  * front, the status alone decides.
  */
-function errorFrom(status: number, body: unknown, retryAfter: number | null): MesubError {
-    const { code, retryable } = isRecord(body) ? body : {};
+function errorFrom(
+    status: number,
+    body: unknown,
+    retryAfter: number | null,
+    header: string | null,
+): MesubError {
+    const { code, retryable, request_id } = isRecord(body) ? body : {};
     const apiCode = typeof code === 'string' ? code : null;
 
     return new MesubError(messageFrom(body, status), {
@@ -236,6 +252,9 @@ function errorFrom(status: number, body: unknown, retryAfter: number | null): Me
         retryable: typeof retryable === 'boolean' ? retryable : retryableStatus(status),
         body,
         retryAfter,
+        // The header first: the body's says the same, and is the fallback
+        // when a proxy in front drops the header (Mesub-io/backend#472).
+        requestId: header ?? (typeof request_id === 'string' ? request_id : null),
     });
 }
 

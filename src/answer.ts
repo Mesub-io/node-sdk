@@ -55,6 +55,17 @@ export type EndReason =
 export type LateReason = 'insufficient_balance' | 'approval_revoked' | 'authority_closed';
 
 /**
+ * Why a subscription stopped (Mesub-io/backend#402): every retry of the
+ * missed payment failed (`out_of_retries`), on Free the last day to pay it
+ * passed (`retry_deadline_passed`), or the wallet closed its subscription
+ * authority for good (`authority_closed`). After the first two the
+ * subscription stays open on chain and the subscriber can come back over it;
+ * after the third nobody can charge it again, the subscriber cannot come
+ * back over it, and can close it at once (`closable`).
+ */
+export type StopReason = 'out_of_retries' | 'retry_deadline_passed' | 'authority_closed';
+
+/**
  * Why every charge of a subscription is blocked, none of it the subscriber's
  * doing (Mesub-io/backend#398). The merchant's own setup, theirs to fix, by
  * name: Mesub's puller taken off the plan on chain, a receiving wallet that
@@ -101,6 +112,13 @@ export interface AccessAnswer {
     wallet: string | null;
     plan: string;
     /**
+     * The subscription this answer is about (Mesub-io/backend#469), the one
+     * to `cancel`, `resume`, `close` or `retry` without listing the
+     * customer's subscriptions first. Null with `status` `none`. Read as null
+     * from a back that predates it.
+     */
+    subscription_id: string | null;
+    /**
      * The only field a guard needs. False from the plan's end on, for a plan
      * that has one, whatever `status` still reads.
      */
@@ -118,8 +136,17 @@ export interface AccessAnswer {
      * predates it.
      */
     end_reason: EndReason | null;
-    /** Why it is late, only when `status` is `unpaid`; null on a refusal Mesub cannot place. */
+    /**
+     * Why it is late, when `status` is `unpaid`, or `stopped` for the payment
+     * it stopped on; null on a refusal Mesub cannot place.
+     */
     late_reason: LateReason | null;
+    /**
+     * Why it stopped, only when `status` is `stopped`; null on one that
+     * stopped before Mesub recorded why. Read as null from a back that
+     * predates it (Mesub-io/backend#402).
+     */
+    stop_reason: StopReason | null;
     /** `none` on a paused seat: nothing is billed, so nothing is late. */
     payment_status: PaymentStatus;
     /**
@@ -161,6 +188,22 @@ export interface AccessAnswer {
      * older SDK.
      */
     retry_deadline: string | null;
+    /**
+     * Whether the subscriber can close the subscription on chain now, which
+     * returns its deposit to their wallet (Mesub-io/backend#402): a
+     * cancellation past its end, one ended with its plan, or one stopped
+     * with `stop_reason` `authority_closed`. As Mesub last read the chain:
+     * `close` reads it again, and may still refuse. Read as false from a back
+     * that predates it.
+     */
+    closable: boolean;
+    /**
+     * When it can be closed, if not now: the end of the period a
+     * cancellation set. Null when `closable` is true, and when no date is
+     * known yet (a running one, or one stopped with `out_of_retries`, is
+     * cancelled first). Read as null from a back that predates it.
+     */
+    closable_from: string | null;
     /** Only when asked for with `{ attempts: true }`. */
     attempts?: ServedAttempt[];
     /** Seconds this answer stays true: how long it is cached. */

@@ -27,11 +27,13 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     return {
         wallet: WALLET,
         plan: 'pro',
+        subscription_id: 'sub_1',
         access: true,
         status: 'active',
         paused: false,
         end_reason: null,
         late_reason: null,
+        stop_reason: null,
         payment_status: 'paid',
         blocked_since: null,
         blocked_reason: null,
@@ -43,6 +45,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         next_charge_at: null,
         next_retry_at: null,
         retry_deadline: null,
+        closable: false,
+        closable_from: null,
         revalidate_after: 60,
         ...over,
     };
@@ -897,7 +901,13 @@ describe('requirePlan', () => {
                 access: () =>
                     Response.json(
                         { message: 'nope', statusCode: 401, code: 'invalid_api_key' },
-                        { status: 401, headers: { 'Retry-After': '7' } },
+                        {
+                            status: 401,
+                            headers: {
+                                'Retry-After': '7',
+                                'Mesub-Request-Id': 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
+                            },
+                        },
                     ),
             });
             const { server, seen } = caught(client);
@@ -912,6 +922,7 @@ describe('requirePlan', () => {
                 apiCode: 'invalid_api_key',
                 retryable: false,
                 retryAfter: 7000,
+                requestId: 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
                 body: { code: 'invalid_api_key' },
             });
             expect(error.cause).toBeInstanceOf(MesubError);

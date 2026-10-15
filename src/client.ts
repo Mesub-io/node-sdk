@@ -4,6 +4,7 @@ import { MemoryStore } from './cache/memory-store.js';
 import type { CacheStore } from './cache/store.js';
 import { type Asked, customerOf } from './customer.js';
 import { MesubError } from './errors.js';
+import { Events } from './events.js';
 import { apiKeyOf, baseUrlOf, headersOf, numberOf } from './options.js';
 import { Plans } from './plans.js';
 import { type ServerSubscription, Subscriptions } from './subscriptions.js';
@@ -92,6 +93,8 @@ export class Mesub {
     readonly plans: Plans;
     /** Checking the webhooks Mesub sends: `verify`. */
     readonly webhooks: Webhooks;
+    /** The events of the last 30 days, as their webhooks carried them: `list` and `retrieve`. */
+    readonly events: Events;
     /** @internal */
     protected readonly transport: Transport;
     /** @internal */
@@ -143,6 +146,7 @@ export class Mesub {
             (subscription) => this.landed(subscription, true),
         );
         this.plans = new Plans(this.transport);
+        this.events = new Events(this.transport);
         // Every answer cached for its customer goes, the yes too: `stopped` and
         // `ended` take access away, and `hasAccess` must say so at once.
         this.webhooks = new Webhooks(webhookSecret, (event) => this.landed(event.data, true));

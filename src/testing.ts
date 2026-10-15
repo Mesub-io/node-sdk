@@ -1,8 +1,9 @@
 /**
  * `@mesub/node/testing`: a fake Mesub, for a merchant's own tests. It answers
  * what the SDK calls (`/v1/access`, `/v1/plans`, `/v1/subscriptions`, its
- * fresh transaction, its attempts and its cancel, resume and close) from
- * what the test sets, through a `fetch` handed to the client: no network, no backend, no test framework of its own.
+ * fresh transaction, its attempts and its cancel, resume and close, and
+ * `/v1/events`) from what the test sets, through a `fetch` handed to the
+ * client: no network, no backend, no test framework of its own.
  *
  * ```ts
  * import { FakeMesub } from '@mesub/node/testing';
@@ -19,6 +20,7 @@
 import type { AccessAnswer, Customer, ServedAttempt } from './answer.js';
 import { Mesub, type MesubOptions } from './client.js';
 import { type Asked, customerOf } from './customer.js';
+import type { EventList } from './events.js';
 import type { Plan, PlanToken } from './plans.js';
 import type {
     ServerSubscription,
@@ -28,7 +30,13 @@ import type {
     SubscriptionAttemptList,
     WalletTransaction,
 } from './subscriptions.js';
-import { signedHeaders, type WebhookEventType } from './webhooks.js';
+import { API_VERSION } from './version.js';
+import {
+    type EventType,
+    type MesubEvent,
+    signedHeaders,
+    type WebhookEventType,
+} from './webhooks.js';
 
 export interface FakeMesubOptions {
     /** Where the fake answers. Defaults to `https://api.mesub.test`. */
@@ -56,6 +64,12 @@ export interface FakeMesubOptions {
      * it does not have, and attempts are only served through `/v1/access`.
      */
     attemptsRoute?: boolean;
+    /**
+     * Mesub's `available_since`: events created before it are not served on
+     * `/v1/events`. Defaults to 30 days before the fake was made, so every
+     * event of the window is.
+     */
+    eventsSince?: string | Date;
     /**
      * The `revalidate_after` of every `/v1/access` answer, in seconds: 0 for
      * a test that wants each change seen on the next call of the same
@@ -90,6 +104,21 @@ export interface SignWebhookOptions {
     timestamp?: number;
 }
 
+/** What `FakeMesub.addEvent` records, on top of a made-up event of that type. */
+export interface FakeEventFields {
+    /**
+     * Fields of the subscription it carries, on top of the one the fake
+     * holds under that `id`, else of an active, paid one on `pro`.
+     */
+    subscription?: Partial<ServerSubscription>;
+    /** The event's detail. Defaults to a plausible one for the type. */
+    detail?: Record<string, unknown>;
+    /** When the event happened. Defaults to now. */
+    created_at?: string;
+    /** The event's id. Defaults to a new `evt_fake_...`. */
+    id?: string;
+}
+
 /** What `FakeMesub.webhook` sends, on top of a made-up event of that type. */
 export interface FakeWebhookFields {
     /** Fields of the subscription it carries. Defaults to an active, paid one on `pro`. */
@@ -98,7 +127,14 @@ export interface FakeWebhookFields {
     detail?: Record<string, unknown>;
     /** When the event happened. Defaults to now. */
     created_at?: string;
+    /**
+     * The event's id. Defaults to a new `evt_fake_...`, and to `evt_test` for
+     * the `test` event, as Mesub's test deliveries carry.
+     */
     id?: string;
+    /** The delivery's id, the `webhook-id` header. Defaults to a new `msg_fake_...`. */
+    delivery_id?: string;
+    /** `webhook-timestamp`, Unix seconds. Defaults to now. */
     timestamp?: number;
 }
 
@@ -133,18 +169,21 @@ export interface FakeFailure {
 export type FakeAccess = Partial<Omit<AccessAnswer, 'plan'>>;
 
 /**
- * An access answer as the fake holds it: `revalidate_after` only when a test
- * set it, worked out when served otherwise.
+ * An access answer as the fake holds it: `revalidate_after`, `closable` and
+ * `closable_from` only when a test set them, worked out when served otherwise.
  */
-type Held = Omit<AccessAnswer, 'revalidate_after'> & { revalidate_after?: number };
+type Held = Omit<AccessAnswer, 'revalidate_after' | 'closable' | 'closable_from'> &
+    Partial<Pick<AccessAnswer, 'revalidate_after' | 'closable' | 'closable_from'>>;
 
 /** What Mesub answers a customer with nothing on a plan. */
 const NOTHING: Omit<Held, 'wallet' | 'plan'> = {
+    subscription_id: null,
     access: false,
     status: 'none',
     paused: false,
     end_reason: null,
     late_reason: null,
+    stop_reason: null,
     payment_status: 'none',
     blocked_since: null,
     blocked_reason: null,
@@ -171,8 +210,33 @@ const OUTAGE: FakeFailure = {
 /** 24 bytes, as Mesub's secrets are. Only ever a test's. */
 const FAKE_WEBHOOK_SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
 const FAKE_WALLET = '11111111111111111111111111111111';
+/** The id every test delivery carries, as Mesub's: no event stands behind it. */
+const TEST_EVENT_ID = 'evt_test';
+/** How far back `/v1/events` reaches, as on Mesub. */
+const EVENTS_WINDOW_MS = 30 * 24 * 3600 * 1000;
+/** What `/v1/events` serves per page, by default and at most. */
+const EVENTS_LIMIT = 25;
+const EVENTS_LIMIT_MAX = 100;
+/** The v1 event types, as Mesub names them and `type` is checked against. */
+const EVENT_TYPES: readonly EventType[] = [
+    'subscription.created',
+    'subscription.renewal_upcoming',
+    'subscription.renewed',
+    'subscription.payment_failed',
+    'subscription.stopped',
+    'subscription.cancelled',
+    'subscription.resumed',
+    'subscription.ended',
+    'subscription.expired',
+];
+/** An id as Mesub's DTOs take one. */
+const RESOURCE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** The header Mesub names every request in (Mesub-io/backend#472). */
+const REQUEST_ID_HEADER = 'Mesub-Request-Id';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const PERIOD_MS = 30 * 24 * 3600 * 1000;
+/** About 150 blocks of 200 ms: how long Mesub says a transaction it built lives. */
+const TRANSACTION_LIFE_MS = 30_000;
 const REASONS: Record<number, string> = {
     400: 'Bad Request',
     401: 'Unauthorized',
@@ -193,7 +257,14 @@ const REASONS: Record<number, string> = {
  * It answers and refuses as Mesub does, `revalidate_after` included: a
  * client keeps a yes up to five minutes and a no 10 seconds, so a change
  * made after a client asked shows to a new client, or to every client with
- * `revalidateAfter: 0`.
+ * `revalidateAfter: 0`. Every answer carries a `Mesub-Request-Id`, and every
+ * error body its `request_id`.
+ *
+ * `closable` and `closable_from` are worked out from what the fake's close
+ * would take, unless a test set them on an answer. A subscription it moves
+ * raises the event Mesub raises (`subscription.created` on a submit,
+ * `cancelled`, `resumed` and `ended` on a confirm), which `/v1/events`
+ * serves; `addEvent` records any other.
  */
 export class FakeMesub {
     readonly baseUrl: string;
@@ -219,6 +290,11 @@ export class FakeMesub {
     readonly #attemptsRoute: boolean;
     readonly #revalidateAfter: number | undefined;
     #attemptIds = 0;
+    #eventIds = 0;
+    #requestIds = 0;
+    /** Every event raised or added, as `/v1/events` serves it. */
+    #events: MesubEvent[] = [];
+    readonly #eventsSince: string;
     #failure: FakeFailure | null = null;
     #ids = 0;
 
@@ -233,6 +309,9 @@ export class FakeMesub {
         this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
         this.#attemptsRoute = options.attemptsRoute ?? true;
         this.#revalidateAfter = options.revalidateAfter;
+        this.#eventsSince = new Date(
+            options.eventsSince ?? Date.now() - EVENTS_WINDOW_MS,
+        ).toISOString();
         this.fetch = (input, init) => this.#handle(input, init);
     }
 
@@ -386,27 +465,57 @@ export class FakeMesub {
     }
 
     /**
-     * A webhook of that type, as Mesub posts it to an endpoint: a made-up
-     * subscription and detail, unless `fields` say otherwise, signed with
-     * `webhookSecret`. Post it to your own handler, or hand it to
-     * `webhooks.verify` of a `client()`. Nothing is added to the fake.
+     * A webhook of that type, as Mesub posts it to an endpoint: the event's
+     * body (Mesub-io/backend#482), on a made-up subscription and detail
+     * unless `fields` say otherwise, signed with `webhookSecret`. Post it to
+     * your own handler, or hand it to `webhooks.verify` of a `client()`.
+     * Nothing is added to the fake.
      */
     async webhook(type: WebhookEventType, fields: FakeWebhookFields = {}): Promise<SignedWebhook> {
         const now = new Date();
         const payload = {
+            id: fields.id ?? (type === 'test' ? TEST_EVENT_ID : this.#nextEventId()),
+            object: 'event',
             type,
             created_at: fields.created_at ?? now.toISOString(),
-            data: {
-                ...this.#subscription({ wallet: FAKE_WALLET, plan: 'pro', ...fields.subscription }),
-                detail: fields.detail ?? detailOf(type, now),
-            },
+            network: 'devnet',
+            api_version: API_VERSION,
+            data: withClosing(
+                this.#subscription({ wallet: FAKE_WALLET, plan: 'pro', ...fields.subscription }),
+            ),
+            detail: fields.detail ?? detailOf(type, now),
         };
 
         return signWebhook(payload, {
             secret: this.webhookSecret,
-            ...(fields.id !== undefined && { id: fields.id }),
+            ...(fields.delivery_id !== undefined && { id: fields.delivery_id }),
             ...(fields.timestamp !== undefined && { timestamp: fields.timestamp }),
         });
+    }
+
+    /**
+     * An event `/v1/events` serves from now on, as Mesub would have raised
+     * it: a made-up subscription and detail unless `fields` say otherwise,
+     * the subscription the fake holds under `fields.subscription.id` when it
+     * holds one. Nothing else changes: what it says happened is not done.
+     */
+    addEvent(type: EventType, fields: FakeEventFields = {}): MesubEvent {
+        const now = new Date();
+        const held = this.#subscriptions.find((each) => each.id === fields.subscription?.id);
+        const base = held ? this.#view(held) : { wallet: FAKE_WALLET, plan: 'pro' };
+        const event: MesubEvent = {
+            id: fields.id ?? this.#nextEventId(),
+            object: 'event',
+            type,
+            created_at: fields.created_at ?? now.toISOString(),
+            network: 'devnet',
+            api_version: API_VERSION,
+            data: withClosing(this.#subscription({ ...base, ...fields.subscription })),
+            detail: (fields.detail ?? detailOf(type, now)) as never,
+        } as MesubEvent;
+
+        this.#events.push(event);
+        return structuredClone(event);
     }
 
     /**
@@ -425,6 +534,7 @@ export class FakeMesub {
         this.#built.clear();
         this.#gone.clear();
         this.#attempts.clear();
+        this.#events = [];
         this.#failure = null;
         this.requests.length = 0;
     }
@@ -440,6 +550,7 @@ export class FakeMesub {
             paused: false,
             end_reason: null,
             late_reason: null,
+            stop_reason: null,
             access: true,
             payment_status: 'paid',
             blocked_since: null,
@@ -454,6 +565,8 @@ export class FakeMesub {
             next_retry_number: null,
             retries_allowed: null,
             access_until: null,
+            closable: false,
+            closable_from: null,
             created_at: now,
             confirmed_at: now,
             ...fields,
@@ -467,12 +580,43 @@ export class FakeMesub {
     #fresh(answer: Held): AccessAnswer {
         const end = this.#endOf(answer.plan);
         const served = bounded(answer, end);
+        const closes = closingOf(served);
+        const closed = {
+            ...served,
+            closable: served.closable ?? closes.closable,
+            closable_from:
+                served.closable_from === undefined ? closes.closable_from : served.closable_from,
+        };
 
         return {
-            ...served,
+            ...closed,
             revalidate_after:
-                served.revalidate_after ?? this.#revalidateAfter ?? revalidateAfter(served, end),
+                served.revalidate_after ?? this.#revalidateAfter ?? revalidateAfter(closed, end),
         };
+    }
+
+    /**
+     * A subscription as Mesub serves it now: bounded by its plan's end, and
+     * `closable` as the fake's close would take it.
+     */
+    #view(subscription: ServerSubscription): ServerSubscription {
+        const served = bounded(subscription, this.#endOf(subscription.plan));
+
+        return { ...served, ...closingOf(served, this.#gone.has(subscription.id)) };
+    }
+
+    /** Records the event Mesub raises for a change to that subscription, as it stands now. */
+    #raise(type: EventType, subscription: ServerSubscription, detail: object = {}): void {
+        this.#events.push({
+            id: this.#nextEventId(),
+            object: 'event',
+            type,
+            created_at: new Date().toISOString(),
+            network: 'devnet',
+            api_version: API_VERSION,
+            data: structuredClone(this.#view(subscription)),
+            detail,
+        } as MesubEvent);
     }
 
     /** A plan's end: the one a test gave it, else its `ends_at` in `plans`. */
@@ -505,11 +649,13 @@ export class FakeMesub {
         return `sub_fake_${this.#ids}`;
     }
 
+    #nextEventId(): string {
+        this.#eventIds += 1;
+        return `evt_fake_${this.#eventIds}`;
+    }
+
     async #handle(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
         const url = new URL(input instanceof Request ? input.url : String(input));
-        const method = (init.method ?? 'GET').toUpperCase();
-        const headers = new Headers(init.headers);
-
         const base = new URL(this.baseUrl);
         const prefix = base.pathname.replace(/\/+$/, '');
 
@@ -518,7 +664,15 @@ export class FakeMesub {
             return new Response('Not Found', { status: 404 });
         }
 
-        const path = url.pathname.slice(prefix.length);
+        this.#requestIds += 1;
+        const id = `req_fake${String(this.#requestIds).padStart(20, '0')}`;
+
+        return withRequestId(await this.#route(url, url.pathname.slice(prefix.length), init), id);
+    }
+
+    async #route(url: URL, path: string, init: RequestInit): Promise<Response> {
+        const method = (init.method ?? 'GET').toUpperCase();
+        const headers = new Headers(init.headers);
         const query = Object.fromEntries(url.searchParams);
         const body = typeof init.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined;
         this.requests.push({ method, path, query, headers, body });
@@ -550,6 +704,21 @@ export class FakeMesub {
         }
 
         if (method === 'GET' && path === '/v1/access') return this.#access(query);
+        if (method === 'GET' && path === '/v1/events') return this.#eventList(query);
+        const eventId = /^\/v1\/events\/([^/]+)$/.exec(path)?.[1];
+        if (method === 'GET' && eventId !== undefined) {
+            const event = this.#servedEvents().find(
+                (each) => each.id === decodeURIComponent(eventId),
+            );
+
+            return event
+                ? Response.json(event)
+                : error(
+                      404,
+                      'event_not_found',
+                      'No event of yours under that id in the last 30 days.',
+                  );
+        }
         if (method === 'GET' && path === '/v1/subscriptions') return this.#list(query);
         if (method === 'POST' && path === '/v1/subscriptions') return this.#create(body);
 
@@ -566,9 +735,7 @@ export class FakeMesub {
             if (!subscription) {
                 return error(404, 'subscription_not_found', 'No subscription under that id.');
             }
-            if (method === 'GET' && !step) {
-                return Response.json(bounded(subscription, this.#endOf(subscription.plan)));
-            }
+            if (method === 'GET' && !step) return Response.json(this.#view(subscription));
             if (step === 'attempts') {
                 return method === 'GET'
                     ? this.#attemptsOf(subscription, query)
@@ -595,9 +762,7 @@ export class FakeMesub {
                         'This subscription is not behind on its payment.',
                     );
                 }
-                return Response.json(bounded(subscription, this.#endOf(subscription.plan)), {
-                    status: 202,
-                });
+                return Response.json(this.#view(subscription), { status: 202 });
             }
             if (method === 'POST' && step && step !== 'submit') {
                 return confirm
@@ -666,8 +831,59 @@ export class FakeMesub {
             .filter((s) => query['plan'] === undefined || s.plan === query['plan']);
 
         const page: ServerSubscriptionList = {
-            data: data.slice(0, limit).map((s) => bounded(s, this.#endOf(s.plan))),
+            data: data.slice(0, limit).map((s) => this.#view(s)),
             has_more: data.length > limit,
+        };
+        return Response.json(page);
+    }
+
+    /** The events Mesub serves now: within the window and from `available_since`, newest first. */
+    #servedEvents(): MesubEvent[] {
+        const floor = Math.max(Date.now() - EVENTS_WINDOW_MS, Date.parse(this.#eventsSince));
+
+        return this.#events
+            .filter((event) => Date.parse(event.created_at) >= floor)
+            .sort(
+                (a, b) =>
+                    Date.parse(b.created_at) - Date.parse(a.created_at) ||
+                    (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+            );
+    }
+
+    #eventList(query: Record<string, string>): Response {
+        const { type, subscription, starting_after: after } = query;
+        const limit = Number(query['limit'] ?? EVENTS_LIMIT);
+        const reasons = [
+            !Number.isInteger(limit) || limit < 1 || limit > EVENTS_LIMIT_MAX
+                ? `limit must be a whole number from 1 to ${EVENTS_LIMIT_MAX}`
+                : null,
+            type !== undefined && !EVENT_TYPES.includes(type as EventType)
+                ? `type is one of ${EVENT_TYPES.join(', ')}`
+                : null,
+            subscription !== undefined && !RESOURCE_ID.test(subscription)
+                ? 'subscription must be a subscription id'
+                : null,
+            after !== undefined && !RESOURCE_ID.test(after)
+                ? 'starting_after must be an event id'
+                : null,
+        ].filter((reason): reason is string => reason !== null);
+        if (reasons.length) return error(400, 'invalid_request', reasons);
+
+        // The cursor is a position among every event served, whatever the filters.
+        const all = this.#servedEvents();
+        const from = after === undefined ? 0 : all.findIndex((each) => each.id === after) + 1;
+        if (after !== undefined && from === 0) {
+            return error(400, 'invalid_request', 'starting_after is not an event of yours.');
+        }
+        const data = all
+            .slice(from)
+            .filter((each) => type === undefined || each.type === type)
+            .filter((each) => subscription === undefined || each.data.id === subscription);
+
+        const page: EventList = {
+            data: data.slice(0, limit),
+            has_more: data.length > limit,
+            available_since: this.#eventsSince,
         };
         return Response.json(page);
     }
@@ -807,6 +1023,7 @@ export class FakeMesub {
         const plan = subscription.plan ?? '';
         const fields: FakeAccess = {
             wallet: subscription.wallet,
+            subscription_id: subscription.id,
             subscribed_since: now.toISOString(),
             first_subscribed_at: now.toISOString(),
             current_period_end: end,
@@ -818,8 +1035,9 @@ export class FakeMesub {
             this.grant({ external_id: subscription.external_id }, plan, fields);
         }
         if (subscription.email) this.grant({ email: subscription.email }, plan, fields);
+        this.#raise('subscription.created', subscription);
 
-        return Response.json({ subscription }, { status: 201 });
+        return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
     }
 
     /** The transaction of a cancel, resume or close, or Mesub's refusal of it. */
@@ -833,6 +1051,7 @@ export class FakeMesub {
         const answer: WalletTransaction = {
             transaction: btoa(`fake ${action} transaction`),
             last_valid_block_height: '0',
+            transaction_expires_at: expiresAt(),
         };
         return Response.json(answer, { status: 201 });
     }
@@ -854,7 +1073,7 @@ export class FakeMesub {
             return error(400, 'nothing_to_confirm', 'There is no transaction to confirm yet.');
         }
         // Confirmed already: answered with the row, as Mesub does.
-        if (done) return Response.json({ subscription }, { status: 201 });
+        if (done) return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
         // What was built for another action is spent.
         this.#built.set(subscription.id, new Set([action]));
 
@@ -865,12 +1084,14 @@ export class FakeMesub {
             // As Mesub's confirmClose: its account is gone, and the row stays
             // ended with the reason it ended for. Nothing ends twice.
             this.#gone.add(subscription.id);
-            return Response.json({ subscription }, { status: 201 });
+            this.#answer(subscription, {});
+            return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
         }
         if (action === 'cancel') {
             // Paid up, it keeps its access to the end of the period.
             Object.assign(subscription, {
                 status: 'cancelled',
+                stop_reason: null,
                 ...NO_BLOCK,
                 next_charge_at: null,
                 next_retry_at: null,
@@ -881,6 +1102,7 @@ export class FakeMesub {
             } satisfies Partial<ServerSubscription>);
             this.#answer(subscription, {
                 status: 'cancelled',
+                stop_reason: null,
                 ...NO_BLOCK,
                 cancelled_at: now,
                 next_charge_at: null,
@@ -901,6 +1123,7 @@ export class FakeMesub {
             Object.assign(subscription, {
                 status: 'ended',
                 end_reason: 'closed',
+                stop_reason: null,
                 ...NO_BLOCK,
                 access: false,
                 payment_status: 'none',
@@ -915,6 +1138,7 @@ export class FakeMesub {
                 access: false,
                 status: 'ended',
                 end_reason: 'closed',
+                stop_reason: null,
                 ...NO_BLOCK,
                 payment_status: 'none',
                 access_until: null,
@@ -923,8 +1147,9 @@ export class FakeMesub {
                 retry_deadline: null,
             });
         }
+        this.#raise(EVENT_OF[action], subscription);
 
-        return Response.json({ subscription }, { status: 201 });
+        return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
     }
 
     /**
@@ -945,6 +1170,10 @@ export class FakeMesub {
                 access: subscription.access,
                 payment_status: subscription.payment_status,
                 ...before,
+                subscription_id: subscription.id,
+                // A row whose close landed has nothing left to close; any
+                // other is worked out when served.
+                ...(this.#gone.has(subscription.id) && { closable: false, closable_from: null }),
                 ...fields,
             });
         }
@@ -1016,6 +1245,11 @@ function bounded<T extends Dated>(row: T, end: string | null): T {
     };
 }
 
+/** About half a minute from now, as Mesub dates a transaction's `last_valid_block_height`. */
+function expiresAt(): string {
+    return new Date(Date.now() + TRANSACTION_LIFE_MS).toISOString();
+}
+
 /** What `create` and `transaction` hand out for a pending subscription: nothing a chain would take. */
 function handedOut(subscription: ServerSubscription): SubscribeTransaction {
     const zero = '0';
@@ -1024,6 +1258,7 @@ function handedOut(subscription: ServerSubscription): SubscribeTransaction {
         subscription: { id: subscription.id, status: 'pending' },
         transaction: btoa('fake transaction'),
         last_valid_block_height: zero,
+        transaction_expires_at: expiresAt(),
         costs: {
             rent: { subscription: zero, authority: null, total: zero },
             fee: { signatures: 2, per_signature: zero, priority: zero, total: zero },
@@ -1067,6 +1302,40 @@ function endedBy(row: {
 /** What stops, takes back or closes a subscription in the fake. */
 type FakeAction = 'cancel' | 'resume' | 'close';
 
+/** The event each confirmed action raises. */
+const EVENT_OF: Record<FakeAction, EventType> = {
+    cancel: 'subscription.cancelled',
+    resume: 'subscription.resumed',
+    close: 'subscription.ended',
+};
+
+/** What decides a close, on a subscription and on an access answer alike. */
+type Closing = Pick<ServerSubscription, 'access_until' | 'end_reason' | 'stop_reason'> & {
+    status: ServerSubscription['status'] | AccessAnswer['status'];
+};
+
+/**
+ * Whether the fake's close would take it now (`refusalOf`), and from when
+ * when it would not yet: the end of a cancellation's period.
+ */
+function closingOf(
+    row: Closing,
+    gone = false,
+): Pick<ServerSubscription, 'closable' | 'closable_from'> {
+    const closable = refusalOf('close', row, gone) === null;
+    const ahead = row.access_until !== null && Date.parse(row.access_until) > Date.now();
+
+    return {
+        closable,
+        closable_from: !closable && row.status === 'cancelled' && ahead ? row.access_until : null,
+    };
+}
+
+/** A subscription with `closable` as the fake's close would take it. */
+function withClosing(subscription: ServerSubscription): ServerSubscription {
+    return { ...subscription, ...closingOf(subscription) };
+}
+
 /** The status each action leaves a subscription in. */
 const DONE: Record<FakeAction, ServerSubscription['status']> = {
     cancel: 'cancelled',
@@ -1078,11 +1347,7 @@ const DONE: Record<FakeAction, ServerSubscription['status']> = {
  * Mesub's 409 for an action a subscription's status does not allow, or null.
  * `gone`: a row ended with its plan whose close landed already.
  */
-function refusalOf(
-    action: FakeAction,
-    subscription: ServerSubscription,
-    gone = false,
-): Response | null {
+function refusalOf(action: FakeAction, subscription: Closing, gone = false): Response | null {
     const { status, access_until } = subscription;
     const over = access_until === null || Date.parse(access_until) <= Date.now();
     const cancelled =
@@ -1125,9 +1390,11 @@ function refusalOf(
             'This subscription has ended and cannot be closed through Mesub.',
         );
     }
-    // A stopped one included: the fake's is one nothing cancelled, which
-    // Mesub cancels first. Neither a cancellation signed without Mesub nor an
-    // authority closed for good (Mesub-io/backend#394) is modelled here.
+    // Its authority closed for good (Mesub-io/backend#394): closed at once,
+    // nothing to cancel first.
+    if (status === 'stopped' && subscription.stop_reason === 'authority_closed') return null;
+    // Any other stopped one is one nothing cancelled, which Mesub cancels
+    // first: a cancellation signed without Mesub is not modelled here.
     if (!cancelled) {
         return error(
             409,
@@ -1154,6 +1421,16 @@ function liveRefusal(held: ServerSubscription[]): Response | null {
             ['active', 'cancelled', 'unpaid'].includes(s.status) ||
             (s.status === 'ended' && s.end_reason === 'cancelled'),
     );
+
+    // Its authority closed for good: no comeback goes through it (Mesub-io/backend#394).
+    const dead = held.find((s) => s.status === 'stopped' && s.stop_reason === 'authority_closed');
+    if (dead && !live) {
+        return error(
+            409,
+            'subscription_stopped',
+            "Your wallet's approval for this token was closed for good, so this subscription cannot restart. Close it, then subscribe again.",
+        );
+    }
 
     if (!live) return null;
     if (live.status === 'active') {
@@ -1191,11 +1468,11 @@ const WITH_ITS_PLAN: Array<ServerSubscription['end_reason']> = [
 ];
 
 /** A row ended with its plan, which Mesub still closes (Mesub-io/backend#344). */
-function endedWithPlan(subscription: ServerSubscription): boolean {
+function endedWithPlan(subscription: Closing): boolean {
     return subscription.status === 'ended' && WITH_ITS_PLAN.includes(subscription.end_reason);
 }
 
-function isClosed(subscription: ServerSubscription): boolean {
+function isClosed(subscription: Closing): boolean {
     return subscription.status === 'ended' && subscription.end_reason === 'closed';
 }
 
@@ -1392,4 +1669,18 @@ function error(
             ...(retryAfter !== undefined && { headers: { 'Retry-After': String(retryAfter) } }),
         },
     );
+}
+
+/**
+ * The answer with the id Mesub gives every request (Mesub-io/backend#472): in
+ * `Mesub-Request-Id`, and in an error body's `request_id`.
+ */
+async function withRequestId(response: Response, id: string): Promise<Response> {
+    const headers = new Headers(response.headers);
+    headers.set(REQUEST_ID_HEADER, id);
+
+    if (response.ok) return new Response(response.body, { status: response.status, headers });
+
+    const body = (await response.json()) as Record<string, unknown>;
+    return Response.json({ ...body, request_id: id }, { status: response.status, headers });
 }
