@@ -290,6 +290,9 @@ describe('subscriptions.transaction', () => {
         [404, 'subscription_not_found', 'not_found'],
         [409, 'not_awaiting_signature', 'conflict'],
         [409, 'plan_sunset', 'conflict'],
+        [409, 'plan_removed', 'conflict'],
+        [409, 'plan_replaced', 'conflict'],
+        // Their names before Mesub-io/backend#476.
         [409, 'plan_deleted', 'conflict'],
         [409, 'plan_rebuilt', 'conflict'],
         [409, 'plan_ended', 'conflict'],
