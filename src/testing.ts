@@ -1242,14 +1242,14 @@ function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
         case 'subscription.payment_failed':
             return {
                 ...paid,
-                reason: 'insufficient-balance',
+                reason: 'insufficient_balance',
                 next_retry_at: new Date(now.getTime() + 24 * 3600 * 1000).toISOString(),
                 retry_deadline: null,
                 retries_left: 1,
                 retry_mode: 'scheduled',
             };
         case 'subscription.stopped':
-            return { reason: 'insufficient-balance' };
+            return { reason: 'insufficient_balance' };
         default:
             return {};
     }

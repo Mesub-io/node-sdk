@@ -1494,13 +1494,13 @@ describe('the widget routes: one subscription in full', () => {
             {
                 attempted_at: at(1),
                 outcome: 'rejected',
-                reason: 'insufficient-balance',
+                reason: 'insufficient_balance',
                 signature: 'sig_rejected',
                 retry: true,
                 retry_number: 1,
                 retries_allowed: 3,
             },
-            { attempted_at: at(2), outcome: 'skipped', reason: 'wrong-delegate', signature: null },
+            { attempted_at: at(2), outcome: 'skipped', reason: 'program_4', signature: null },
         ]);
         const before = fake.requests.length;
 
@@ -1527,7 +1527,7 @@ describe('the widget routes: one subscription in full', () => {
                 outcome: 'rejected',
                 amount: '9990000',
                 amount_usd: '9.99',
-                reason: 'insufficient-balance',
+                reason: 'insufficient_balance',
                 signature: 'sig_rejected',
                 retry: true,
                 retry_number: 1,
@@ -1539,7 +1539,7 @@ describe('the widget routes: one subscription in full', () => {
                 outcome: 'skipped',
                 amount: '9990000',
                 amount_usd: '9.99',
-                reason: 'wrong-delegate',
+                reason: 'program_4',
                 signature: null,
                 retry: false,
                 retry_number: null,
@@ -2005,7 +2005,7 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
         fake.setAttempts(id, [
             { attempted_at: at(30), signature: 'sig_first' },
             { attempted_at: at(0), signature: 'sig_last', retry: true, retry_number: 1 },
-            { attempted_at: at(1), outcome: 'skipped', reason: 'wrong-delegate', signature: null },
+            { attempted_at: at(1), outcome: 'skipped', reason: 'program_4', signature: null },
         ]);
         const before = fake.requests.length;
 

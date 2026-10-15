@@ -213,7 +213,7 @@ describe('FakeMesub', () => {
 
         const set = fake.setAttempts(id, [
             {},
-            { outcome: 'rejected', reason: 'insufficient-balance' },
+            { outcome: 'rejected', reason: 'insufficient_balance' },
         ]);
 
         expect(set[0]).toMatchObject({
@@ -273,7 +273,7 @@ describe('FakeMesub', () => {
         const set = fake.setAttempts(id, [
             { attempted_at: day(1) },
             { attempted_at: day(3), retry: true, retry_number: 2, retries_allowed: 3 },
-            { attempted_at: day(2), outcome: 'skipped', reason: 'insufficient-balance' },
+            { attempted_at: day(2), outcome: 'skipped', reason: 'insufficient_balance' },
             ...[4, 5, 6, 7].map((n) => ({ attempted_at: day(n) })),
         ]);
 

@@ -1860,7 +1860,7 @@ describe('subscriptions.attempts', () => {
     it('takes an attempt with no period, no signature and a reason', async () => {
         const blocked = attempt({
             outcome: 'blocked',
-            reason: 'fee-payer-empty',
+            reason: 'solana_7050005',
             signature: null,
             period_start: null,
         });

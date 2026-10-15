@@ -80,7 +80,7 @@ const DETAILS: Record<string, Record<string, unknown>> = {
         signature: '5h3sig',
     },
     'subscription.payment_failed': {
-        reason: 'insufficient-balance',
+        reason: 'insufficient_balance',
         amount: '9990000',
         mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
         period_start: '2026-01-31T00:00:00.000Z',
@@ -90,7 +90,7 @@ const DETAILS: Record<string, Record<string, unknown>> = {
         retries_left: 2,
         retry_mode: 'scheduled',
     },
-    'subscription.stopped': { reason: 'grace-ended' },
+    'subscription.stopped': { reason: 'retry_deadline_passed' },
     'subscription.renewal_upcoming': {
         can_pay: false,
         renewal_issue: 'balance',
@@ -869,7 +869,7 @@ describe('testing: signing webhooks', () => {
 
         const { body: raw, headers } = await fake.webhook('subscription.stopped', {
             subscription: { status: 'stopped', access: false, external_id: 'user_42' },
-            detail: { reason: 'grace-ended' },
+            detail: { reason: 'retry_deadline_passed' },
             created_at: '2026-02-01T00:00:00.000Z',
             id: 'msg_given',
             timestamp: NOW - 10,
@@ -883,7 +883,7 @@ describe('testing: signing webhooks', () => {
                 status: 'stopped',
                 access: false,
                 external_id: 'user_42',
-                detail: { reason: 'grace-ended' },
+                detail: { reason: 'retry_deadline_passed' },
             },
         });
         expect(headers['webhook-timestamp']).toBe(String(NOW - 10));

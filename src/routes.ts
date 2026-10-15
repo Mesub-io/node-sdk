@@ -184,7 +184,11 @@ export interface WidgetPayment {
      * until Mesub priced it, and from a Mesub that does not say.
      */
     amount_usd: string | null;
-    /** Mesub's short reason, null on a paid one. */
+    /**
+     * Mesub's short reason, null on a paid one, as on `ServedAttempt`: snake
+     * case, an open string with the `program_${number}` and
+     * `solana_${number}` families.
+     */
     reason: string | null;
     /** The transaction that paid. Null on every outcome but `paid`. */
     signature: string | null;

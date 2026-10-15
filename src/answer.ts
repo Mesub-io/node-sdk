@@ -79,6 +79,13 @@ export type PullOutcome = 'paid' | 'skipped' | 'rejected' | 'blocked';
 /** One pull attempt, newest first, as the subscriber it concerns may see it. */
 export interface ServedAttempt {
     outcome: PullOutcome;
+    /**
+     * Mesub's short reason, null on a paid one: snake case
+     * (`insufficient_balance`) since Mesub-io/backend#475. An open string:
+     * besides the named ones, two families carry a code, `program_${number}`
+     * (a program refused the transfer, `program_4`) and `solana_${number}`
+     * (any other failure, `solana_7050005`), and new names get added.
+     */
     reason: string | null;
     /** In the mint's smallest unit, as a string: a u64 does not survive JSON. */
     amount: string;
