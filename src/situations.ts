@@ -12,7 +12,7 @@
  * does not always serve: it is shown when every placeholder in it has a
  * value, and left out otherwise, so the sentence stays true without it.
  */
-import type { AccessAnswer, BlockedReason, EndReason, LateReason } from './answer.js';
+import type { AccessAnswer, BlockedReason, EndReason, LateReason, StopReason } from './answer.js';
 import type { ServerSubscription } from './subscriptions.js';
 
 /** Who acts. */
@@ -53,6 +53,12 @@ export interface SituationActionTemplate {
     readonly confirm?: ConfirmationKey;
     /** Only while the date in this field of the subscription is ahead. */
     readonly until?: 'access_until' | 'retry_deadline';
+    /**
+     * Only while the subscription is `closable` (Mesub-io/backend#402): left
+     * out where Mesub says `closable: false`, its `closable_from` in the
+     * sentence when a date is known.
+     */
+    readonly when?: 'closable';
 }
 
 /**
@@ -93,7 +99,10 @@ const CLOSE = {
     sdk: 'subscriptions.close',
     route: 'POST /v1/subscriptions/:id/close',
     confirm: 'confirm_close',
+    when: 'closable',
 } as const;
+/** A close on a plan that is gone or over: nothing to subscribe to again after it. */
+const CLOSE_OVER = { ...CLOSE, confirm: 'confirm_close_over' } as const;
 const ADD_FUNDS = { by: 'subscriber', action: 'add_funds' } as const;
 /** Does not count as a retry, and doubles the wait before the next one. */
 const RETRY = {
@@ -292,12 +301,24 @@ export const SITUATIONS = {
     stopped: {
         subscriber:
             "Your subscription stopped after missed payments, and your access has ended; Mesub will not take payments for it again. Its subscription account stays open on your wallet, so the plan's owner could still charge it: Cancel if you are not coming back.",
-        // `{stop_cause}`, "retries spent" or "the Free deadline passed", is not served on `/v1`.
+        // `{stop_cause}` from `stop_reason` (`STOP_CAUSES`), left out while it is null.
         merchant:
             "Stopped[: {stop_cause}]. Mesub takes nothing more and access is off. The subscription account stays open on chain, and you, as the plan's owner, could still pull from it, until the subscriber cancels and closes it. The subscriber can come back over it.",
         // Subscribing again restarts it, while it is not cancelled on chain,
-        // the plan's terms are unchanged and the project has a free seat.
-        actions: [CANCEL_BEHIND, SUBSCRIBE],
+        // the plan's terms are unchanged and the project has a free seat. A
+        // close only once Mesub says it is `closable`: cancelled on chain
+        // without Mesub, and past its end.
+        actions: [CANCEL_BEHIND, SUBSCRIBE, CLOSE],
+    },
+    // The wallet closed its subscription authority for good (Mesub-io/backend#394,
+    // #402): nobody can charge it again, and it cannot be restarted. Worded
+    // from the stopped emails' `authority-closed` variants.
+    stopped_authority_closed: {
+        subscriber:
+            "Your wallet's approval for {token} was closed for good, so no payment can go through for this subscription any more: it has stopped, your access is over, and it cannot be restarted. Close it to get your deposit back; you can then subscribe to {plan_name} again.",
+        merchant:
+            "Stopped for good: the subscriber's wallet approval for {token} was closed, so nobody can take payments from this subscription any more, you as the plan's owner included, and the subscriber cannot come back over it. They can close it at once to get their deposit back.",
+        actions: [CLOSE],
     },
 
     // Paused
@@ -340,23 +361,26 @@ export const SITUATIONS = {
     ended_plan_removed: {
         subscriber:
             '{merchant_name} removed {plan_name}, so your subscription has ended and nothing more will be taken.',
+        // Closed through Mesub since Mesub-io/backend#344.
         merchant:
-            "Ended: the plan account was deleted. The subscriber's subscription account may still hold their deposit, and Mesub cannot close it today.",
-        actions: [],
+            "Ended: the plan account was deleted. The subscriber's subscription account may still hold their deposit, which they get back by closing it.",
+        actions: [CLOSE_OVER],
     },
     ended_plan_replaced: {
         subscriber:
             '{merchant_name} replaced {plan_name} with another plan, so this subscription has ended and nothing more will be taken.',
         merchant:
             "Ended: another plan now stands at this plan's address, and this subscription was never signed for it.",
-        actions: [],
+        actions: [CLOSE_OVER],
     },
     ended_plan_ended: {
         // `{plan_ends_at}` is the plan's `ends_at`, not on a subscription.
         subscriber:
             '{plan_name} reached its end date[ ({plan_ends_at})], so your subscription has ended and nothing more will be taken.',
         merchant: 'Ended: the plan passed its end date.',
-        actions: [],
+        // Also read off a running row in the minutes before Mesub ends it,
+        // which is not `closable` yet: the close shows once it is.
+        actions: [CLOSE_OVER],
     },
     ended_unknown: {
         subscriber: 'This subscription has ended, and nothing more will be taken.',
@@ -435,6 +459,8 @@ export const CONFIRMATIONS = {
         'Resume {plan_name}? Nothing is taken now, and nothing will be until {merchant_name} unpauses it.',
     confirm_close:
         'Close {plan_name}? This deletes its subscription account and returns its deposit to your wallet; you can then subscribe again.',
+    confirm_close_over:
+        'Close {plan_name}? This deletes its subscription account and returns its deposit to your wallet.',
 } as const;
 
 /** Shown beside every sentence, which therefore need not repeat it. */
@@ -518,6 +544,15 @@ const END_REASONS: Record<EndReason, keyof typeof SITUATIONS> = {
 const LATE_REASONS: Record<Exclude<LateReason, 'insufficient_balance'>, keyof typeof SITUATIONS> = {
     approval_revoked: 'unpaid_approval_revoked',
     authority_closed: 'unpaid_authority_closed',
+};
+
+/**
+ * What `{stop_cause}` reads for each reason that leaves the subscription to
+ * come back over. `authority_closed` has a situation of its own.
+ */
+const STOP_CAUSES: Record<Exclude<StopReason, 'authority_closed'>, string> = {
+    out_of_retries: 'every retry of the missed payment failed',
+    retry_deadline_passed: 'the last day to pay the missed payment passed',
 };
 
 const BLOCKED_REASONS: Record<BlockedReason, keyof typeof SITUATIONS> = {
@@ -607,8 +642,12 @@ export function situationOf(input: Explainable): SituationKey {
             return input.access_until != null && input.next_charge_at == null
                 ? 'active_last_period'
                 : 'active';
-        case 'stopped':
-            return 'stopped';
+        case 'stopped': {
+            const reason: string | null = input.stop_reason ?? null;
+            if (reason === 'authority_closed') return 'stopped_authority_closed';
+            // A reason newer than this release may not leave it to come back over.
+            return reason === null || Object.hasOwn(STOP_CAUSES, reason) ? 'stopped' : 'unknown';
+        }
         default:
             return 'unknown';
     }
@@ -651,8 +690,11 @@ export function explain(input: Explainable, options: ExplainOptions = {}): Expla
     const actions: ExplainedAction[] = [];
 
     for (const template of situation.actions) {
-        const { until: field, confirm, ...rest } = template;
+        const { until: field, confirm, when, ...rest } = template;
         const action: ExplainedAction = { ...rest };
+
+        // Undefined only on an answer cached by an older SDK: offered, as the table says.
+        if (when === 'closable' && input.closable === false) continue;
 
         if (field !== undefined) {
             const until = input[field];
@@ -697,12 +739,19 @@ function valuesOf(input: Explainable, options: ExplainOptions): Record<string, s
         // On a subscription only.
         next_retry_number: asNumber('next_retry_number' in input ? input.next_retry_number : null),
         retries_allowed: asNumber('retries_allowed' in input ? input.retries_allowed : null),
+        closable_from: asDate(input.closable_from),
+        stop_cause: stopCauseOf(input.stop_reason),
         // Not served on `/v1` (yet): their segments are left out.
-        closable_from: undefined,
-        stop_cause: undefined,
         plan_ends_at: undefined,
         replaced_at: undefined,
     };
+}
+
+/** The words of a stop reason this release names, undefined for any other. */
+function stopCauseOf(reason: string | null | undefined): string | undefined {
+    return reason != null && Object.hasOwn(STOP_CAUSES, reason)
+        ? STOP_CAUSES[reason as keyof typeof STOP_CAUSES]
+        : undefined;
 }
 
 const PLACEHOLDER = /\{([a-z_]+)\}/g;

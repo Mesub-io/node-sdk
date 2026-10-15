@@ -208,7 +208,12 @@ const CASES = {
         actions: ['subscriber:resume'],
     },
     cancelled_no_access: {
-        input: subscription({ status: 'cancelled', payment_status: 'none', ...OVER }),
+        input: subscription({
+            status: 'cancelled',
+            payment_status: 'none',
+            ...OVER,
+            closable: true,
+        }),
         subscriber:
             'Cancelled. Your last payment was missed, so you have no access, and Mesub will not collect it; you can close the subscription to get your deposit back.',
         merchant:
@@ -216,7 +221,7 @@ const CASES = {
         actions: ['subscriber:close'],
     },
     cancelled_ended: {
-        input: subscription({ status: 'ended', end_reason: 'cancelled', ...OVER }),
+        input: subscription({ status: 'ended', end_reason: 'cancelled', ...OVER, closable: true }),
         subscriber:
             'This subscription has ended. Close it to get your deposit back; you need to close it before subscribing to Pro again.',
         merchant:
@@ -230,6 +235,21 @@ const CASES = {
         merchant:
             "Stopped. Mesub takes nothing more and access is off. The subscription account stays open on chain, and you, as the plan's owner, could still pull from it, until the subscriber cancels and closes it. The subscriber can come back over it.",
         actions: ['subscriber:cancel', 'subscriber:subscribe'],
+    },
+    stopped_authority_closed: {
+        input: subscription({
+            status: 'stopped',
+            payment_status: 'none',
+            ...OVER,
+            late_reason: 'authority_closed',
+            stop_reason: 'authority_closed',
+            closable: true,
+        }),
+        subscriber:
+            "Your wallet's approval for USDC was closed for good, so no payment can go through for this subscription any more: it has stopped, your access is over, and it cannot be restarted. Close it to get your deposit back; you can then subscribe to Pro again.",
+        merchant:
+            "Stopped for good: the subscriber's wallet approval for USDC was closed, so nobody can take payments from this subscription any more, you as the plan's owner included, and the subscriber cannot come back over it. They can close it at once to get their deposit back.",
+        actions: ['subscriber:close'],
     },
     paused: {
         input: subscription({ paused: true, payment_status: 'none', next_charge_at: null }),
@@ -309,27 +329,42 @@ const CASES = {
         actions: ['subscriber:subscribe'],
     },
     ended_plan_removed: {
-        input: subscription({ status: 'ended', end_reason: 'plan_removed', ...OVER }),
+        input: subscription({
+            status: 'ended',
+            end_reason: 'plan_removed',
+            ...OVER,
+            closable: true,
+        }),
         subscriber:
             'Acme removed Pro, so your subscription has ended and nothing more will be taken.',
         merchant:
-            "Ended: the plan account was deleted. The subscriber's subscription account may still hold their deposit, and Mesub cannot close it today.",
-        actions: [],
+            "Ended: the plan account was deleted. The subscriber's subscription account may still hold their deposit, which they get back by closing it.",
+        actions: ['subscriber:close'],
     },
     ended_plan_replaced: {
-        input: subscription({ status: 'ended', end_reason: 'plan_replaced', ...OVER }),
+        input: subscription({
+            status: 'ended',
+            end_reason: 'plan_replaced',
+            ...OVER,
+            closable: true,
+        }),
         subscriber:
             'Acme replaced Pro with another plan, so this subscription has ended and nothing more will be taken.',
         merchant:
             "Ended: another plan now stands at this plan's address, and this subscription was never signed for it.",
-        actions: [],
+        actions: ['subscriber:close'],
     },
     ended_plan_ended: {
-        input: subscription({ status: 'ended', end_reason: 'plan_ended', ...OVER }),
+        input: subscription({
+            status: 'ended',
+            end_reason: 'plan_ended',
+            ...OVER,
+            closable: true,
+        }),
         subscriber:
             'Pro reached its end date, so your subscription has ended and nothing more will be taken.',
         merchant: 'Ended: the plan passed its end date.',
-        actions: [],
+        actions: ['subscriber:close'],
     },
     ended_unknown: {
         input: subscription({ status: 'ended', ...OVER }),
@@ -617,8 +652,12 @@ describe('explain', () => {
         [subscription(), 'Cancel Pro? Nothing more will be taken, and you keep access until'],
         [subscription({ status: 'stopped', ...OVER }), 'Cancel Pro? Your access ends now'],
         [
-            subscription({ status: 'cancelled', ...OVER }),
-            'Close Pro? This deletes its subscription account',
+            subscription({ status: 'cancelled', ...OVER, closable: true }),
+            'Close Pro? This deletes its subscription account and returns its deposit to your wallet; you can then subscribe again.',
+        ],
+        [
+            subscription({ status: 'ended', end_reason: 'plan_ended', ...OVER, closable: true }),
+            'Close Pro? This deletes its subscription account and returns its deposit to your wallet.',
         ],
         [
             subscription({ status: 'cancelled', paused: true }),
@@ -626,6 +665,122 @@ describe('explain', () => {
         ],
     ])('gives the confirmation the action needs', (input, confirm) => {
         expect(explain(input, { names: NAMES, now: NOW }).actions[0]?.confirm).toContain(confirm);
+    });
+
+    // `closable` and `closable_from` (Mesub-io/backend#402) decide the close.
+    describe('closing', () => {
+        const behind = { status: 'cancelled', payment_status: 'none', ...OVER } as const;
+        const actionsOf = (input: Explainable) =>
+            explain(input, { names: NAMES, now: NOW }).actions.map((each) => each.action);
+
+        it('offers no close while Mesub says it is not closable, and dates it when it can', () => {
+            const later = explain(
+                subscription({ ...behind, closable: false, closable_from: UNTIL }),
+                { names: NAMES, now: NOW },
+            );
+
+            expect(later.key).toBe('cancelled_no_access');
+            expect(later.actions).toEqual([]);
+            expect(later.subscriber).toContain(
+                `you can close the subscription from ${UNTIL} to get your deposit back`,
+            );
+            expect(later.merchant).toContain(`The subscriber can close it from ${UNTIL}, and`);
+        });
+
+        it.each([
+            ['cancelled_ended', { status: 'ended', end_reason: 'cancelled' }],
+            ['ended_plan_removed', { status: 'ended', end_reason: 'plan_removed' }],
+            ['stopped_authority_closed', { status: 'stopped', stop_reason: 'authority_closed' }],
+        ] as const)('offers %s no close once Mesub says it cannot be', (key, fields) => {
+            const input = subscription({ ...OVER, ...fields, closable: false });
+
+            expect(situationOf(input)).toBe(key);
+            expect(actionsOf(input)).not.toContain('close');
+        });
+
+        it('offers a stopped one the close once Mesub says it is closable', () => {
+            const stopped = { status: 'stopped', payment_status: 'none', ...OVER } as const;
+
+            expect(actionsOf(subscription(stopped))).toEqual(['cancel', 'subscribe']);
+            expect(actionsOf(subscription({ ...stopped, closable: true }))).toEqual([
+                'cancel',
+                'subscribe',
+                'close',
+            ]);
+        });
+
+        it('offers the close on an answer cached by an older SDK, without closable', () => {
+            const {
+                closable: _,
+                closable_from: __,
+                ...older
+            } = subscription({
+                ...behind,
+            });
+
+            expect(actionsOf(older as ServerSubscription)).toEqual(['close']);
+        });
+
+        it('reads closable alike from an access answer', () => {
+            const ended = { status: 'ended', end_reason: 'cancelled', ...OVER } as const;
+
+            expect(actionsOf(answer({ ...ended, closable: true }))).toEqual(['close']);
+            expect(actionsOf(answer({ ...ended, closable: false }))).toEqual([]);
+        });
+    });
+
+    describe('a stopped subscription', () => {
+        const stopped = { status: 'stopped', payment_status: 'none', ...OVER } as const;
+
+        it.each([
+            ['out_of_retries', 'Stopped: every retry of the missed payment failed. Mesub takes'],
+            [
+                'retry_deadline_passed',
+                'Stopped: the last day to pay the missed payment passed. Mesub takes',
+            ],
+            [null, 'Stopped. Mesub takes'],
+        ] as const)('says why it stopped on %s', (stop_reason, merchant) => {
+            const explained = explain(subscription({ ...stopped, stop_reason }), { names: NAMES });
+
+            expect(explained.key).toBe('stopped');
+            expect(explained.merchant.startsWith(merchant)).toBe(true);
+            expect(explained.missing).toEqual([]);
+        });
+
+        // Today it proposed to subscribe again, which Mesub cannot do over it.
+        it('never offers a comeback once the authority closed for good, only the close', () => {
+            const explained = explain(
+                subscription({ ...stopped, stop_reason: 'authority_closed', closable: true }),
+                { names: NAMES },
+            );
+
+            expect(explained.key).toBe('stopped_authority_closed');
+            expect(explained.actions).toEqual([
+                {
+                    by: 'subscriber',
+                    action: 'close',
+                    sdk: 'subscriptions.close',
+                    route: 'POST /v1/subscriptions/:id/close',
+                    confirm:
+                        'Close Pro? This deletes its subscription account and returns its deposit to your wallet; you can then subscribe again.',
+                },
+            ]);
+        });
+
+        it('reads a stop reason newer than this release as unknown', () => {
+            const explained = explain(
+                subscription({ ...stopped, stop_reason: 'plan_owner_said_so' as never }),
+            );
+
+            expect(explained.key).toBe('unknown');
+            expect(explained.actions).toEqual([]);
+        });
+
+        it('takes a stop reason named like an object key for none it knows', () => {
+            expect(
+                situationOf(subscription({ ...stopped, stop_reason: 'toString' as never })),
+            ).toBe('unknown');
+        });
     });
 
     it('names the plan by its slug, and keeps a placeholder nothing filled', () => {
