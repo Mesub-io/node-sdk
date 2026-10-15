@@ -501,9 +501,14 @@ export interface Explanation {
 /** What `explain` reads: an answer of `/v1/access` or a subscription. */
 export type Explainable = AccessAnswer | ServerSubscription;
 
+/**
+ * `closed_elsewhere` keeps the situation `authority_closed` had before
+ * Mesub-io/backend#476 renamed it, id included: both read as one.
+ */
 const END_REASONS: Record<EndReason, keyof typeof SITUATIONS> = {
     cancelled: 'cancelled_ended',
     closed: 'ended_closed',
+    closed_elsewhere: 'ended_authority_closed',
     authority_closed: 'ended_authority_closed',
     plan_removed: 'ended_plan_removed',
     plan_replaced: 'ended_plan_replaced',

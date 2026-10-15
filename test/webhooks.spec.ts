@@ -185,7 +185,7 @@ describe('verifyWebhook', () => {
         expect(event.data).toEqual({ ...SUBSCRIPTION, detail: {} });
     });
 
-    it.each(['plan_removed', 'authority_closed', 'closed', 'not_known_yet'])(
+    it.each(['plan_removed', 'closed_elsewhere', 'authority_closed', 'closed', 'not_known_yet'])(
         'hands back an ended subscription whose end_reason is %s',
         async (end_reason) => {
             const ended = {

@@ -1456,6 +1456,7 @@ describe('subscriptions.retrieve', () => {
         'plan_removed',
         'plan_replaced',
         'plan_ended',
+        'closed_elsewhere',
         'authority_closed',
         'closed',
     ] as const)('takes an ended subscription whose end_reason is %s', async (end_reason) => {

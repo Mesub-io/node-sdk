@@ -32,10 +32,19 @@ export type PaymentStatus = 'paid' | 'late' | 'none';
 /**
  * Why a subscription ended (Mesub-io/backend#236): cancelled and past its end
  * date, the plan deleted, replaced by another at its address or past its own
- * end, the wallet's authorisation closed without Mesub or through it.
+ * end, its subscription account closed outside Mesub (`closed_elsewhere`) or
+ * through it (`closed`). `authority_closed` is what Mesub served for
+ * `closed_elsewhere` before Mesub-io/backend#476: read the same way, it goes
+ * once no Mesub serves it.
  */
 export type EndReason =
-    'cancelled' | 'plan_removed' | 'plan_replaced' | 'plan_ended' | 'authority_closed' | 'closed';
+    | 'cancelled'
+    | 'plan_removed'
+    | 'plan_replaced'
+    | 'plan_ended'
+    | 'closed_elsewhere'
+    | 'authority_closed'
+    | 'closed';
 
 /**
  * Why a payment is late (Mesub-io/backend#264), as the last failed pull found
