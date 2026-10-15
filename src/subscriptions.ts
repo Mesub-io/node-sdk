@@ -955,8 +955,13 @@ function pathOf(id: string): string {
     return `/v1/subscriptions/${id}`;
 }
 
-/** Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never a subscription's. */
-function routeMissing(error: MesubError): boolean {
+/**
+ * Mesub's own 404 for a route it does not have: `Cannot GET /v1/...`, never
+ * a subscription's nor an event's.
+ *
+ * @internal
+ */
+export function routeMissing(error: MesubError): boolean {
     const { message } = (error.body ?? {}) as { message?: unknown };
 
     return (
