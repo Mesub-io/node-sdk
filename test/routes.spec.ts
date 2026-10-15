@@ -1015,6 +1015,7 @@ describe('the widget routes: a fresh transaction to sign', () => {
             subscription: { id, status: 'pending' },
             transaction: expect.any(String),
             last_valid_block_height: expect.any(String),
+            transaction_expires_at: expect.any(String),
             costs: {
                 rent: { subscription: '0', authority: null, total: '0' },
                 fee: { signatures: 2, per_signature: '0', priority: '0', total: '0' },

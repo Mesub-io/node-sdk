@@ -140,11 +140,13 @@ type Held = Omit<AccessAnswer, 'revalidate_after'> & { revalidate_after?: number
 
 /** What Mesub answers a customer with nothing on a plan. */
 const NOTHING: Omit<Held, 'wallet' | 'plan'> = {
+    subscription_id: null,
     access: false,
     status: 'none',
     paused: false,
     end_reason: null,
     late_reason: null,
+    stop_reason: null,
     payment_status: 'none',
     blocked_since: null,
     blocked_reason: null,
@@ -156,6 +158,8 @@ const NOTHING: Omit<Held, 'wallet' | 'plan'> = {
     next_charge_at: null,
     next_retry_at: null,
     retry_deadline: null,
+    closable: false,
+    closable_from: null,
 };
 
 /** The freshest and the stalest Mesub serves an answer, in seconds (the back's `AccessService`). */
@@ -173,6 +177,8 @@ const FAKE_WEBHOOK_SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
 const FAKE_WALLET = '11111111111111111111111111111111';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const PERIOD_MS = 30 * 24 * 3600 * 1000;
+/** About 150 blocks of 200 ms: how long Mesub says a transaction it built lives. */
+const TRANSACTION_LIFE_MS = 30_000;
 const REASONS: Record<number, string> = {
     400: 'Bad Request',
     401: 'Unauthorized',
@@ -440,6 +446,7 @@ export class FakeMesub {
             paused: false,
             end_reason: null,
             late_reason: null,
+            stop_reason: null,
             access: true,
             payment_status: 'paid',
             blocked_since: null,
@@ -454,6 +461,8 @@ export class FakeMesub {
             next_retry_number: null,
             retries_allowed: null,
             access_until: null,
+            closable: false,
+            closable_from: null,
             created_at: now,
             confirmed_at: now,
             ...fields,
@@ -833,6 +842,7 @@ export class FakeMesub {
         const answer: WalletTransaction = {
             transaction: btoa(`fake ${action} transaction`),
             last_valid_block_height: '0',
+            transaction_expires_at: expiresAt(),
         };
         return Response.json(answer, { status: 201 });
     }
@@ -1016,6 +1026,11 @@ function bounded<T extends Dated>(row: T, end: string | null): T {
     };
 }
 
+/** About half a minute from now, as Mesub dates a transaction's `last_valid_block_height`. */
+function expiresAt(): string {
+    return new Date(Date.now() + TRANSACTION_LIFE_MS).toISOString();
+}
+
 /** What `create` and `transaction` hand out for a pending subscription: nothing a chain would take. */
 function handedOut(subscription: ServerSubscription): SubscribeTransaction {
     const zero = '0';
@@ -1024,6 +1039,7 @@ function handedOut(subscription: ServerSubscription): SubscribeTransaction {
         subscription: { id: subscription.id, status: 'pending' },
         transaction: btoa('fake transaction'),
         last_valid_block_height: zero,
+        transaction_expires_at: expiresAt(),
         costs: {
             rent: { subscription: zero, authority: null, total: zero },
             fee: { signatures: 2, per_signature: zero, priority: zero, total: zero },

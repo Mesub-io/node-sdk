@@ -18,6 +18,7 @@ export type {
     PaymentStatus,
     PullOutcome,
     ServedAttempt,
+    StopReason,
     SubscriptionStatus,
 } from './answer.js';
 export type { Plan, Plans, PlanStatus, PlanToken } from './plans.js';
@@ -25,6 +26,7 @@ export type { Subscriptions } from './subscriptions.js';
 export type {
     AttemptsParams,
     ConfirmOptions,
+    ConfirmReasonCode,
     ConfirmParams,
     ConfirmResult,
     ListParams,

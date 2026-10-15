@@ -24,6 +24,7 @@ function subscription(overrides: Partial<ServerSubscription> = {}): ServerSubscr
         paused: false,
         end_reason: null,
         late_reason: null,
+        stop_reason: null,
         access: true,
         payment_status: 'paid',
         blocked_since: null,
@@ -40,6 +41,8 @@ function subscription(overrides: Partial<ServerSubscription> = {}): ServerSubscr
         next_retry_number: null,
         retries_allowed: null,
         access_until: '2026-11-01T12:00:00.000Z',
+        closable: false,
+        closable_from: null,
         created_at: '2026-10-02T11:58:00.000Z',
         confirmed_at: '2026-10-02T12:00:03.000Z',
         ...overrides,
@@ -84,6 +87,7 @@ describe('subscriptions.create', () => {
         subscription: { id: 'sub_1', status: 'pending' },
         transaction: 'AQAAAA==',
         last_valid_block_height: '312345678',
+        transaction_expires_at: '2026-10-02T12:00:30.000Z',
         costs: {
             rent: { subscription: '2039280', authority: null, total: '2039280' },
             fee: { signatures: 2, per_signature: '5000', priority: '0', total: '10000' },
@@ -237,6 +241,7 @@ describe('subscriptions.transaction', () => {
         subscription: { id: 'sub_1', status: 'pending' },
         transaction: 'AgAAAA==',
         last_valid_block_height: '312345900',
+        transaction_expires_at: '2026-10-02T12:00:30.000Z',
         costs: {
             rent: { subscription: '2039280', authority: null, total: '2039280' },
             fee: { signatures: 2, per_signature: '5000', priority: '0', total: '10000' },
@@ -252,6 +257,16 @@ describe('subscriptions.transaction', () => {
         expect(calls[0]!.init.method).toBe('POST');
         expect(calls[0]!.url.href).toBe('https://api.test/v1/subscriptions/sub_1/transaction');
         expect(calls[0]!.init.body).toBeUndefined();
+    });
+
+    it('reads an answer from a back that predates transaction_expires_at as null', async () => {
+        const { transaction_expires_at: _, ...older } = answer;
+        const { fetch } = mockFetch(json(201, older));
+
+        await expect(mesub(fetch).subscriptions.transaction('sub_1')).resolves.toEqual({
+            ...older,
+            transaction_expires_at: null,
+        });
     });
 
     it('refuses an id that could rewrite the path, sending nothing', async () => {
@@ -373,6 +388,11 @@ describe('subscriptions.transaction', () => {
             'a block height as a number',
             { ...answer, last_valid_block_height: 312345900 },
             'last_valid_block_height is not a string',
+        ],
+        [
+            'an expiry that is no date',
+            { ...answer, transaction_expires_at: 'soon' },
+            'transaction_expires_at is not a date or null',
         ],
         ['no costs', { ...answer, costs: undefined }, 'costs is missing'],
         ['a subscription alone', subscription(), 'subscription is missing'],
@@ -1027,6 +1047,7 @@ describe.each(ACTIONS)('subscriptions.%s', (action) => {
     const unsigned: WalletTransaction = {
         transaction: 'AQAAAA==',
         last_valid_block_height: '312345678',
+        transaction_expires_at: '2026-10-02T12:00:30.000Z',
     };
     const route = `POST /v1/subscriptions/:id/${action}`;
 
@@ -1126,6 +1147,11 @@ describe.each(ACTIONS)('subscriptions.%s', (action) => {
             { ...unsigned, last_valid_block_height: 312345678 },
             'last_valid_block_height is not a string',
         ],
+        [
+            'an expiry that is no date',
+            { ...unsigned, transaction_expires_at: 30 },
+            'transaction_expires_at is not a date or null',
+        ],
         ['a list', [], 'the body is not an object'],
         ['a subscription instead', subscription(), 'transaction is missing'],
     ])('throws unexpected on an answer with %s', async (_label, body, problem) => {
@@ -1173,10 +1199,26 @@ describe.each([
     });
 
     it("answers the subscription as it was, with Mesub's reason, when nothing landed", async () => {
-        const body = { subscription: subscription(), reason: 'The transaction failed on chain.' };
+        const body = {
+            subscription: subscription(),
+            reason: 'The transaction failed on chain.',
+            reason_code: 'transaction_failed',
+        };
         const { fetch } = mockFetch(json(201, body));
 
         await expect(confirm(mesub(fetch), action)).resolves.toEqual(body);
+    });
+
+    // reason_code since Mesub-io/backend#470: an older back sends reason alone,
+    // and a code newer than this release is handed on.
+    it('takes a reason without a code, and a code this release does not know', async () => {
+        const older = { subscription: subscription(), reason: 'The transaction failed on chain.' };
+        const newer = { ...older, reason_code: 'chain_on_fire' };
+        const { fetch } = mockFetch(json(201, older), json(201, newer));
+        const client = mesub(fetch);
+
+        await expect(confirm(client, action)).resolves.toEqual(older);
+        await expect(confirm(client, action)).resolves.toEqual(newer);
     });
 
     it('refuses an id that could rewrite the path, and an empty one', async () => {
@@ -1269,6 +1311,11 @@ describe.each([
             'a reason that is not a string',
             { subscription: settled, reason: 3 },
             'reason is not a string',
+        ],
+        [
+            'a reason code that is not a string',
+            { subscription: settled, reason: 'Nothing landed.', reason_code: 3 },
+            'reason_code is not a string',
         ],
     ])('throws unexpected on an answer with %s', async (_label, body, problem) => {
         const { fetch } = mockFetch(json(201, body));
@@ -1410,6 +1457,40 @@ describe('subscriptions.retrieve', () => {
         await expect(client.subscriptions.list({ wallet: WALLET })).resolves.toEqual({
             data: [subscription()],
             has_more: false,
+        });
+    });
+
+    // Served since Mesub-io/backend#402: a back from before still answers.
+    it('reads missing stop_reason, closable and closable_from, from a back that predates them', async () => {
+        const {
+            stop_reason: _,
+            closable: __,
+            closable_from: ___,
+            ...older
+        } = subscription({ closable: false });
+        const { fetch } = mockFetch(json(200, older));
+
+        await expect(mesub(fetch).subscriptions.retrieve('sub_1')).resolves.toEqual(
+            subscription({ stop_reason: null, closable: false, closable_from: null }),
+        );
+    });
+
+    it('hands on a stop reason newer than this release, and refuses a closable that is not a boolean', async () => {
+        const newer = subscription({
+            status: 'stopped',
+            access: false,
+            stop_reason: 'plan_owner_said_so' as never,
+        });
+        const { fetch } = mockFetch(
+            json(200, newer),
+            json(200, subscription({ closable: 'yes' as never })),
+        );
+        const client = mesub(fetch);
+
+        await expect(client.subscriptions.retrieve('sub_1')).resolves.toEqual(newer);
+        await expect(client.subscriptions.retrieve('sub_1')).rejects.toMatchObject({
+            code: 'unexpected',
+            message: expect.stringContaining('closable is not a boolean'),
         });
     });
 
@@ -2009,11 +2090,13 @@ describe('the access cache once a subscription lands', () => {
         return {
             wallet: WALLET,
             plan: 'pro',
+            subscription_id: null,
             access: false,
             status: 'none',
             paused: false,
             end_reason: null,
             late_reason: null,
+            stop_reason: null,
             payment_status: 'none',
             blocked_since: null,
             blocked_reason: null,
@@ -2025,6 +2108,8 @@ describe('the access cache once a subscription lands', () => {
             next_charge_at: null,
             next_retry_at: null,
             retry_deadline: null,
+            closable: false,
+            closable_from: null,
             revalidate_after: 60,
             ...over,
         };

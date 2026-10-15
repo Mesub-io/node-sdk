@@ -49,11 +49,14 @@ const FIELDS: Record<
 > = {
     wallet: 'string|null',
     plan: 'string',
+    // Read as null, and false, from a back that predates them (Mesub-io/backend#469, #402).
+    subscription_id: 'string|null',
     access: 'boolean',
     status: 'string',
     paused: 'boolean',
     end_reason: 'string|null',
     late_reason: 'string|null',
+    stop_reason: 'string|null',
     payment_status: 'string',
     // Read as null from a back that predates them (Mesub-io/backend#398).
     blocked_since: 'string|null',
@@ -66,6 +69,8 @@ const FIELDS: Record<
     next_charge_at: 'string|null',
     next_retry_at: 'string|null',
     retry_deadline: 'string|null',
+    closable: 'boolean',
+    closable_from: 'string|null',
     revalidate_after: 'number',
 };
 
@@ -79,6 +84,8 @@ const SUBSCRIPTION_FIELDS: Record<
     paused: 'boolean',
     end_reason: 'string|null',
     late_reason: 'string|null',
+    // Read as null, and false, from a back that predates them (Mesub-io/backend#402).
+    stop_reason: 'string|null',
     access: 'boolean',
     payment_status: 'string',
     // Read as null from a back that predates them (Mesub-io/backend#398).
@@ -97,6 +104,8 @@ const SUBSCRIPTION_FIELDS: Record<
     next_retry_number: 'number|null',
     retries_allowed: 'number|null',
     access_until: 'string|null',
+    closable: 'boolean',
+    closable_from: 'string|null',
     created_at: 'string',
     confirmed_at: 'string|null',
 };

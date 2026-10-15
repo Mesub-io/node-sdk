@@ -39,11 +39,13 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
     return {
         wallet: WALLET,
         plan: 'pro',
+        subscription_id: 'sub_1',
         access: true,
         status: 'active',
         paused: false,
         end_reason: null,
         late_reason: null,
+        stop_reason: null,
         payment_status: 'paid',
         blocked_since: null,
         blocked_reason: null,
@@ -55,6 +57,8 @@ function answer(over: Partial<AccessAnswer> = {}): AccessAnswer {
         next_charge_at: null,
         next_retry_at: null,
         retry_deadline: null,
+        closable: false,
+        closable_from: null,
         revalidate_after: 60,
         ...over,
     };

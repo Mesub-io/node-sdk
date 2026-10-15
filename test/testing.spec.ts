@@ -1182,6 +1182,7 @@ describe('FakeMesub', () => {
             expect(unsigned).toEqual({
                 transaction: expect.any(String),
                 last_valid_block_height: expect.any(String),
+                transaction_expires_at: expect.any(String),
             });
             // Nothing moves until the wallet's signature is confirmed.
             await expect(mesub.subscriptions.retrieve(id)).resolves.toMatchObject({

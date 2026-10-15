@@ -40,6 +40,7 @@ const SUBSCRIPTION = {
     paused: false,
     end_reason: null,
     late_reason: null,
+    stop_reason: null,
     access: true,
     payment_status: 'paid',
     blocked_since: null,
@@ -56,6 +57,8 @@ const SUBSCRIPTION = {
     next_retry_number: null,
     retries_allowed: null,
     access_until: '2026-01-31T00:00:00.000Z',
+    closable: false,
+    closable_from: null,
     created_at: '2026-01-01T00:00:00.000Z',
     confirmed_at: '2026-01-01T00:00:00.000Z',
 };

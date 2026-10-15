@@ -62,6 +62,16 @@ const END_REASON: Field = { ...STRING_OR_NULL, absent: null };
 const BLOCKED_SINCE: Field = { ...DATE_OR_NULL, absent: null };
 const BLOCKED_REASON: Field = { ...STRING_OR_NULL, absent: null };
 /**
+ * `subscription_id` (Mesub-io/backend#469), `stop_reason`, `closable` and
+ * `closable_from` (Mesub-io/backend#402), and `transaction_expires_at`
+ * (Mesub-io/backend#471): null, and false, before them.
+ */
+const SUBSCRIPTION_ID: Field = { ...STRING_OR_NULL, absent: null };
+const STOP_REASON: Field = { ...STRING_OR_NULL, absent: null };
+const CLOSABLE: Field = { ...BOOLEAN, absent: false };
+const CLOSABLE_FROM: Field = { ...DATE_OR_NULL, absent: null };
+const TRANSACTION_EXPIRES_AT: Field = { ...DATE_OR_NULL, absent: null };
+/**
  * A plan's `token` and `amount_usd`, and an attempt's `amount_usd`, served
  * since Mesub-io/backend#433: an unverified token with nothing known, and
  * null, before it.
@@ -99,11 +109,13 @@ const ANSWER = {
     /** Null asked by external id or email, for a customer with nothing on that plan. */
     wallet: STRING_OR_NULL,
     plan: STRING,
+    subscription_id: SUBSCRIPTION_ID,
     access: BOOLEAN,
     status: STRING,
     paused: PAUSED,
     end_reason: END_REASON,
     late_reason: STRING_OR_NULL,
+    stop_reason: STOP_REASON,
     payment_status: STRING,
     blocked_since: BLOCKED_SINCE,
     blocked_reason: BLOCKED_REASON,
@@ -115,6 +127,8 @@ const ANSWER = {
     next_charge_at: DATE_OR_NULL,
     next_retry_at: DATE_OR_NULL,
     retry_deadline: RETRY_DEADLINE,
+    closable: CLOSABLE,
+    closable_from: CLOSABLE_FROM,
     revalidate_after: SECONDS,
 } satisfies Record<Exclude<keyof AccessAnswer, 'attempts'>, Field>;
 
@@ -189,6 +203,7 @@ const SUBSCRIPTION = {
     paused: PAUSED,
     end_reason: END_REASON,
     late_reason: STRING_OR_NULL,
+    stop_reason: STOP_REASON,
     access: BOOLEAN,
     payment_status: STRING,
     blocked_since: BLOCKED_SINCE,
@@ -205,6 +220,8 @@ const SUBSCRIPTION = {
     next_retry_number: RETRY_COUNT,
     retries_allowed: RETRY_COUNT,
     access_until: DATE_OR_NULL,
+    closable: CLOSABLE,
+    closable_from: CLOSABLE_FROM,
     created_at: DATE,
     confirmed_at: DATE_OR_NULL,
 } satisfies Record<keyof ServerSubscription, Field>;
@@ -246,6 +263,7 @@ const SUBSCRIBE_TRANSACTION = {
     subscription: OBJECT,
     transaction: STRING,
     last_valid_block_height: STRING,
+    transaction_expires_at: TRANSACTION_EXPIRES_AT,
     costs: OBJECT,
     terms: OBJECT,
 } satisfies Record<keyof SubscribeTransaction, Field>;
@@ -411,7 +429,7 @@ export function confirmResultFrom(body: unknown, route: string): ConfirmResult {
     const problem =
         problemWith(body, { subscription: OBJECT }) ??
         problemWith((body as ConfirmResult).subscription, SUBSCRIPTION, 'subscription') ??
-        reasonProblem((body as ConfirmResult).reason);
+        reasonProblem(body as ConfirmResult);
 
     if (problem !== null) throw unreadable(problem, body, route, 201);
 
@@ -421,6 +439,7 @@ export function confirmResultFrom(body: unknown, route: string): ConfirmResult {
 const WALLET_TRANSACTION = {
     transaction: STRING,
     last_valid_block_height: STRING,
+    transaction_expires_at: TRANSACTION_EXPIRES_AT,
 } satisfies Record<keyof WalletTransaction, Field>;
 
 /** What `cancel`, `resume` or `close` answered: the transaction the wallet signs and sends. */
@@ -432,8 +451,17 @@ export function walletTransactionFrom(body: unknown, route: string): WalletTrans
     return body as WalletTransaction;
 }
 
-function reasonProblem(reason: unknown): string | null {
-    return reason === undefined || typeof reason === 'string' ? null : 'reason is not a string';
+/**
+ * `reason` and `reason_code` (Mesub-io/backend#470), each a string when
+ * present. One without the other is let through: a back that predates
+ * `reason_code` sends `reason` alone.
+ */
+function reasonProblem({ reason, reason_code }: ConfirmResult): string | null {
+    if (reason !== undefined && typeof reason !== 'string') return 'reason is not a string';
+    if (reason_code !== undefined && typeof reason_code !== 'string') {
+        return 'reason_code is not a string';
+    }
+    return null;
 }
 
 /**
