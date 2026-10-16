@@ -11,9 +11,12 @@ have the wallet sign.
 **[Read the docs](https://docs.mesub.io)** for the walkthroughs. This page is
 the short version and the reference of the options.
 
-> **Status: early, 0.x, not on npm yet.** The API may still change between
-> minor versions. See the [board](https://github.com/orgs/Mesub-io/projects/4)
-> for what is next.
+[![npm](https://img.shields.io/npm/v/@mesub/node)](https://www.npmjs.com/package/@mesub/node)
+
+> **Status: early, 0.x.** The API may still change between minor versions:
+> `npm update` takes patches (0.1.x), a new minor (0.2.0) takes
+> `npm install @mesub/node@latest`. See the
+> [board](https://github.com/orgs/Mesub-io/projects/4) for what is next.
 
 ## Install
 
@@ -21,7 +24,9 @@ the short version and the reference of the options.
 npm install @mesub/node
 ```
 
-Node 22 or later. No runtime dependency.
+Node 22 or later. No runtime dependency. Every release is built by GitHub
+Actions from a tagged commit and published with a provenance statement:
+`npm audit signatures` verifies it.
 
 ## How it fits
 
