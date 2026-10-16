@@ -1686,7 +1686,9 @@ function detailOf(
             };
         case 'subscription.ended':
             // A cancellation reaching its end says when (Mesub-io/backend#509).
-            return data.end_reason === 'cancelled' ? { changed_at: start } : {};
+            return data.end_reason === 'cancelled'
+                ? { changed_at: start, end_reason: 'cancelled' }
+                : {};
         default:
             return {};
     }

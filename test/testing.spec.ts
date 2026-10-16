@@ -1562,7 +1562,7 @@ describe('FakeMesub', () => {
             });
             const paused = fake.addEvent('subscription.paused');
 
-            expect(ended.detail).toEqual({ changed_at: ended.created_at });
+            expect(ended.detail).toEqual({ changed_at: ended.created_at, end_reason: 'cancelled' });
             expect(closed.detail).toEqual({});
             expect(paused.data).toMatchObject({ paused: true, next_charge_at: null });
         });

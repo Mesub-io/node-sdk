@@ -514,7 +514,7 @@ describe('verifyWebhook', () => {
     it('reads an ended event of a cancellation that reached its end, and types its changed_at', async () => {
         const raw = body(
             'subscription.ended',
-            { changed_at: '2026-01-31T00:00:00.000Z' },
+            { changed_at: '2026-01-31T00:00:00.000Z', end_reason: 'cancelled' },
             {
                 ...SUBSCRIPTION,
                 status: 'ended',
@@ -529,8 +529,9 @@ describe('verifyWebhook', () => {
         );
 
         if (event.type !== 'subscription.ended') throw new Error('narrowed wrong');
-        const changed: string | undefined = event.detail.changed_at;
-        expect(changed).toBe('2026-01-31T00:00:00.000Z');
+        const { changed_at, end_reason }: { changed_at?: string; end_reason?: 'cancelled' } =
+            event.detail;
+        expect([changed_at, end_reason]).toEqual(['2026-01-31T00:00:00.000Z', 'cancelled']);
     });
 
     it.each([
@@ -538,6 +539,7 @@ describe('verifyWebhook', () => {
         ['created', { first_payment: { mint: null, signature: null } }],
         ['created', { first_payment: 'paid' }],
         ['ended', { changed_at: 'later' }],
+        ['ended', { changed_at: NOW_ISO, end_reason: 4 }],
     ])('throws unexpected for a %s detail of the wrong shape: %j', async (type, detail) => {
         const raw = body(`subscription.${type}`, detail);
 

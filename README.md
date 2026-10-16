@@ -453,8 +453,8 @@ keeps the access cache as it is.
 
 A cancellation reaching its end reads `ended` from its `access_until` on. Once
 the access events are on, its `subscription.access_revoked` comes at the
-expiry, then `subscription.ended` with `end_reason: 'cancelled'` and
-`detail.changed_at` (the expiry), usually within half an hour. Closing it later
+expiry, then `subscription.ended` with `end_reason: 'cancelled'` (in `data`
+and `detail`) and `detail.changed_at` (the expiry), usually within half an hour. Closing it later
 sends `subscription.ended` again, `end_reason: 'closed'`: one subscription can
 end twice, so key what you do on `end_reason`, not on the event alone.
 

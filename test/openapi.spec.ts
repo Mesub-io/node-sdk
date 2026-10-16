@@ -19,9 +19,8 @@ import type { WebhookEventType } from '../src/webhooks.js';
  * one it leaves out. The fake is built from the SDK's own types, so this is
  * where the types and the back's contract meet without a back running.
  */
-// Until Mesub-io/backend#511 is rebased on #509: main at 903252a (#509), with
-// #511's changes (4c69034, the access events' detail) merged in by git merge-file.
-const BACKEND_COMMIT = '903252aac2aae07f0c33720037511952773119c3';
+// Mesub-io/backend#511 (branch 510-access-events-journal), on main with #509.
+const BACKEND_COMMIT = 'bb1c9475571992f12f4f7634ad618ea127de111a';
 
 interface Spec {
     info: { version: string };

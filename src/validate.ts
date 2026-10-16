@@ -538,6 +538,8 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     } satisfies Record<keyof CreatedDetail, Field>,
     'subscription.ended': {
         changed_at: { ...DATE, optional: true },
+        // Only `cancelled` today: a newer word is let through, as a status is.
+        end_reason: OPTIONAL_STRING,
     } satisfies Record<keyof EndedDetail, Field>,
     'subscription.renewal_upcoming': {
         can_pay: BOOLEAN,

@@ -142,6 +142,11 @@ export interface FirstPayment {
  */
 export interface EndedDetail {
     changed_at?: string;
+    /**
+     * `cancelled` on a cancellation that reached its end, as `data.end_reason`
+     * says it (Mesub-io/backend#511); absent otherwise, and on an older event.
+     */
+    end_reason?: 'cancelled';
 }
 
 /**
