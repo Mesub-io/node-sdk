@@ -19,11 +19,12 @@ import type { WebhookEventType } from '../src/webhooks.js';
  * one it leaves out. The fake is built from the SDK's own types, so this is
  * where the types and the back's contract meet without a back running.
  */
-const BACKEND_COMMIT = '6c927cb837375b9e7f7e9f4c7521d6e70fcc779e';
+const BACKEND_COMMIT = 'c585920507c1834708cfcdd84525771a4e818156';
 
 interface Spec {
     info: { version: string };
     paths: Record<string, Record<string, { responses: Record<string, Response3> }>>;
+    webhooks: Record<string, { post: { requestBody: Response3 } }>;
     components: { schemas: Record<string, Schema>; headers: Record<string, { schema: Schema }> };
 }
 interface Response3 {
@@ -301,15 +302,18 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         ] as const) {
             fake.addEvent(type, { subscription: { id: created.subscription.id } });
         }
+        fake.addEvent('subscription.access_revoked');
+        fake.addEvent('subscription.renewed', { sequence: null });
 
         const { data } = await mesub.events.list();
         await mesub.events.list({ type: 'subscription.renewed', limit: 1 });
+        await mesub.events.list({ type: 'subscription.access_granted' });
         await mesub.events.retrieve(data[0]!.id);
         await mesub.events.retrieve('evt_nobody').catch(() => null);
         await mesub.events.list({ limit: 0 }).catch(() => null);
 
         expectContract(seen);
-        expect(data).toHaveLength(6);
+        expect(data).toHaveLength(8);
     });
 
     it.each([
@@ -322,9 +326,43 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         'subscription.resumed',
         'subscription.ended',
         'subscription.expired',
+        'subscription.access_granted',
+        'subscription.access_revoked',
     ] satisfies WebhookEventType[])('signs a %s webhook whose body is an Event', async (type) => {
         const { body } = await new FakeMesub().webhook(type);
 
         expect(problems(ref('Event'), JSON.parse(body))).toEqual([]);
+    });
+
+    it.each(Object.keys(spec.webhooks))(
+        'signs a %s webhook as the spec describes that webhook',
+        async (type) => {
+            const schema =
+                spec.webhooks[type]!.post.requestBody.content!['application/json']!.schema;
+            const { body } = await new FakeMesub().webhook(type as WebhookEventType, {
+                ...(type === 'test' && { subscription: { id: 'sub_test' } }),
+            });
+
+            expect(problems(schema, JSON.parse(body))).toEqual([]);
+        },
+    );
+
+    it('raises the access events of its own changes as the spec says, when asked', async () => {
+        const { client, seen } = recorded({ accessEvents: true });
+        const mesub = client();
+        const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+        const { id } = created.subscription;
+        await mesub.subscriptions.submit(id, {
+            transaction: created.transaction,
+            terms_signature: 'signed',
+        });
+
+        const { data } = await mesub.events.list({ subscription: id });
+
+        expectContract(seen);
+        expect(data.map(({ type, sequence }) => [type, sequence])).toEqual([
+            ['subscription.access_granted', 2],
+            ['subscription.created', 1],
+        ]);
     });
 });

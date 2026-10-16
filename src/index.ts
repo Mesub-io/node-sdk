@@ -47,6 +47,7 @@ export type { RequestOptions } from './transport.js';
 export { verifyWebhook } from './webhooks.js';
 export type { EventList, EventListParams, Events } from './events.js';
 export type {
+    AccessChangedDetail,
     CreatedDetail,
     EventNetwork,
     EventType,
@@ -58,6 +59,8 @@ export type {
     RenewalUpcomingDetail,
     RenewedDetail,
     StoppedDetail,
+    SubscriptionAccessGrantedEvent,
+    SubscriptionAccessRevokedEvent,
     SubscriptionCancelledEvent,
     SubscriptionCreatedEvent,
     SubscriptionEndedEvent,

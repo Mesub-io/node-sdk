@@ -1412,13 +1412,119 @@ describe('FakeMesub', () => {
             });
         });
 
-        it('forgets them on reset', async () => {
+        it('forgets them on reset, and numbers again from 1', async () => {
             const fake = new FakeMesub();
-            fake.addEvent('subscription.renewed');
+            fake.addEvent('subscription.renewed', { subscription: { id: 'sub_a' } });
 
             fake.reset();
 
             await expect(fake.client().events.list()).resolves.toMatchObject({ data: [] });
+            expect(
+                fake.addEvent('subscription.renewed', { subscription: { id: 'sub_a' } }).sequence,
+            ).toBe(1);
+        });
+
+        it("numbers each subscription's events from 1, and serves a millisecond's by sequence", async () => {
+            const fake = new FakeMesub();
+            const created_at = new Date().toISOString();
+            const sequences = [
+                fake.addEvent('subscription.renewed', {
+                    subscription: { id: 'sub_a' },
+                    created_at,
+                }),
+                fake.addEvent('subscription.payment_failed', { subscription: { id: 'sub_b' } }),
+                fake.addEvent('subscription.stopped', {
+                    subscription: { id: 'sub_a' },
+                    created_at,
+                }),
+            ].map((event) => event.sequence);
+
+            const { data } = await fake.client().events.list({ subscription: 'sub_a' });
+
+            expect(sequences).toEqual([1, 1, 2]);
+            expect(data.map((event) => event.sequence)).toEqual([2, 1]);
+        });
+
+        it('takes the sequence given, and leaves it out on null, as an event Mesub could not number', async () => {
+            const fake = new FakeMesub();
+
+            const given = fake.addEvent('subscription.renewed', { sequence: 7 });
+            const unnumbered = fake.addEvent('subscription.renewed', { sequence: null });
+
+            expect(given.sequence).toBe(7);
+            expect('sequence' in unnumbered).toBe(false);
+            await expect(fake.client().events.retrieve(unnumbered.id)).resolves.not.toHaveProperty(
+                'sequence',
+            );
+        });
+
+        it('raises no access event by default, as Mesub until it turns them on', async () => {
+            const fake = new FakeMesub();
+            const { mesub } = await subscribed(fake);
+
+            const { data } = await mesub.events.list();
+
+            expect(data.map((event) => event.type)).toEqual(['subscription.created']);
+            expect(data[0]!.sequence).toBe(1);
+        });
+
+        it('with accessEvents, raises access_granted after created, and none while access holds', async () => {
+            const fake = new FakeMesub({ accessEvents: true });
+            const { mesub, id } = await subscribed(fake);
+            await mesub.subscriptions.cancel(id);
+            await mesub.subscriptions.confirmCancel(id, signed);
+            await mesub.subscriptions.resume(id);
+            await mesub.subscriptions.confirmResume(id, signed);
+
+            const { data } = await mesub.events.list({ subscription: id });
+            const [granted, created] = data.slice(-2);
+
+            expect(data.map(({ type, sequence }) => [type, sequence])).toEqual([
+                ['subscription.resumed', 4],
+                ['subscription.cancelled', 3],
+                ['subscription.access_granted', 2],
+                ['subscription.created', 1],
+            ]);
+            expect(granted).toMatchObject({
+                created_at: created!.created_at,
+                data: created!.data,
+                detail: { changed_at: created!.created_at },
+            });
+            expect(granted!.data.access).toBe(true);
+        });
+
+        it('adds access events: a revoked one on a subscription without access', async () => {
+            const fake = new FakeMesub();
+
+            const revoked = fake.addEvent('subscription.access_revoked');
+            const granted = fake.addEvent('subscription.access_granted');
+
+            expect(revoked).toMatchObject({
+                data: { status: 'ended', access: false, end_reason: 'cancelled' },
+                detail: { changed_at: revoked.created_at },
+            });
+            expect(granted).toMatchObject({
+                data: { status: 'active', access: true },
+                detail: { changed_at: granted.created_at },
+            });
+            await expect(
+                fake.client().events.list({ type: 'subscription.access_revoked' }),
+            ).resolves.toMatchObject({ data: [{ id: revoked.id }] });
+        });
+
+        it('signs a test delivery with sequence 1, and leaves sequence out on null', async () => {
+            const fake = new FakeMesub();
+            const client = fake.client();
+
+            const test = await fake.webhook('test');
+            const unnumbered = await fake.webhook('subscription.renewed', { sequence: null });
+
+            await expect(client.webhooks.verify(test.body, test.headers)).resolves.toMatchObject({
+                sequence: 1,
+            });
+            expect(
+                await client.webhooks.verify(unnumbered.body, unnumbered.headers),
+            ).not.toHaveProperty('sequence');
         });
     });
 

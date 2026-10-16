@@ -78,6 +78,16 @@ export interface FakeMesubOptions {
      * up to five minutes. One set on an answer with `setAccess` wins.
      */
     revalidateAfter?: number;
+    /**
+     * True to raise `subscription.access_granted` and
+     * `subscription.access_revoked` (Mesub-io/backend#507) when a change the
+     * fake makes flips access, right after the event that says why, one
+     * `sequence` later: a submit grants. False by default, as on Mesub until
+     * it turns them on for a project. The fake moves no clock, so a date
+     * passing revokes nothing: record that with `addEvent`, which, like
+     * `webhook`, makes either type whatever this says.
+     */
+    accessEvents?: boolean;
 }
 
 /** A plan as declared to the fake: its slug, and any field to set, a token's included. */
@@ -117,6 +127,12 @@ export interface FakeEventFields {
     created_at?: string;
     /** The event's id. Defaults to a new `evt_fake_...`. */
     id?: string;
+    /**
+     * Its place among its subscription's events. Defaults to the next one
+     * for that subscription; null leaves it out, as on an event Mesub could
+     * not number.
+     */
+    sequence?: number | null;
 }
 
 /** What `FakeMesub.webhook` sends, on top of a made-up event of that type. */
@@ -132,6 +148,13 @@ export interface FakeWebhookFields {
      * the `test` event, as Mesub's test deliveries carry.
      */
     id?: string;
+    /**
+     * Its place among its subscription's events. Defaults to the next one
+     * for that subscription, and to 1 on the `test` event, as Mesub's test
+     * deliveries carry; null leaves it out, as on an event Mesub could not
+     * number.
+     */
+    sequence?: number | null;
     /** The delivery's id, the `webhook-id` header. Defaults to a new `msg_fake_...`. */
     delivery_id?: string;
     /** `webhook-timestamp`, Unix seconds. Defaults to now. */
@@ -228,6 +251,8 @@ const EVENT_TYPES: readonly EventType[] = [
     'subscription.resumed',
     'subscription.ended',
     'subscription.expired',
+    'subscription.access_granted',
+    'subscription.access_revoked',
 ];
 /** An id as Mesub's DTOs take one. */
 const RESOURCE_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -291,6 +316,9 @@ export class FakeMesub {
     readonly #revalidateAfter: number | undefined;
     #attemptIds = 0;
     #eventIds = 0;
+    /** The last `sequence` given to each subscription's events, by id. */
+    readonly #sequences = new Map<string, number>();
+    readonly #accessEvents: boolean;
     #requestIds = 0;
     /** Every event raised or added, as `/v1/events` serves it. */
     #events: MesubEvent[] = [];
@@ -309,6 +337,7 @@ export class FakeMesub {
         this.webhookSecret = options.webhookSecret ?? FAKE_WEBHOOK_SECRET;
         this.#attemptsRoute = options.attemptsRoute ?? true;
         this.#revalidateAfter = options.revalidateAfter;
+        this.#accessEvents = options.accessEvents ?? false;
         this.#eventsSince = new Date(
             options.eventsSince ?? Date.now() - EVENTS_WINDOW_MS,
         ).toISOString();
@@ -473,6 +502,20 @@ export class FakeMesub {
      */
     async webhook(type: WebhookEventType, fields: FakeWebhookFields = {}): Promise<SignedWebhook> {
         const now = new Date();
+        const data = withClosing(
+            this.#subscription({
+                wallet: FAKE_WALLET,
+                plan: 'pro',
+                ...subscriptionOf(type),
+                ...fields.subscription,
+            }),
+        );
+        const sequence =
+            fields.sequence === undefined
+                ? type === 'test'
+                    ? 1
+                    : this.#nextSequence(data.id)
+                : fields.sequence;
         const payload = {
             id: fields.id ?? (type === 'test' ? TEST_EVENT_ID : this.#nextEventId()),
             object: 'event',
@@ -480,9 +523,8 @@ export class FakeMesub {
             created_at: fields.created_at ?? now.toISOString(),
             network: 'devnet',
             api_version: API_VERSION,
-            data: withClosing(
-                this.#subscription({ wallet: FAKE_WALLET, plan: 'pro', ...fields.subscription }),
-            ),
+            ...(sequence !== null && { sequence }),
+            data,
             detail: fields.detail ?? detailOf(type, now),
         };
 
@@ -502,7 +544,12 @@ export class FakeMesub {
     addEvent(type: EventType, fields: FakeEventFields = {}): MesubEvent {
         const now = new Date();
         const held = this.#subscriptions.find((each) => each.id === fields.subscription?.id);
-        const base = held ? this.#view(held) : { wallet: FAKE_WALLET, plan: 'pro' };
+        const base = held
+            ? this.#view(held)
+            : { wallet: FAKE_WALLET, plan: 'pro', ...subscriptionOf(type) };
+        const data = withClosing(this.#subscription({ ...base, ...fields.subscription }));
+        const sequence =
+            fields.sequence === undefined ? this.#nextSequence(data.id) : fields.sequence;
         const event: MesubEvent = {
             id: fields.id ?? this.#nextEventId(),
             object: 'event',
@@ -510,7 +557,8 @@ export class FakeMesub {
             created_at: fields.created_at ?? now.toISOString(),
             network: 'devnet',
             api_version: API_VERSION,
-            data: withClosing(this.#subscription({ ...base, ...fields.subscription })),
+            ...(sequence !== null && { sequence }),
+            data,
             detail: (fields.detail ?? detailOf(type, now)) as never,
         } as MesubEvent;
 
@@ -535,6 +583,7 @@ export class FakeMesub {
         this.#gone.clear();
         this.#attempts.clear();
         this.#events = [];
+        this.#sequences.clear();
         this.#failure = null;
         this.requests.length = 0;
     }
@@ -605,18 +654,47 @@ export class FakeMesub {
         return { ...served, ...closingOf(served, this.#gone.has(subscription.id)) };
     }
 
-    /** Records the event Mesub raises for a change to that subscription, as it stands now. */
-    #raise(type: EventType, subscription: ServerSubscription, detail: object = {}): void {
-        this.#events.push({
-            id: this.#nextEventId(),
-            object: 'event',
-            type,
-            created_at: new Date().toISOString(),
-            network: 'devnet',
-            api_version: API_VERSION,
-            data: structuredClone(this.#view(subscription)),
-            detail,
-        } as MesubEvent);
+    /**
+     * Records the event Mesub raises for a change to that subscription, as
+     * it stands now, then, with `accessEvents`, the access event of the same
+     * change when access flipped from `before`: the same `data`, one
+     * `sequence` later.
+     */
+    #raise(
+        type: EventType,
+        subscription: ServerSubscription,
+        before: boolean,
+        detail: object = {},
+    ): void {
+        const created_at = new Date().toISOString();
+        const data = this.#view(subscription);
+        const push = (each: EventType, eachDetail: object) =>
+            this.#events.push({
+                id: this.#nextEventId(),
+                object: 'event',
+                type: each,
+                created_at,
+                network: 'devnet',
+                api_version: API_VERSION,
+                sequence: this.#nextSequence(subscription.id),
+                data: structuredClone(data),
+                detail: eachDetail,
+            } as MesubEvent);
+
+        push(type, detail);
+        if (this.#accessEvents && data.access !== before) {
+            const flip = data.access
+                ? 'subscription.access_granted'
+                : 'subscription.access_revoked';
+            push(flip, { changed_at: created_at });
+        }
+    }
+
+    /** The next `sequence` of that subscription's events: 1, 2, 3... */
+    #nextSequence(id: string): number {
+        const next = (this.#sequences.get(id) ?? 0) + 1;
+        this.#sequences.set(id, next);
+        return next;
     }
 
     /** A plan's end: the one a test gave it, else its `ends_at` in `plans`. */
@@ -846,6 +924,8 @@ export class FakeMesub {
             .sort(
                 (a, b) =>
                     Date.parse(b.created_at) - Date.parse(a.created_at) ||
+                    // Within a millisecond, by `sequence`, highest first, as Mesub.
+                    (b.sequence ?? 0) - (a.sequence ?? 0) ||
                     (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
             );
     }
@@ -1035,7 +1115,8 @@ export class FakeMesub {
             this.grant({ external_id: subscription.external_id }, plan, fields);
         }
         if (subscription.email) this.grant({ email: subscription.email }, plan, fields);
-        this.#raise('subscription.created', subscription);
+        // Pending, it granted nothing.
+        this.#raise('subscription.created', subscription, false);
 
         return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
     }
@@ -1076,6 +1157,7 @@ export class FakeMesub {
         if (done) return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
         // What was built for another action is spent.
         this.#built.set(subscription.id, new Set([action]));
+        const before = this.#view(subscription).access;
 
         const now = new Date().toISOString();
         const end = subscription.current_period_end;
@@ -1147,7 +1229,7 @@ export class FakeMesub {
                 retry_deadline: null,
             });
         }
-        this.#raise(EVENT_OF[action], subscription);
+        this.#raise(EVENT_OF[action], subscription, before);
 
         return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
     }
@@ -1527,9 +1609,30 @@ function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
             };
         case 'subscription.stopped':
             return { reason: 'insufficient_balance' };
+        case 'subscription.access_granted':
+        case 'subscription.access_revoked':
+            return { changed_at: start };
         default:
             return {};
     }
+}
+
+/**
+ * The made-up subscription a type carries unless a test says otherwise: an
+ * active, paid one, but for `access_revoked`, whose `data.access` is false:
+ * a cancellation that reached its end.
+ */
+function subscriptionOf(type: WebhookEventType): Partial<ServerSubscription> {
+    if (type !== 'subscription.access_revoked') return {};
+
+    return {
+        status: 'ended',
+        end_reason: 'cancelled',
+        access: false,
+        payment_status: 'none',
+        next_charge_at: null,
+        access_until: null,
+    };
 }
 
 function nothing(asked: Asked, plan: string): Held {

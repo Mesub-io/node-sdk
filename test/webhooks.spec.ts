@@ -128,6 +128,8 @@ const DETAILS: Record<string, Record<string, unknown>> = {
     'subscription.resumed': {},
     'subscription.ended': {},
     'subscription.expired': {},
+    'subscription.access_granted': { changed_at: '2026-01-15T12:00:00.000Z' },
+    'subscription.access_revoked': { changed_at: '2026-01-31T00:00:00.000Z' },
     test: {},
 };
 
@@ -422,6 +424,70 @@ describe('verifyWebhook', () => {
 
         if (event.type !== 'subscription.payment_failed') throw new Error('narrowed wrong');
         expect(event.detail.retries_left).toBe(2);
+    });
+
+    it('narrows an access event to its changed_at, and hands back its sequence', async () => {
+        const raw = JSON.stringify({
+            ...JSON.parse(
+                body('subscription.access_revoked', DETAILS['subscription.access_revoked'], {
+                    ...SUBSCRIPTION,
+                    status: 'ended',
+                    access: false,
+                }),
+            ),
+            sequence: 4,
+        });
+        const event: WebhookEvent = await verifyWebhook(
+            raw,
+            backendHeaders(SECRET, 'cm1', NOW, raw),
+            { secret: SECRET },
+        );
+
+        if (event.type !== 'subscription.access_revoked') throw new Error('narrowed wrong');
+        const changed: string = event.detail.changed_at;
+        const sequence: number | undefined = event.sequence;
+        expect([changed, sequence, event.data.access]).toEqual([
+            '2026-01-31T00:00:00.000Z',
+            4,
+            false,
+        ]);
+    });
+
+    // Before Mesub-io/backend#502, or an event it could not number.
+    it('reads a body without sequence, and leaves it out', async () => {
+        const raw = body('subscription.renewed', DETAILS['subscription.renewed']);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect('sequence' in event).toBe(false);
+    });
+
+    it.each([0, -1, 1.5, '2', null])('throws unexpected for a sequence of %j', async (sequence) => {
+        const raw = JSON.stringify({
+            ...JSON.parse(body('subscription.renewed', DETAILS['subscription.renewed'])),
+            sequence,
+        });
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
+    });
+
+    it.each([
+        ['missing', {}],
+        ['not a date', { changed_at: 'later' }],
+    ])('throws unexpected for an access event whose changed_at is %s', async (_what, detail) => {
+        const raw = body('subscription.access_granted', detail);
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
     });
 
     // A plan that ends before the next pull (Mesub-io/backend#362): the
@@ -880,6 +946,26 @@ describe('mesub.webhooks.verify', () => {
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
         },
     );
+
+    it.each([
+        ['subscription.access_revoked', false],
+        ['subscription.access_granted', true],
+    ] as const)('drops the cached answer once a %s event comes', async (type, access) => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        if (access) fake.deny(WALLET, 'pro', { revalidate_after: 3600 });
+        else fake.grant(WALLET, 'pro', { revalidate_after: 300 });
+        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(!access);
+        if (access) fake.grant(WALLET, 'pro');
+        else fake.deny(WALLET, 'pro');
+
+        const { body: raw, headers } = await fake.webhook(type, {
+            subscription: { wallet: WALLET, plan: 'pro' },
+        });
+        await mesub.webhooks.verify(raw, headers);
+
+        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(access);
+    });
 
     // It announces a charge and moves no access: the cached answer, and the outage fallback, stay.
     it('keeps the cached answer when a subscription.renewal_upcoming event comes', async () => {

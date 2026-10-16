@@ -14,6 +14,7 @@ import type {
     WalletTransaction,
 } from './subscriptions.js';
 import type {
+    AccessChangedDetail,
     CreatedDetail,
     MesubEvent,
     PaymentFailedDetail,
@@ -467,6 +468,16 @@ function reasonProblem({ reason, reason_code }: ConfirmResult): string | null {
 }
 
 /**
+ * `sequence` (Mesub-io/backend#502): a whole number from 1, left out on a
+ * body written before it and on an event Mesub could not number.
+ */
+const SEQUENCE: Field = {
+    check: (value) => typeof value === 'number' && Number.isInteger(value) && value >= 1,
+    expected: 'a whole number from 1',
+    optional: true,
+};
+
+/**
  * An event (Mesub-io/backend#482), as `GET /v1/events` serves it and a
  * webhook carries it: its id, type and date, the network, the version it is
  * written in, the subscription as `retrieve` answers it, and the event's
@@ -482,6 +493,7 @@ const EVENT = {
     created_at: DATE,
     network: STRING,
     api_version: STRING,
+    sequence: SEQUENCE,
     data: OBJECT,
     detail: OBJECT,
 } satisfies Record<keyof MesubEvent, Field>;
@@ -527,6 +539,12 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.stopped': {
         reason: STRING,
     } satisfies Record<keyof StoppedDetail, Field>,
+    'subscription.access_granted': {
+        changed_at: DATE,
+    } satisfies Record<keyof AccessChangedDetail, Field>,
+    'subscription.access_revoked': {
+        changed_at: DATE,
+    } satisfies Record<keyof AccessChangedDetail, Field>,
 };
 
 /** An event's own fields, its subscription's, then its detail's for a type this release knows. */
