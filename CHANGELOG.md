@@ -427,6 +427,11 @@ answer this request.`: never the SDK's own message, which may name your
   `blocked_reason`. `events.list` takes them as a `type`, and `verify` drops
   the cached answers for their customer. Off until Mesub turns them on
   (#149).
+- The README explains rotating the signing secret (Mesub-io/backend#506):
+  regenerated with an overlap, each delivery carries the new secret's
+  signature and the old one's, and `verify`, which takes one secret, accepts
+  either, so deploying the new secret before the overlap ends loses no
+  delivery. Nothing changes in the code (#150).
 
 ### Testing your integration
 

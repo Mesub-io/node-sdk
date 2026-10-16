@@ -430,6 +430,18 @@ retries the same body for 3 days, so the event still gets through once you
 update `@mesub/node`; a 2xx would lose it. After 3 days of failures, Mesub
 disables the endpoint.
 
+To rotate the signing secret, regenerate it on the endpoint's dashboard page
+with an overlap (24 hours, rather than stopping it now): the old secret keeps signing beside the new
+one until the overlap ends. Every delivery in that window carries two
+signatures in `webhook-signature`, space separated, the new secret's first,
+and `verify` accepts it when any one matches. `verify` takes one secret, so
+there is nothing to hold twice: the old secret keeps verifying until you
+deploy the new one as `MESUB_WEBHOOK_SECRET` (or `webhookSecret`), and the new
+one verifies from then on. Deploy it before the overlap ends and no delivery
+fails. Regenerated with no overlap, the old secret stops at once: deliveries
+fail verification until the new secret is deployed, and Mesub retries each
+for about 3 days.
+
 `event.delivery_id` is the `webhook-id` header: one per event and per
 endpoint, the same on every retry and resend. Drop a delivery you already
 handled by it. `event.id` is the event's own, the same for every endpoint:
