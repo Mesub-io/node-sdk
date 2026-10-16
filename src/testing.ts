@@ -83,7 +83,7 @@ export interface FakeMesubOptions {
      * `subscription.access_revoked` (Mesub-io/backend#507) when a change the
      * fake makes flips access, right after the event that says why, one
      * `sequence` later: a submit grants. False by default, as on Mesub until
-     * it turns them on for a project. The fake moves no clock, so a date
+     * it turns them on. The fake moves no clock, so a date
      * passing revokes nothing: record that with `addEvent`, which, like
      * `webhook`, makes either type whatever this says.
      */

@@ -240,9 +240,10 @@ export type SubscriptionCancelledEvent = WebhookEventOf<'subscription.cancelled'
 export type SubscriptionResumedEvent = WebhookEventOf<'subscription.resumed', NoDetail>;
 /**
  * Sent when the plan ends, is removed or replaced, and when a subscription is
- * closed. No event comes when a cancellation reaches its end: it reads
- * `ended`, `end_reason` `cancelled`, and `subscription.cancelled` came
- * before. Its `access_until` says when access stops.
+ * closed. None comes when a cancellation reaches its end: it reads `ended`,
+ * `end_reason` `cancelled`, and `subscription.cancelled` came before. Its
+ * `access_until` says when access stops; `subscription.access_revoked`
+ * says it stopped, once Mesub turns the access events on.
  */
 export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', NoDetail>;
 /** A checkout nobody signed in time. */
@@ -256,7 +257,7 @@ export type SubscriptionExpiredEvent = WebhookEventOf<'subscription.expired', No
  * With `subscription.access_revoked`, the one pair to drive access from:
  * sent exactly when access changes, and every change sends one. Apply them
  * by `sequence`; the last one applied says whether the customer has access.
- * The other events say why. Off until Mesub turns them on for your project.
+ * The other events say why. Off until Mesub turns them on (`ACCESS_EVENTS`).
  */
 export type SubscriptionAccessGrantedEvent = WebhookEventOf<
     'subscription.access_granted',
@@ -267,7 +268,7 @@ export type SubscriptionAccessGrantedEvent = WebhookEventOf<
  * and did just before. It stopped or ended, a cancellation or the plan
  * reached its end, or a blocked collection reached its `access_until`. For a
  * date that passed, sent a few seconds after it. `data.access` is false.
- * Off until Mesub turns it on for your project.
+ * Off until Mesub turns it on.
  */
 export type SubscriptionAccessRevokedEvent = WebhookEventOf<
     'subscription.access_revoked',

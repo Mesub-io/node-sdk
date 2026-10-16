@@ -392,6 +392,21 @@ answer this request.`: never the SDK's own message, which may name your
   `available_since`: events before it are not served. Typed as `MesubEvent`
   and `EventList`; a Mesub that predates the route throws a `not_found`
   whose `apiCode` is null (#146).
+- Every event carries `sequence` (Mesub-io/backend#502), its place among its
+  subscription's events: apply one subscription's events by `sequence`, and
+  skip one lower than the last applied. Optional: absent on a body written
+  before Mesub numbered events and on one it could not number, which cannot
+  be placed (read the subscription instead). One that is not a whole number
+  from 1 throws `unexpected` (#149).
+- `subscription.access_granted` and `subscription.access_revoked` are typed
+  (Mesub-io/backend#507): `SubscriptionAccessGrantedEvent`,
+  `SubscriptionAccessRevokedEvent`, and their detail `AccessChangedDetail`,
+  `changed_at`, checked to be a date. Sent exactly when access changes, a date
+  passing included, they are the pair to drive access from, ordered by
+  `sequence`; `data` carries `access`, `access_until`, `blocked_since` and
+  `blocked_reason`. `events.list` takes them as a `type`, and `verify` drops
+  the cached answers for their customer. Off until Mesub turns them on
+  (#149).
 
 ### Testing your integration
 
@@ -447,6 +462,15 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   within 30 days and from `eventsSince`. **Breaking:** `fake.webhook()`
   signs the event shape, with an `evt_fake_...` id; its `id` field is the
   event's, and `delivery_id` the `webhook-id` (#146).
+- `FakeMesub` numbers each subscription's events from 1 (`sequence`, or
+  `sequence: null` in `addEvent` and `webhook` to leave it out; 1 on the
+  `test` event) and serves a millisecond's events by it, highest first.
+  `addEvent` and `webhook` make `subscription.access_granted` and
+  `subscription.access_revoked` with `detail.changed_at`, the revoked one on
+  an ended subscription without access. `new FakeMesub({ accessEvents: true
+})` raises `access_granted` after a submit's `created`, as Mesub with its
+  `ACCESS_EVENTS` flag on; off by default. Held to Mesub-io/backend
+  `openapi/v1.json` at c585920, each webhook against its own schema (#149).
 
 ### Errors
 
