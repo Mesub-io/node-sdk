@@ -766,6 +766,25 @@ describe('verifyWebhook', () => {
         });
     });
 
+    it("verifies a rotation overlap's two signatures with the new secret or the old one alone", async () => {
+        // Mesub-io/backend#506: the new secret's signature first, then the old one's.
+        const raw = body('test');
+        const headers = {
+            'webhook-id': 'cm1',
+            'webhook-timestamp': String(NOW),
+            'webhook-signature': [
+                backendSignatureOf(OTHER_SECRET, 'cm1', NOW, raw),
+                backendSignatureOf(SECRET, 'cm1', NOW, raw),
+            ].join(' '),
+        };
+
+        for (const secret of [OTHER_SECRET, SECRET]) {
+            await expect(verifyWebhook(raw, headers, { secret })).resolves.toMatchObject({
+                delivery_id: 'cm1',
+            });
+        }
+    });
+
     it('refuses a header whose only right signature is under another version', async () => {
         const raw = body('test');
         const good = backendSignatureOf(SECRET, 'cm1', NOW, raw);
