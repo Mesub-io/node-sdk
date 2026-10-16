@@ -2087,3 +2087,311 @@ describe('FakeMesub', () => {
         await expect(fake.client().hasAccess(WALLET, 'pro')).resolves.toBe(false);
     });
 });
+
+describe('FakeMesub, refusing and dating as Mesub does', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    async function errorOf(promise: Promise<unknown>) {
+        const error = await promise.catch((caught: unknown) => caught);
+
+        expect(error).toBeInstanceOf(MesubError);
+        return error as MesubError;
+    }
+
+    describe('Pay now (retry)', () => {
+        it('refuses a parked late seat: subscription_paused', async () => {
+            const fake = new FakeMesub();
+            const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+            fake.park(id);
+
+            expect(await codeOf(fake.client().subscriptions.retry(id))).toBe('subscription_paused');
+        });
+
+        it('refuses a late one on a plan past its end: plan_ended', async () => {
+            const ended = new Date(Date.now() - 1000).toISOString();
+            const fake = new FakeMesub({ plans: [{ slug: 'pro', ends_at: ended }] });
+            const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+
+            expect(await codeOf(fake.client().subscriptions.retry(id))).toBe('plan_ended');
+        });
+
+        it('on Dev and Business: the first at once, then a wait of 20 minutes doubling', async () => {
+            vi.useFakeTimers({ toFake: ['Date'] });
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+
+            await expect(mesub.subscriptions.retry(id)).resolves.toMatchObject({
+                status: 'unpaid',
+            });
+            const soon = await errorOf(mesub.subscriptions.retry(id));
+            expect(soon).toMatchObject({ status: 409, apiCode: 'retry_too_soon', retryable: true });
+            expect(soon.retryAfter).toBe(1200_000);
+
+            vi.setSystemTime(Date.now() + 20 * 60_000);
+            await mesub.subscriptions.retry(id);
+            vi.setSystemTime(Date.now() + 39 * 60_000);
+            expect((await errorOf(mesub.subscriptions.retry(id))).retryAfter).toBe(60_000);
+            vi.setSystemTime(Date.now() + 60_000);
+            await expect(mesub.subscriptions.retry(id)).resolves.toMatchObject({ id });
+        });
+
+        it('on Free: 10 minutes apart, three per missed period, none past the deadline', async () => {
+            vi.useFakeTimers({ toFake: ['Date'] });
+            const fake = new FakeMesub({ tier: 'free' });
+            const mesub = fake.client();
+            const { id } = fake.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+
+            for (let each = 0; each < 3; each += 1) {
+                await mesub.subscriptions.retry(id);
+                expect((await errorOf(mesub.subscriptions.retry(id))).retryAfter).toBe(600_000);
+                vi.setSystemTime(Date.now() + 10 * 60_000);
+            }
+            expect(await codeOf(mesub.subscriptions.retry(id))).toBe('retries_spent');
+
+            const passed = new Date(Date.now() - 1000).toISOString();
+            const late = fake.addSubscription({
+                wallet: OTHER,
+                plan: 'pro',
+                status: 'unpaid',
+                retry_deadline: passed,
+            });
+            expect(await codeOf(mesub.subscriptions.retry(late.id))).toBe('retry_deadline_passed');
+        });
+
+        it("sends retry_too_soon's Retry-After with fail(), the tier's first wait", async () => {
+            const dev = new FakeMesub();
+            const free = new FakeMesub({ tier: 'free' });
+            const { id } = dev.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+            const other = free.addSubscription({ wallet: WALLET, plan: 'pro', status: 'unpaid' });
+            dev.fail({ status: 409, code: 'retry_too_soon' });
+            free.fail({ status: 409, code: 'retry_too_soon' });
+
+            expect((await errorOf(dev.client().subscriptions.retry(id))).retryAfter).toBe(1200_000);
+            expect((await errorOf(free.client().subscriptions.retry(other.id))).retryAfter).toBe(
+                600_000,
+            );
+        });
+    });
+
+    describe('addSubscription', () => {
+        it('dates each status as Mesub does', () => {
+            const fake = new FakeMesub();
+            const free = new FakeMesub({ tier: 'free' });
+            const add = (status: ServerSubscription['status'], on = fake) =>
+                on.addSubscription({ wallet: WALLET, plan: 'pro', status });
+            const ahead = (date: string | null) => date !== null && Date.parse(date) > Date.now();
+
+            const active = add('active');
+            expect(active).toMatchObject({ access: true, payment_status: 'paid' });
+            expect(ahead(active.current_period_end)).toBe(true);
+            expect(active.access_until).toBe(active.current_period_end);
+            expect(active.next_charge_at).toBe(active.current_period_end);
+
+            const late = add('unpaid');
+            expect(late).toMatchObject({
+                access: true,
+                payment_status: 'late',
+                next_charge_at: null,
+            });
+            expect(ahead(late.current_period_end)).toBe(false);
+            expect(ahead(late.next_retry_at)).toBe(true);
+            expect(late.access_until).toBe(late.next_retry_at);
+
+            const lateOnFree = add('unpaid', free);
+            expect(lateOnFree).toMatchObject({
+                access: false,
+                payment_status: 'late',
+                access_until: null,
+                next_retry_at: null,
+            });
+            expect(ahead(lateOnFree.retry_deadline)).toBe(true);
+
+            const cancelled = add('cancelled');
+            expect(cancelled).toMatchObject({ access: true, next_charge_at: null });
+            expect(ahead(cancelled.access_until)).toBe(true);
+
+            expect(add('stopped')).toMatchObject({
+                access: false,
+                payment_status: 'none',
+                stop_reason: 'out_of_retries',
+                access_until: null,
+            });
+            expect(add('ended')).toMatchObject({
+                access: false,
+                payment_status: 'none',
+                end_reason: 'closed',
+                access_until: null,
+            });
+            expect(add('pending')).toMatchObject({
+                access: false,
+                current_period_start: null,
+                confirmed_at: null,
+            });
+        });
+
+        it('refuses a wallet Mesub would refuse', () => {
+            expect(() =>
+                new FakeMesub().addSubscription({ wallet: 'not a wallet', plan: 'pro' }),
+            ).toThrow(/base58/);
+        });
+
+        it('cancelled at once, keeps its period: closed too early, resumed', async () => {
+            const fake = new FakeMesub({ revalidateAfter: 0 });
+            const mesub = fake.client();
+            const added = fake.addSubscription({ wallet: WALLET, plan: 'pro', external_id: 'u' });
+
+            await mesub.subscriptions.cancel(added.id);
+            const { subscription } = await mesub.subscriptions.confirmCancel(added.id, {
+                signature: 'x',
+            });
+            expect(subscription).toMatchObject({
+                status: 'cancelled',
+                access: true,
+                access_until: added.current_period_end,
+                closable: false,
+                closable_from: added.current_period_end,
+            });
+            await expect(mesub.access({ external_id: 'u' }, 'pro')).resolves.toMatchObject({
+                access_until: added.current_period_end,
+                closable: false,
+            });
+            expect(await codeOf(mesub.subscriptions.close(added.id))).toBe('close_too_early');
+
+            await mesub.subscriptions.resume(added.id);
+            const resumed = await mesub.subscriptions.confirmResume(added.id, { signature: 'y' });
+            expect(resumed.subscription).toMatchObject({
+                status: 'active',
+                next_charge_at: added.current_period_end,
+            });
+        });
+    });
+
+    describe('webhook', () => {
+        it("sends the test event as Mesub's test delivery", async () => {
+            const fake = new FakeMesub();
+            const { body, headers } = await fake.webhook('test');
+            const event = await fake.client().webhooks.verify(body, headers);
+
+            expect(event).toMatchObject({
+                id: 'evt_test',
+                type: 'test',
+                sequence: 1,
+                test: true,
+                detail: {},
+                data: { id: 'sub_test', external_id: 'user_123', email: 'subscriber@example.com' },
+            });
+        });
+
+        it('carries the subscription the fake holds under that id', async () => {
+            const fake = new FakeMesub();
+            const held = fake.addSubscription({
+                wallet: WALLET,
+                plan: 'pro',
+                external_id: 'user_42',
+                status: 'unpaid',
+            });
+            const { body, headers } = await fake.webhook('subscription.payment_failed', {
+                subscription: { id: held.id },
+            });
+            const event = await fake.client().webhooks.verify(body, headers);
+
+            expect(event.data).toMatchObject({
+                id: held.id,
+                status: 'unpaid',
+                wallet: WALLET,
+                external_id: 'user_42',
+            });
+        });
+    });
+
+    describe('submit', () => {
+        it('refuses a plan that ended since the create: plan_ended', async () => {
+            const fake = new FakeMesub();
+            const mesub = fake.client();
+            const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+            fake.endPlan('pro');
+
+            const refused = mesub.subscriptions.submit(created.subscription.id, {
+                transaction: created.transaction,
+                terms_signature: 'signed',
+            });
+            expect(await codeOf(refused)).toBe('plan_ended');
+        });
+
+        it('refuses a body without the terms signature, as the DTO does', async () => {
+            const fake = new FakeMesub();
+            const created = await fake
+                .client()
+                .subscriptions.create({ plan: 'pro', wallet: WALLET });
+            const response = await fake.fetch(
+                `${fake.baseUrl}/v1/subscriptions/${created.subscription.id}/submit`,
+                {
+                    method: 'POST',
+                    headers: { authorization: `Bearer ${fake.apiKey}` },
+                    body: JSON.stringify({ transaction: created.transaction }),
+                },
+            );
+
+            expect(response.status).toBe(400);
+            await expect(response.json()).resolves.toMatchObject({
+                code: 'invalid_request',
+                message: ['terms_signature must be a base58 signature'],
+            });
+        });
+    });
+
+    describe('ids', () => {
+        it('start over on reset(), and are each fake its own', async () => {
+            const fake = new FakeMesub();
+            const first = fake.addSubscription({ wallet: WALLET, plan: 'pro' });
+            const delivery = await fake.webhook('subscription.renewed');
+            fake.reset();
+
+            expect(fake.addSubscription({ wallet: WALLET, plan: 'pro' }).id).toBe(first.id);
+            expect((await fake.webhook('subscription.renewed')).headers).toEqual(
+                expect.objectContaining({ 'webhook-id': delivery.headers['webhook-id'] }),
+            );
+            const other = await new FakeMesub().webhook('subscription.renewed');
+            expect(other.headers['webhook-id']).toBe('msg_fake_1');
+        });
+
+        it('takes no subscription id for a made-up event', async () => {
+            const fake = new FakeMesub();
+            await fake.webhook('subscription.renewed');
+            fake.addEvent('subscription.renewed');
+
+            expect(fake.addSubscription({ wallet: WALLET, plan: 'pro' }).id).toBe('sub_fake_1');
+        });
+    });
+
+    describe('the edges of a request', () => {
+        it('tells a missing key from a wrong one', async () => {
+            const fake = new FakeMesub();
+            const call = async (headers: Record<string, string>) =>
+                (
+                    (await (await fake.fetch(`${fake.baseUrl}/v1/plans`, { headers })).json()) as {
+                        code: string;
+                    }
+                ).code;
+
+            await expect(call({})).resolves.toBe('missing_api_key');
+            await expect(call({ authorization: 'Basic abc' })).resolves.toBe('missing_api_key');
+            await expect(call({ authorization: 'Bearer SUB_nope' })).resolves.toBe(
+                'invalid_api_key',
+            );
+        });
+
+        it.each(['0', '101', 'ten', '1.5'])('refuses a list limit of %s', async (limit) => {
+            const fake = new FakeMesub();
+            const response = await fake.fetch(
+                `${fake.baseUrl}/v1/subscriptions?wallet=${WALLET}&limit=${limit}`,
+                { headers: { authorization: `Bearer ${fake.apiKey}` } },
+            );
+
+            expect(response.status).toBe(400);
+        });
+    });
+});
