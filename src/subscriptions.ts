@@ -483,6 +483,12 @@ export class Subscriptions {
      * with `not_awaiting_signature` after a send that got no answer, thrown
      * as that `conflict`.
      *
+     * A 503 `unavailable` (too many submits waiting on the project,
+     * Mesub-io/backend#505) says nothing was signed or sent: it is replayed
+     * after its `Retry-After` (2 s) like any retryable refusal, and when the
+     * replays run out it is thrown as is, `retryable`, with no read back,
+     * unless an earlier send got no answer.
+     *
      * Any other refusal (`terms_expired`, `transaction_expired`, ...) is
      * thrown as is. After `transaction_expired` nothing was sent and the same
      * submit cannot land: call `transaction(id)` for a new one, never
@@ -769,8 +775,11 @@ export class Subscriptions {
      * `subscription_not_late`, `subscription_paused`, `plan_ended`. Two more
      * are `retryable`: `subscription_changed` (two retries met, or a pull
      * moved the subscription on) and, on Free, `pull_running` (a pull runs
-     * now). Read the subscription back before you ask again. Sent once,
-     * never retried: a second one is a second retry.
+     * now). Read the subscription back before you ask again. A 503 is
+     * `retryable` too, and nothing changed: `unavailable` (the charge could
+     * not be queued) or `network_unavailable`, with `retryAfter` saying when
+     * to ask again (20 s and 10 s). Sent once, never retried: a second one is
+     * a second retry.
      */
     async retry(id: string, options: RequestOptions = {}): Promise<ServerSubscription> {
         return serverSubscriptionFrom(
@@ -977,5 +986,8 @@ export function routeMissing(error: MesubError): boolean {
  * or a 5xx (a proxy's 502 or 504 among them) after Mesub may have co-signed.
  */
 function unanswered(error: MesubError): boolean {
+    // Mesub-io/backend#505: too many submits waiting, nothing signed or sent.
+    if (error.status === 503 && error.apiCode === 'unavailable') return false;
+
     return error.status === null || error.status >= 500;
 }

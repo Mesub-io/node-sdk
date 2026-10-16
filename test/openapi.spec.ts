@@ -19,15 +19,21 @@ import type { WebhookEventType } from '../src/webhooks.js';
  * one it leaves out. The fake is built from the SDK's own types, so this is
  * where the types and the back's contract meet without a back running.
  */
-const BACKEND_COMMIT = '6c927cb837375b9e7f7e9f4c7521d6e70fcc779e';
+// Mesub-io/backend#511 (branch 510-access-events-journal), on main with #509.
+const BACKEND_COMMIT = 'bb1c9475571992f12f4f7634ad618ea127de111a';
 
 interface Spec {
     info: { version: string };
     paths: Record<string, Record<string, { responses: Record<string, Response3> }>>;
-    components: { schemas: Record<string, Schema>; headers: Record<string, { schema: Schema }> };
+    webhooks: Record<string, { post: { requestBody: Response3 } }>;
+    components: {
+        schemas: Record<string, Schema>;
+        headers: Record<string, { schema: Schema; required?: boolean }>;
+    };
 }
 interface Response3 {
     content?: { 'application/json'?: { schema: Schema } };
+    headers?: Record<string, { $ref?: string }>;
 }
 type Schema = Record<string, unknown>;
 
@@ -83,7 +89,7 @@ interface Seen {
     route: string;
     status: number;
     body: unknown;
-    requestId: string | null;
+    headers: Headers;
 }
 
 /** A fake, a client on it, and every answer it gave on a route of the spec. */
@@ -102,7 +108,7 @@ function recorded(options: ConstructorParameters<typeof FakeMesub>[0] = {}) {
                 route,
                 status: response.status,
                 body: await response.clone().json(),
-                requestId: response.headers.get('mesub-request-id'),
+                headers: response.headers,
             });
         }
         return response;
@@ -116,23 +122,45 @@ function recorded(options: ConstructorParameters<typeof FakeMesub>[0] = {}) {
             webhookSecret: fake.webhookSecret,
         });
 
-    return { fake, client, seen };
+    return { fake, client, seen, fetch };
 }
 
-/** Each answer seen, against the schema the spec names for its route and status. */
-function expectContract(seen: Seen[]) {
-    const pattern = new RegExp(String(components.headers['MesubRequestId']!.schema['pattern']));
+/**
+ * What a header's value breaks of its schema: an integer header is read as
+ * the number it spells, digits only.
+ */
+function headerProblems(schema: Schema, value: string): string[] {
+    if (schema['type'] !== 'integer') return problems(schema, value);
 
+    return /^-?[0-9]+$/.test(value) ? problems(schema, Number(value)) : ['not an integer'];
+}
+
+/**
+ * Each answer seen, against the schema the spec names for its route and
+ * status, and its headers: every one the spec marks required is sent, and
+ * every one named and sent holds to its schema.
+ */
+function expectContract(seen: Seen[]) {
     expect(seen.length).toBeGreaterThan(0);
-    for (const { method, route, status, body, requestId } of seen) {
+    for (const { method, route, status, body, headers } of seen) {
         const label = `${method.toUpperCase()} ${route} ${status}`;
-        const schema =
-            spec.paths[route]?.[method]?.responses[String(status)]?.content?.['application/json']
-                ?.schema;
+        const answer = spec.paths[route]?.[method]?.responses[String(status)];
+        const schema = answer?.content?.['application/json']?.schema;
 
         expect(schema, `${label}: the spec names no such answer`).toBeDefined();
         expect(problems(schema!, body), label).toEqual([]);
-        expect(requestId, `${label}: Mesub-Request-Id`).toMatch(pattern);
+        expect(Object.keys(answer?.headers ?? {}), `${label}: headers named`).toEqual(
+            expect.arrayContaining(['Mesub-Version', 'Mesub-Request-Id']),
+        );
+        for (const [name, { $ref }] of Object.entries(answer?.headers ?? {})) {
+            const header = components.headers[String($ref).split('/').pop()!]!;
+            const value = headers.get(name);
+
+            if (header.required) expect(value, `${label}: ${name} missing`).not.toBeNull();
+            if (value !== null) {
+                expect(headerProblems(header.schema, value), `${label}: ${name}`).toEqual([]);
+            }
+        }
     }
 }
 
@@ -284,6 +312,69 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         );
     });
 
+    it("answers a 503 with the Retry-After Mesub sends, submit's and retry's own", async () => {
+        const { fake, client, seen } = recorded();
+        const mesub = client();
+        const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+        const { id } = created.subscription;
+
+        fake.fail({ status: 503, code: 'network_unavailable' });
+        await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET }).catch(() => null);
+        fake.fail({ status: 503, code: 'unavailable' });
+        const submit = mesub.subscriptions
+            .submit(
+                id,
+                { transaction: created.transaction, terms_signature: 'signed' },
+                {
+                    budget: 1,
+                },
+            )
+            .catch((error: unknown) => error);
+        const retry = await mesub.subscriptions.retry(id).catch((error: unknown) => error);
+
+        expectContract(seen);
+        expect(await submit).toMatchObject({ apiCode: 'unavailable', retryAfter: 2_000 });
+        expect(retry).toMatchObject({ apiCode: 'unavailable', retryAfter: 20_000 });
+        expect(
+            seen.slice(1).map(({ status, headers }) => [status, headers.get('retry-after')]),
+        ).toEqual([
+            [503, '10'],
+            [503, '2'],
+            [503, '20'],
+        ]);
+    });
+
+    it('answers the version asked, and refuses one it does not serve, after the key', async () => {
+        const { fake, seen, fetch } = recorded();
+        const ask = (version: string | null, key = fake.apiKey) =>
+            fetch(`${fake.baseUrl}/v1/plans`, {
+                headers: {
+                    authorization: `Bearer ${key}`,
+                    ...(version !== null && { 'mesub-version': version }),
+                },
+            });
+
+        const answers = await Promise.all([
+            ask('2026-10-02'),
+            ask(null),
+            ask('2026-11-01'),
+            ask(''),
+            ask('latest', 'SUB_wrong'),
+        ]);
+
+        expect(answers.map((each) => each.status)).toEqual([200, 200, 400, 400, 401]);
+        expect(answers.map((each) => each.headers.get('mesub-version'))).toEqual(
+            Array(5).fill('2026-10-02'),
+        );
+        await expect(answers[2]!.json()).resolves.toMatchObject({
+            code: 'unsupported_version',
+            retryable: false,
+            message: 'Mesub-Version must be one of the versions this API serves: 2026-10-02.',
+        });
+        expectContract(seen);
+        expect(seen).toHaveLength(5);
+    });
+
     it('answers events as the spec says', async () => {
         const { fake, client, seen } = recorded();
         const mesub = client();
@@ -301,15 +392,23 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         ] as const) {
             fake.addEvent(type, { subscription: { id: created.subscription.id } });
         }
+        fake.addEvent('subscription.access_revoked');
+        fake.addEvent('subscription.renewed', { sequence: null });
+        fake.addEvent('subscription.paused');
+        fake.addEvent('subscription.unpaused');
+        fake.addEvent('subscription.ended', {
+            subscription: { status: 'ended', end_reason: 'cancelled', access: false },
+        });
 
         const { data } = await mesub.events.list();
         await mesub.events.list({ type: 'subscription.renewed', limit: 1 });
+        await mesub.events.list({ type: 'subscription.access_granted' });
         await mesub.events.retrieve(data[0]!.id);
         await mesub.events.retrieve('evt_nobody').catch(() => null);
         await mesub.events.list({ limit: 0 }).catch(() => null);
 
         expectContract(seen);
-        expect(data).toHaveLength(6);
+        expect(data).toHaveLength(11);
     });
 
     it.each([
@@ -322,9 +421,47 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         'subscription.resumed',
         'subscription.ended',
         'subscription.expired',
+        'subscription.access_granted',
+        'subscription.access_revoked',
     ] satisfies WebhookEventType[])('signs a %s webhook whose body is an Event', async (type) => {
         const { body } = await new FakeMesub().webhook(type);
 
         expect(problems(ref('Event'), JSON.parse(body))).toEqual([]);
+    });
+
+    it.each(Object.keys(spec.webhooks))(
+        'signs a %s webhook as the spec describes that webhook',
+        async (type) => {
+            const schema =
+                spec.webhooks[type]!.post.requestBody.content!['application/json']!.schema;
+            const { body } = await new FakeMesub().webhook(type as WebhookEventType, {
+                ...(type === 'test' && { subscription: { id: 'sub_test' } }),
+            });
+
+            expect(problems(schema, JSON.parse(body))).toEqual([]);
+        },
+    );
+
+    it('raises the access events of its own changes as the spec says, when asked', async () => {
+        const { fake, client, seen } = recorded({ accessEvents: true });
+        const mesub = client();
+        const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+        const { id } = created.subscription;
+        await mesub.subscriptions.submit(id, {
+            transaction: created.transaction,
+            terms_signature: 'signed',
+        });
+        fake.park(id);
+        fake.unpark(id);
+
+        const { data } = await mesub.events.list({ subscription: id });
+
+        expectContract(seen);
+        expect(data.map(({ type, sequence }) => [type, sequence])).toEqual([
+            ['subscription.unpaused', 4],
+            ['subscription.paused', 3],
+            ['subscription.access_granted', 2],
+            ['subscription.created', 1],
+        ]);
     });
 });

@@ -14,7 +14,9 @@ import type {
     WalletTransaction,
 } from './subscriptions.js';
 import type {
+    AccessChangedDetail,
     CreatedDetail,
+    EndedDetail,
     MesubEvent,
     PaymentFailedDetail,
     RenewalUpcomingDetail,
@@ -467,6 +469,16 @@ function reasonProblem({ reason, reason_code }: ConfirmResult): string | null {
 }
 
 /**
+ * `sequence` (Mesub-io/backend#502): a whole number from 1, left out on a
+ * body written before it and on an event Mesub could not number.
+ */
+const SEQUENCE: Field = {
+    check: (value) => typeof value === 'number' && Number.isInteger(value) && value >= 1,
+    expected: 'a whole number from 1',
+    optional: true,
+};
+
+/**
  * An event (Mesub-io/backend#482), as `GET /v1/events` serves it and a
  * webhook carries it: its id, type and date, the network, the version it is
  * written in, the subscription as `retrieve` answers it, and the event's
@@ -482,6 +494,7 @@ const EVENT = {
     created_at: DATE,
     network: STRING,
     api_version: STRING,
+    sequence: SEQUENCE,
     data: OBJECT,
     detail: OBJECT,
 } satisfies Record<keyof MesubEvent, Field>;
@@ -495,10 +508,39 @@ const TEST: Field = { check: (value) => value === true, expected: 'true', option
  */
 const OLDER_WEBHOOK = { type: STRING, created_at: DATE, data: OBJECT, test: TEST };
 
+/**
+ * `first_payment` on `subscription.created` (Mesub-io/backend#509): null, or
+ * what the first payment paid; left out by an event written before it.
+ */
+const FIRST_PAYMENT: Field = {
+    check: (value) =>
+        value === null ||
+        problemWith(value, { amount: STRING, mint: STRING_OR_NULL, signature: STRING_OR_NULL }) ===
+            null,
+    expected: 'null or a payment (amount, mint, signature)',
+    optional: true,
+};
+
+/**
+ * An access event's detail (Mesub-io/backend#507), and since #511 why and
+ * until when: both left out by an event written before it.
+ */
+const ACCESS_CHANGED = {
+    changed_at: DATE,
+    blocked_reason: { ...STRING_OR_NULL, optional: true },
+    access_until: { ...DATE_OR_NULL, optional: true },
+} satisfies Record<keyof AccessChangedDetail, Field>;
+
 const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.created': {
         previous_id: OPTIONAL_STRING,
+        first_payment: FIRST_PAYMENT,
     } satisfies Record<keyof CreatedDetail, Field>,
+    'subscription.ended': {
+        changed_at: { ...DATE, optional: true },
+        // Only `cancelled` today: a newer word is let through, as a status is.
+        end_reason: OPTIONAL_STRING,
+    } satisfies Record<keyof EndedDetail, Field>,
     'subscription.renewal_upcoming': {
         can_pay: BOOLEAN,
         renewal_issue: STRING_OR_NULL,
@@ -527,6 +569,8 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.stopped': {
         reason: STRING,
     } satisfies Record<keyof StoppedDetail, Field>,
+    'subscription.access_granted': ACCESS_CHANGED,
+    'subscription.access_revoked': ACCESS_CHANGED,
 };
 
 /** An event's own fields, its subscription's, then its detail's for a type this release knows. */

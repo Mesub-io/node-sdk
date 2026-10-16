@@ -1,3 +1,4 @@
+import type { BlockedReason } from './answer.js';
 import { MesubError } from './errors.js';
 import { numberOf } from './options.js';
 import type { ServerSubscription } from './subscriptions.js';
@@ -53,6 +54,17 @@ interface EventOf<Type extends string, Detail> {
     /** The `Mesub-Version` `data` and `detail` are written in, kept with the body. */
     api_version: string;
     /**
+     * Its place among this subscription's events (Mesub-io/backend#502): 1,
+     * 2, 3... in the order they happened, two events of one change included.
+     * Deliveries arrive in any order: apply one subscription's events by
+     * `sequence`, and skip one lower than the last you applied for it.
+     * Absent on a body written before Mesub numbered events, and on one it
+     * could not number: such an event cannot be placed, so read the
+     * subscription now (`subscriptions.retrieve` or `access`) rather than
+     * applying its `data`. Always 1 on a test delivery.
+     */
+    sequence?: number;
+    /**
      * The subscription as it stood right after the change that raised the
      * event, as `GET /v1/subscriptions/:id` would have answered it then,
      * however late the delivery. Events raised by one change share it:
@@ -106,6 +118,35 @@ export type NoDetail = Record<string, never>;
 export interface CreatedDetail {
     /** On a wallet coming back after a stop, the subscription it replaces. */
     previous_id?: string;
+    /**
+     * What the first payment paid (Mesub-io/backend#509). Null when Mesub
+     * recorded none at the confirmation (a period paid only in part, which
+     * the next charge collects); absent on an event written before it.
+     */
+    first_payment?: FirstPayment | null;
+}
+
+/** The first payment of a subscription: the transfer its own transaction carried. */
+export interface FirstPayment {
+    /** In the token's smallest unit, as a string. */
+    amount: string;
+    mint: string | null;
+    /** The transaction that paid it. */
+    signature: string | null;
+}
+
+/**
+ * `subscription.ended`: `changed_at` only on a cancellation that reached its
+ * end (Mesub-io/backend#509), its expiry to the millisecond, the moment
+ * `data` describes. Absent on any other end.
+ */
+export interface EndedDetail {
+    changed_at?: string;
+    /**
+     * `cancelled` on a cancellation that reached its end, as `data.end_reason`
+     * says it (Mesub-io/backend#511); absent otherwise, and on an older event.
+     */
+    end_reason?: 'cancelled';
 }
 
 /**
@@ -178,6 +219,33 @@ export interface RenewalUpcomingDetail {
     due_at: string;
 }
 
+/**
+ * `subscription.access_granted` and `subscription.access_revoked`: when
+ * access actually changed. A date that passed with nothing else happening
+ * (the end of a paid period, of a cancellation, of the plan) is that date to
+ * the millisecond, even when Mesub wrote the event later; `created_at` is
+ * when it was written.
+ */
+export interface AccessChangedDetail {
+    changed_at: string;
+    /**
+     * Why the subscription's charges were held when access changed, in the
+     * words of `data.blocked_reason`; null when they were not. Absent on an
+     * event written before Mesub-io/backend#511. Keep a default branch: Mesub
+     * may add a reason.
+     */
+    blocked_reason?: BlockedReason | null;
+    /**
+     * On `access_revoked`, the date access ended: the end of a paid period,
+     * of a cancellation, of the plan, or of the access a held subscription
+     * keeps; never after `changed_at`, and null when access ended with no
+     * date of its own (a stop). On `access_granted`, on a held subscription,
+     * the date access ends if nothing is collected by then; null otherwise.
+     * Absent on an event written before Mesub-io/backend#511.
+     */
+    access_until?: string | null;
+}
+
 /** Each event type and its `detail`. */
 interface EventDetails {
     'subscription.created': CreatedDetail;
@@ -187,8 +255,12 @@ interface EventDetails {
     'subscription.stopped': StoppedDetail;
     'subscription.cancelled': NoDetail;
     'subscription.resumed': NoDetail;
-    'subscription.ended': NoDetail;
+    'subscription.ended': EndedDetail;
     'subscription.expired': NoDetail;
+    'subscription.access_granted': AccessChangedDetail;
+    'subscription.access_revoked': AccessChangedDetail;
+    'subscription.paused': NoDetail;
+    'subscription.unpaused': NoDetail;
 }
 
 /**
@@ -216,13 +288,57 @@ export type SubscriptionCancelledEvent = WebhookEventOf<'subscription.cancelled'
 export type SubscriptionResumedEvent = WebhookEventOf<'subscription.resumed', NoDetail>;
 /**
  * Sent when the plan ends, is removed or replaced, and when a subscription is
- * closed. No event comes when a cancellation reaches its end: it reads
- * `ended`, `end_reason` `cancelled`, and `subscription.cancelled` came
- * before. Its `access_until` says when access stops.
+ * closed. Once Mesub turns the access events on, also when a cancellation
+ * reaches its end (Mesub-io/backend#509): `end_reason` `cancelled`,
+ * `detail.changed_at` its expiry, usually within half an hour of it, after
+ * that expiry's `subscription.access_revoked`. Closing it later sends it
+ * again, `end_reason` `closed`: one subscription can end twice.
  */
-export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', NoDetail>;
+export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', EndedDetail>;
 /** A checkout nobody signed in time. */
 export type SubscriptionExpiredEvent = WebhookEventOf<'subscription.expired', NoDetail>;
+/**
+ * Access started (Mesub-io/backend#507): the subscription grants access now
+ * and did not just before. Its first access, a payment that gives access
+ * back, a resume after a cancellation ended. A renewal paid on time, or a
+ * resume while the period runs, sends none. `data.access` is true.
+ *
+ * With `subscription.access_revoked`, the one pair to drive access from:
+ * sent exactly when access changes, and every change sends one. Apply them
+ * by `sequence`; the last one applied says whether the customer has access.
+ * The other events say why. Off until Mesub turns them on (`ACCESS_EVENTS`).
+ */
+export type SubscriptionAccessGrantedEvent = WebhookEventOf<
+    'subscription.access_granted',
+    AccessChangedDetail
+>;
+/**
+ * Access ended (Mesub-io/backend#507): the subscription grants no access now
+ * and did just before. It stopped or ended, a cancellation or the plan
+ * reached its end, or a blocked collection reached its `access_until`. For a
+ * date that passed, sent a few seconds after it. `data.access` is false.
+ * Off until Mesub turns it on.
+ */
+export type SubscriptionAccessRevokedEvent = WebhookEventOf<
+    'subscription.access_revoked',
+    AccessChangedDetail
+>;
+/**
+ * A seat parked (Mesub-io/backend#509): the project holds more subscribers
+ * than its tier allows, and Mesub stopped charging the newest. Not a pause
+ * the subscriber asked for; the status stays. `data.paused` is true,
+ * `data.next_charge_at` null; access runs to the end of the paid period,
+ * and its `subscription.access_revoked` comes then. Off until Mesub turns
+ * the access events on.
+ */
+export type SubscriptionPausedEvent = WebhookEventOf<'subscription.paused', NoDetail>;
+/**
+ * A parked seat back (Mesub-io/backend#509): the tier has room again, and
+ * Mesub charges it again. `data.paused` is false; a
+ * `subscription.access_granted` follows when its access had ended. Off until
+ * Mesub turns the access events on.
+ */
+export type SubscriptionUnpausedEvent = WebhookEventOf<'subscription.unpaused', NoDetail>;
 /**
  * Sent from the dashboard on request, with a made-up subscription (`sub_test`).
  * The dashboard also sends samples of the other types, with `test: true`.
@@ -244,6 +360,10 @@ export type WebhookEvent =
     | SubscriptionResumedEvent
     | SubscriptionEndedEvent
     | SubscriptionExpiredEvent
+    | SubscriptionAccessGrantedEvent
+    | SubscriptionAccessRevokedEvent
+    | SubscriptionPausedEvent
+    | SubscriptionUnpausedEvent
     | TestEvent;
 
 /** The body as received, never parsed: a string, a Buffer or any Uint8Array, an ArrayBuffer. */

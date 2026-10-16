@@ -392,6 +392,41 @@ answer this request.`: never the SDK's own message, which may name your
   `available_since`: events before it are not served. Typed as `MesubEvent`
   and `EventList`; a Mesub that predates the route throws a `not_found`
   whose `apiCode` is null (#146).
+- `submit` reads a 503 `unavailable` (Mesub-io/backend#505: too many
+  submits waiting on the project, nothing signed or sent) as an answer: it
+  is replayed after its `Retry-After` as before, but past the replays it is
+  thrown as is, `retryable`, with no read back, instead of a
+  `MesubSubmitError`, unless an earlier send got no answer. `retry`'s 503
+  `unavailable` (the charge could not be queued) now carries `retryAfter`,
+  20 s; it is still never sent again (#149).
+- `subscription.paused` and `subscription.unpaused` are typed
+  (Mesub-io/backend#509): `SubscriptionPausedEvent` and
+  `SubscriptionUnpausedEvent`, a seat parked over the tier's cap and brought
+  back, `data.paused` saying which. `subscription.ended` gets its own detail,
+  `EndedDetail`: `changed_at` and `end_reason: 'cancelled'` (backend#511),
+  only when a cancellation reached its end; a
+  subscription can now end twice, `cancelled` then `closed`. These come only
+  once Mesub turns the access events on. `subscription.created` carries
+  `detail.first_payment` (`FirstPayment`: `amount`, `mint`, `signature`), or
+  null, sent whatever the flag; absent on older events. All checked (#149).
+- Every event carries `sequence` (Mesub-io/backend#502), its place among its
+  subscription's events: apply one subscription's events by `sequence`, and
+  skip one lower than the last applied. Optional: absent on a body written
+  before Mesub numbered events and on one it could not number, which cannot
+  be placed (read the subscription instead). One that is not a whole number
+  from 1 throws `unexpected` (#149).
+- `subscription.access_granted` and `subscription.access_revoked` are typed
+  (Mesub-io/backend#507): `SubscriptionAccessGrantedEvent`,
+  `SubscriptionAccessRevokedEvent`, and their detail `AccessChangedDetail`,
+  `changed_at`, checked to be a date, and since Mesub-io/backend#511
+  `blocked_reason` and `access_until`, optional and nullable (absent on an
+  older event), checked when present: why charges were held, and the date
+  access ended, or on a held grant, ends. Sent exactly when access changes, a date
+  passing included, they are the pair to drive access from, ordered by
+  `sequence`; `data` carries `access`, `access_until`, `blocked_since` and
+  `blocked_reason`. `events.list` takes them as a `type`, and `verify` drops
+  the cached answers for their customer. Off until Mesub turns them on
+  (#149).
 
 ### Testing your integration
 
@@ -447,6 +482,33 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   within 30 days and from `eventsSince`. **Breaking:** `fake.webhook()`
   signs the event shape, with an `evt_fake_...` id; its `id` field is the
   event's, and `delivery_id` the `webhook-id` (#146).
+- `FakeMesub` numbers each subscription's events from 1 (`sequence`, or
+  `sequence: null` in `addEvent` and `webhook` to leave it out; 1 on the
+  `test` event) and serves a millisecond's events by it, highest first.
+  `addEvent` and `webhook` make `subscription.access_granted` and
+  `subscription.access_revoked` with `detail.changed_at`, `blocked_reason` and
+  `access_until` worked out from the subscription as Mesub's `accessCauseOf`, the revoked one on
+  an ended subscription without access. `new FakeMesub({ accessEvents: true
+})` raises `access_granted` after a submit's `created`, as Mesub with its
+  `ACCESS_EVENTS` flag on; off by default. Held to Mesub-io/backend
+  `openapi/v1.json` at bb1c947 (backend#511, on #509), each webhook against its
+  own schema (#149).
+- `FakeMesub`: a submit's `subscription.created` tells its `first_payment`,
+  the plan's amount and mint; `addEvent` and `webhook` make
+  `subscription.paused` (on a paused seat) and `subscription.unpaused`, and
+  an `ended` on a cancellation that reached its end carries `changed_at` and
+  `end_reason`.
+  `park(id)` and `unpark(id)` park a seat and bring it back, raising
+  `paused` and `unpaused` with `accessEvents` (#149).
+- `FakeMesub` sends `Retry-After` with a 503 on every POST under
+  `/v1/subscriptions`, as Mesub must there: 2 s for `unavailable` on submit,
+  20 s for `unavailable` on retry, 10 s otherwise, unless the failure names
+  one. The spec test holds the fake to the `Retry-After` the spec requires
+  (#149).
+- `FakeMesub` answers `Mesub-Version` on every answer, errors included, as
+  Mesub does, and refuses a version it does not serve, after the key, with a
+  400 `unsupported_version`; a call naming none is served. The spec test
+  holds every answer to each header the spec marks required (#149).
 
 ### Errors
 

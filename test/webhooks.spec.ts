@@ -7,6 +7,7 @@ import { signedHeaders } from '../src/webhooks.js';
 const SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
 const OTHER_SECRET = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
 const NOW = 1_790_000_000;
+const NOW_ISO = new Date(NOW * 1000).toISOString();
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 
 /**
@@ -97,7 +98,14 @@ function olderBody(type: string, detail: Record<string, unknown> = {}): string {
 
 /** Each v1 detail, in the shape the back's `pull-events.ts` and services write it. */
 const DETAILS: Record<string, Record<string, unknown>> = {
-    'subscription.created': { previous_id: 'sub_before' },
+    'subscription.created': {
+        previous_id: 'sub_before',
+        first_payment: {
+            amount: '9990000',
+            mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+            signature: '5wHu1q',
+        },
+    },
     'subscription.renewed': {
         amount: '9990000',
         mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
@@ -128,6 +136,18 @@ const DETAILS: Record<string, Record<string, unknown>> = {
     'subscription.resumed': {},
     'subscription.ended': {},
     'subscription.expired': {},
+    'subscription.paused': {},
+    'subscription.unpaused': {},
+    'subscription.access_granted': {
+        changed_at: '2026-01-15T12:00:00.000Z',
+        blocked_reason: null,
+        access_until: null,
+    },
+    'subscription.access_revoked': {
+        changed_at: '2026-01-31T00:00:00.000Z',
+        blocked_reason: 'receiver_account_frozen',
+        access_until: '2026-01-31T00:00:00.000Z',
+    },
     test: {},
 };
 
@@ -422,6 +442,149 @@ describe('verifyWebhook', () => {
 
         if (event.type !== 'subscription.payment_failed') throw new Error('narrowed wrong');
         expect(event.detail.retries_left).toBe(2);
+    });
+
+    it('narrows an access event to its changed_at, and hands back its sequence', async () => {
+        const raw = JSON.stringify({
+            ...JSON.parse(
+                body('subscription.access_revoked', DETAILS['subscription.access_revoked'], {
+                    ...SUBSCRIPTION,
+                    status: 'ended',
+                    access: false,
+                }),
+            ),
+            sequence: 4,
+        });
+        const event: WebhookEvent = await verifyWebhook(
+            raw,
+            backendHeaders(SECRET, 'cm1', NOW, raw),
+            { secret: SECRET },
+        );
+
+        if (event.type !== 'subscription.access_revoked') throw new Error('narrowed wrong');
+        const changed: string = event.detail.changed_at;
+        const sequence: number | undefined = event.sequence;
+        expect([changed, sequence, event.data.access]).toEqual([
+            '2026-01-31T00:00:00.000Z',
+            4,
+            false,
+        ]);
+    });
+
+    // Before Mesub-io/backend#502, or an event it could not number.
+    it('reads a body without sequence, and leaves it out', async () => {
+        const raw = body('subscription.renewed', DETAILS['subscription.renewed']);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect('sequence' in event).toBe(false);
+    });
+
+    it.each([0, -1, 1.5, '2', null])('throws unexpected for a sequence of %j', async (sequence) => {
+        const raw = JSON.stringify({
+            ...JSON.parse(body('subscription.renewed', DETAILS['subscription.renewed'])),
+            sequence,
+        });
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
+    });
+
+    it.each([
+        ['null, nothing recorded at the confirmation', { first_payment: null }],
+        [
+            'without mint and signature',
+            { first_payment: { amount: '1', mint: null, signature: null } },
+        ],
+    ])('reads a created event whose first_payment is %s', async (_what, detail) => {
+        const raw = body('subscription.created', detail);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.detail).toEqual(detail);
+    });
+
+    it('reads an ended event of a cancellation that reached its end, and types its changed_at', async () => {
+        const raw = body(
+            'subscription.ended',
+            { changed_at: '2026-01-31T00:00:00.000Z', end_reason: 'cancelled' },
+            {
+                ...SUBSCRIPTION,
+                status: 'ended',
+                end_reason: 'cancelled' as never,
+                access: false,
+            },
+        );
+        const event: WebhookEvent = await verifyWebhook(
+            raw,
+            backendHeaders(SECRET, 'cm1', NOW, raw),
+            { secret: SECRET },
+        );
+
+        if (event.type !== 'subscription.ended') throw new Error('narrowed wrong');
+        const { changed_at, end_reason }: { changed_at?: string; end_reason?: 'cancelled' } =
+            event.detail;
+        expect([changed_at, end_reason]).toEqual(['2026-01-31T00:00:00.000Z', 'cancelled']);
+    });
+
+    it.each([
+        ['created', { first_payment: { amount: 9990000, mint: null, signature: null } }],
+        ['created', { first_payment: { mint: null, signature: null } }],
+        ['created', { first_payment: 'paid' }],
+        ['ended', { changed_at: 'later' }],
+        ['ended', { changed_at: NOW_ISO, end_reason: 4 }],
+    ])('throws unexpected for a %s detail of the wrong shape: %j', async (type, detail) => {
+        const raw = body(`subscription.${type}`, detail);
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
+    });
+
+    // Before Mesub-io/backend#511 the detail carried changed_at alone.
+    it('reads an access event without blocked_reason and access_until, and leaves them out', async () => {
+        const raw = body('subscription.access_granted', { changed_at: '2026-01-15T12:00:00.000Z' });
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.detail).toEqual({ changed_at: '2026-01-15T12:00:00.000Z' });
+    });
+
+    it('hands back a blocked_reason newer than this release', async () => {
+        const detail = { ...DETAILS['subscription.access_revoked'], blocked_reason: 'new_hold' };
+        const raw = body('subscription.access_revoked', detail);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.detail).toEqual(detail);
+    });
+
+    it.each([
+        ['missing', {}],
+        ['not a date', { changed_at: 'later' }],
+        ['with a blocked_reason not a string', { changed_at: NOW_ISO, blocked_reason: 4 }],
+        ['with an access_until not a date', { changed_at: NOW_ISO, access_until: 'later' }],
+    ])('throws unexpected for an access event whose changed_at is %s', async (_what, detail) => {
+        const raw = body('subscription.access_granted', detail);
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
     });
 
     // A plan that ends before the next pull (Mesub-io/backend#362): the
@@ -880,6 +1043,26 @@ describe('mesub.webhooks.verify', () => {
             await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(false);
         },
     );
+
+    it.each([
+        ['subscription.access_revoked', false],
+        ['subscription.access_granted', true],
+    ] as const)('drops the cached answer once a %s event comes', async (type, access) => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        if (access) fake.deny(WALLET, 'pro', { revalidate_after: 3600 });
+        else fake.grant(WALLET, 'pro', { revalidate_after: 300 });
+        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(!access);
+        if (access) fake.grant(WALLET, 'pro');
+        else fake.deny(WALLET, 'pro');
+
+        const { body: raw, headers } = await fake.webhook(type, {
+            subscription: { wallet: WALLET, plan: 'pro' },
+        });
+        await mesub.webhooks.verify(raw, headers);
+
+        await expect(mesub.hasAccess(WALLET, 'pro')).resolves.toBe(access);
+    });
 
     // It announces a charge and moves no access: the cached answer, and the outage fallback, stay.
     it('keeps the cached answer when a subscription.renewal_upcoming event comes', async () => {
