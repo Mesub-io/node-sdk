@@ -408,7 +408,10 @@ answer this request.`: never the SDK's own message, which may name your
 - `subscription.access_granted` and `subscription.access_revoked` are typed
   (Mesub-io/backend#507): `SubscriptionAccessGrantedEvent`,
   `SubscriptionAccessRevokedEvent`, and their detail `AccessChangedDetail`,
-  `changed_at`, checked to be a date. Sent exactly when access changes, a date
+  `changed_at`, checked to be a date, and since Mesub-io/backend#511
+  `blocked_reason` and `access_until`, optional and nullable (absent on an
+  older event), checked when present: why charges were held, and the date
+  access ended, or on a held grant, ends. Sent exactly when access changes, a date
   passing included, they are the pair to drive access from, ordered by
   `sequence`; `data` carries `access`, `access_until`, `blocked_since` and
   `blocked_reason`. `events.list` takes them as a `type`, and `verify` drops
@@ -473,11 +476,12 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   `sequence: null` in `addEvent` and `webhook` to leave it out; 1 on the
   `test` event) and serves a millisecond's events by it, highest first.
   `addEvent` and `webhook` make `subscription.access_granted` and
-  `subscription.access_revoked` with `detail.changed_at`, the revoked one on
+  `subscription.access_revoked` with `detail.changed_at`, `blocked_reason` and
+  `access_until` worked out from the subscription as Mesub's `accessCauseOf`, the revoked one on
   an ended subscription without access. `new FakeMesub({ accessEvents: true
 })` raises `access_granted` after a submit's `created`, as Mesub with its
   `ACCESS_EVENTS` flag on; off by default. Held to Mesub-io/backend
-  `openapi/v1.json` at c585920, each webhook against its own schema (#149).
+  `openapi/v1.json` at 4c69034 (backend#511), each webhook against its own schema (#149).
 - `FakeMesub` sends `Retry-After` with a 503 on every POST under
   `/v1/subscriptions`, as Mesub must there: 2 s for `unavailable` on submit,
   20 s for `unavailable` on retry, 10 s otherwise, unless the failure names

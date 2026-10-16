@@ -1488,7 +1488,11 @@ describe('FakeMesub', () => {
             expect(granted).toMatchObject({
                 created_at: created!.created_at,
                 data: created!.data,
-                detail: { changed_at: created!.created_at },
+                detail: {
+                    changed_at: created!.created_at,
+                    blocked_reason: null,
+                    access_until: null,
+                },
             });
             expect(granted!.data.access).toBe(true);
         });
@@ -1501,15 +1505,54 @@ describe('FakeMesub', () => {
 
             expect(revoked).toMatchObject({
                 data: { status: 'ended', access: false, end_reason: 'cancelled' },
-                detail: { changed_at: revoked.created_at },
             });
-            expect(granted).toMatchObject({
-                data: { status: 'active', access: true },
-                detail: { changed_at: granted.created_at },
+            // The cancellation's end passed: that date, as Mesub's accessCauseOf.
+            expect(revoked.detail).toEqual({
+                changed_at: revoked.created_at,
+                blocked_reason: null,
+                access_until: revoked.created_at,
+            });
+            expect(granted).toMatchObject({ data: { status: 'active', access: true } });
+            expect(granted.detail).toEqual({
+                changed_at: granted.created_at,
+                blocked_reason: null,
+                access_until: null,
             });
             await expect(
                 fake.client().events.list({ type: 'subscription.access_revoked' }),
             ).resolves.toMatchObject({ data: [{ id: revoked.id }] });
+        });
+
+        it('fills an access event from its subscription as Mesub does: held, or stopped', async () => {
+            const fake = new FakeMesub();
+            const until = '2026-11-01T00:00:00.000Z';
+            const held = {
+                blocked_since: '2026-10-01T00:00:00.000Z',
+                blocked_reason: 'receiver_account_frozen' as const,
+                access_until: until,
+            };
+
+            const granted = fake.addEvent('subscription.access_granted', { subscription: held });
+            const heldOut = fake.addEvent('subscription.access_revoked', {
+                subscription: { ...held, status: 'active', end_reason: null },
+            });
+            const stopped = fake.addEvent('subscription.access_revoked', {
+                subscription: {
+                    status: 'stopped',
+                    end_reason: null,
+                    stop_reason: 'authority_closed',
+                },
+            });
+
+            expect(granted.detail).toMatchObject({
+                blocked_reason: 'receiver_account_frozen',
+                access_until: until,
+            });
+            expect(heldOut.detail).toMatchObject({
+                blocked_reason: 'receiver_account_frozen',
+                access_until: until,
+            });
+            expect(stopped.detail).toMatchObject({ blocked_reason: null, access_until: null });
         });
 
         it('signs a test delivery with sequence 1, and leaves sequence out on null', async () => {

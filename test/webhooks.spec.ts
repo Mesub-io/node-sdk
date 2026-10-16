@@ -7,6 +7,7 @@ import { signedHeaders } from '../src/webhooks.js';
 const SECRET = 'whsec_bWVzdWItZmFrZS13ZWJob29rLWtleS0x';
 const OTHER_SECRET = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
 const NOW = 1_790_000_000;
+const NOW_ISO = new Date(NOW * 1000).toISOString();
 const WALLET = 'SysvarRent111111111111111111111111111111111';
 
 /**
@@ -128,8 +129,16 @@ const DETAILS: Record<string, Record<string, unknown>> = {
     'subscription.resumed': {},
     'subscription.ended': {},
     'subscription.expired': {},
-    'subscription.access_granted': { changed_at: '2026-01-15T12:00:00.000Z' },
-    'subscription.access_revoked': { changed_at: '2026-01-31T00:00:00.000Z' },
+    'subscription.access_granted': {
+        changed_at: '2026-01-15T12:00:00.000Z',
+        blocked_reason: null,
+        access_until: null,
+    },
+    'subscription.access_revoked': {
+        changed_at: '2026-01-31T00:00:00.000Z',
+        blocked_reason: 'receiver_account_frozen',
+        access_until: '2026-01-31T00:00:00.000Z',
+    },
     test: {},
 };
 
@@ -477,9 +486,33 @@ describe('verifyWebhook', () => {
         expect(error.code).toBe('unexpected');
     });
 
+    // Before Mesub-io/backend#511 the detail carried changed_at alone.
+    it('reads an access event without blocked_reason and access_until, and leaves them out', async () => {
+        const raw = body('subscription.access_granted', { changed_at: '2026-01-15T12:00:00.000Z' });
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.detail).toEqual({ changed_at: '2026-01-15T12:00:00.000Z' });
+    });
+
+    it('hands back a blocked_reason newer than this release', async () => {
+        const detail = { ...DETAILS['subscription.access_revoked'], blocked_reason: 'new_hold' };
+        const raw = body('subscription.access_revoked', detail);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.detail).toEqual(detail);
+    });
+
     it.each([
         ['missing', {}],
         ['not a date', { changed_at: 'later' }],
+        ['with a blocked_reason not a string', { changed_at: NOW_ISO, blocked_reason: 4 }],
+        ['with an access_until not a date', { changed_at: NOW_ISO, access_until: 'later' }],
     ])('throws unexpected for an access event whose changed_at is %s', async (_what, detail) => {
         const raw = body('subscription.access_granted', detail);
 

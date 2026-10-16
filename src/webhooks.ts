@@ -1,3 +1,4 @@
+import type { BlockedReason } from './answer.js';
 import { MesubError } from './errors.js';
 import { numberOf } from './options.js';
 import type { ServerSubscription } from './subscriptions.js';
@@ -198,6 +199,22 @@ export interface RenewalUpcomingDetail {
  */
 export interface AccessChangedDetail {
     changed_at: string;
+    /**
+     * Why the subscription's charges were held when access changed, in the
+     * words of `data.blocked_reason`; null when they were not. Absent on an
+     * event written before Mesub-io/backend#511. Keep a default branch: Mesub
+     * may add a reason.
+     */
+    blocked_reason?: BlockedReason | null;
+    /**
+     * On `access_revoked`, the date access ended: the end of a paid period,
+     * of a cancellation, of the plan, or of the access a held subscription
+     * keeps; never after `changed_at`, and null when access ended with no
+     * date of its own (a stop). On `access_granted`, on a held subscription,
+     * the date access ends if nothing is collected by then; null otherwise.
+     * Absent on an event written before Mesub-io/backend#511.
+     */
+    access_until?: string | null;
 }
 
 /** Each event type and its `detail`. */

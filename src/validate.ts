@@ -507,6 +507,16 @@ const TEST: Field = { check: (value) => value === true, expected: 'true', option
  */
 const OLDER_WEBHOOK = { type: STRING, created_at: DATE, data: OBJECT, test: TEST };
 
+/**
+ * An access event's detail (Mesub-io/backend#507), and since #511 why and
+ * until when: both left out by an event written before it.
+ */
+const ACCESS_CHANGED = {
+    changed_at: DATE,
+    blocked_reason: { ...STRING_OR_NULL, optional: true },
+    access_until: { ...DATE_OR_NULL, optional: true },
+} satisfies Record<keyof AccessChangedDetail, Field>;
+
 const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.created': {
         previous_id: OPTIONAL_STRING,
@@ -539,12 +549,8 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.stopped': {
         reason: STRING,
     } satisfies Record<keyof StoppedDetail, Field>,
-    'subscription.access_granted': {
-        changed_at: DATE,
-    } satisfies Record<keyof AccessChangedDetail, Field>,
-    'subscription.access_revoked': {
-        changed_at: DATE,
-    } satisfies Record<keyof AccessChangedDetail, Field>,
+    'subscription.access_granted': ACCESS_CHANGED,
+    'subscription.access_revoked': ACCESS_CHANGED,
 };
 
 /** An event's own fields, its subscription's, then its detail's for a type this release knows. */

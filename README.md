@@ -506,8 +506,13 @@ switch (event.type) {
 `data.access` is true on `access_granted`, false on `access_revoked`.
 `event.detail.changed_at` is when access changed: a date that passed with
 nothing else happening is that date to the millisecond, even when the event
-was written a few seconds later, its `created_at`. `verify` drops the access
-answers cached for the customer on both.
+was written a few seconds later, its `created_at`. `detail.blocked_reason` says
+whether charges were held when access changed (`data.blocked_reason`'s words,
+null when not). `detail.access_until` is, on `access_revoked`, the date access
+ended (null for a stop or a close), and on `access_granted`, for a held
+subscription, the date access ends unless a charge lands (null otherwise).
+Both are absent on events written before Mesub added them. `verify` drops the
+access answers cached for the customer on both.
 
 ### Catch up on missed events
 

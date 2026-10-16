@@ -530,7 +530,7 @@ export class FakeMesub {
             api_version: API_VERSION,
             ...(sequence !== null && { sequence }),
             data,
-            detail: fields.detail ?? detailOf(type, now),
+            detail: fields.detail ?? detailOf(type, now, data),
         };
 
         return signWebhook(payload, {
@@ -564,7 +564,7 @@ export class FakeMesub {
             api_version: API_VERSION,
             ...(sequence !== null && { sequence }),
             data,
-            detail: (fields.detail ?? detailOf(type, now)) as never,
+            detail: (fields.detail ?? detailOf(type, now, data)) as never,
         } as MesubEvent;
 
         this.#events.push(event);
@@ -691,7 +691,7 @@ export class FakeMesub {
             const flip = data.access
                 ? 'subscription.access_granted'
                 : 'subscription.access_revoked';
-            push(flip, { changed_at: created_at });
+            push(flip, accessDetailOf(data, created_at));
         }
     }
 
@@ -1597,7 +1597,11 @@ export async function signWebhook(
 }
 
 /** A plausible detail for each type that carries one, as the back writes it. */
-function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
+function detailOf(
+    type: WebhookEventType,
+    now: Date,
+    data: ServerSubscription,
+): Record<string, unknown> {
     const start = now.toISOString();
     const end = new Date(now.getTime() + PERIOD_MS).toISOString();
     const paid = { amount: '9990000', mint: USDC, period_start: start, period_end: end };
@@ -1627,10 +1631,34 @@ function detailOf(type: WebhookEventType, now: Date): Record<string, unknown> {
             return { reason: 'insufficient_balance' };
         case 'subscription.access_granted':
         case 'subscription.access_revoked':
-            return { changed_at: start };
+            return accessDetailOf(data, start);
         default:
             return {};
     }
+}
+
+/**
+ * An access event's detail as Mesub writes it (`accessDetail` and
+ * `accessCauseOf`, Mesub-io/backend#511): when, the hold on its charges, and
+ * the date access ends. A grant names that date only on a held subscription;
+ * a revocation names the date that passed (a held one's `access_until`, the
+ * end of a cancellation or of the plan), and none for a stop or a close.
+ */
+function accessDetailOf(data: ServerSubscription, changedAt: string): Record<string, unknown> {
+    const { access, blocked_reason, access_until, status, end_reason } = data;
+    const dated =
+        blocked_reason !== null ||
+        (status === 'ended' && (end_reason === 'cancelled' || end_reason === 'plan_ended'));
+
+    return {
+        changed_at: changedAt,
+        blocked_reason,
+        access_until: access
+            ? blocked_reason === null
+                ? null
+                : access_until
+            : (access_until ?? (dated ? changedAt : null)),
+    };
 }
 
 /**
