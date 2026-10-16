@@ -1327,6 +1327,8 @@ describe('the widget routes: one subscription in full', () => {
             status: 'unpaid',
             payment_status: 'late',
             next_retry_at: SOON,
+            next_retry_number: null,
+            retries_allowed: null,
         });
 
         expect(body.upcoming).toMatchObject([
@@ -2193,6 +2195,8 @@ describe('the widget routes: one subscription, from a Mesub without the attempts
             status: 'unpaid',
             payment_status: 'late',
             next_retry_at: '2026-11-01T09:00:00.000Z',
+            next_retry_number: null,
+            retries_allowed: null,
         });
 
         const answer = await call(ada, { path: `/subscriptions/${id}` });

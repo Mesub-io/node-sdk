@@ -514,6 +514,18 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   Mesub does, and refuses a version it does not serve, after the key, with a
   400 `unsupported_version`; a call naming none is served. The spec test
   holds every answer to each header the spec marks required (#149).
+- `FakeMesub` refuses Pay now as Mesub does: `subscription_paused`,
+  `plan_ended`, and `retry_too_soon` with `Retry-After` by the new `tier`
+  option (`dev` by default), and on `free` `retry_deadline_passed` and
+  `retries_spent`. `fail({ code: 'retry_too_soon' })` sends the tier's wait.
+  `addSubscription` dates a row by its `status` (an active one is paid for 30
+  days), and refuses a wallet that is not one: a row added then cancelled
+  keeps its period. `webhook('test')` is Mesub's test delivery (`test: true`,
+  `sub_test`, `user_123`), and `webhook()` carries a subscription the fake
+  holds. A submit is refused `plan_ended` past the plan's end and 400 without
+  `terms_signature`. A missing key is `missing_api_key`, a list `limit`
+  outside 1 to 100 a 400. Ids are each fake's own and start over on
+  `reset()`; `signWebhook` names its deliveries `msg_signed_...` (#152).
 
 ### Errors
 

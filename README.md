@@ -640,6 +640,33 @@ that flips access, and `subscription.paused` and `subscription.unpaused` on
 As on Mesub, a client keeps a yes up to five minutes: a change shows to a new
 `fake.client()`, or on the next call with `new FakeMesub({ revalidateAfter: 0 })`.
 
+Hand the fake's client to the guards and the routes, which otherwise build
+their own from `MESUB_API_KEY`:
+
+```ts
+const mesub = fake.client();
+app.get('/api/analytics', yourLogin, requirePlan('pro', { client: mesub, customer }), handler);
+app.use('/api/mesub', yourLogin, mesubRoutes({ client: mesub, customer }));
+```
+
+Pay now refuses as Mesub does, from what the fake holds: a parked seat, a row
+not late, a plan past its end, and the wait between two retries, which
+depends on `tier` (`dev` by default; `free` also caps a missed period at
+three and closes at `retry_deadline`). A taken retry pulls nothing: the row
+stays `unpaid`.
+
+```ts
+const fake = new FakeMesub({ revalidateAfter: 0 });
+const late = fake.addSubscription({ wallet, plan: 'pro', status: 'unpaid' }); // late, retry tomorrow
+await fake.client().subscriptions.retry(late.id); // 202, still unpaid
+await fake.client().subscriptions.retry(late.id); // retry_too_soon, retryAfter 20 minutes
+```
+
+`fail()` answers every call, not only the one under test: a route that reads
+the subscription before it pays now gets the error on that read. What only
+the chain decides (`insufficient_balance`, `retry_cannot_succeed`) is tested
+on the SDK call alone, or on a route that makes that one call.
+
 Guards, webhooks, subscribing and managing against it:
 [Test your integration](https://docs.mesub.io/docs/testing).
 

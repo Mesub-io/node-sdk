@@ -88,7 +88,20 @@ export interface FakeMesubOptions {
      * `webhook`, makes either type whatever this says.
      */
     accessEvents?: boolean;
+    /**
+     * The project's tier, `dev` by default. It decides what Pay now
+     * (`subscriptions.retry`) refuses, as on Mesub: on `free` a wait of 10
+     * minutes after each hand retry, three per missed period, none past
+     * `retry_deadline`; on `dev` and `business` none for the first, then a
+     * wait of 20 minutes doubling after each. And what `addSubscription`
+     * gives a late row: no access on `free`, access through its retries
+     * otherwise.
+     */
+    tier?: FakeTier;
 }
+
+/** A project's tier, as Mesub names them. */
+export type FakeTier = 'free' | 'dev' | 'business';
 
 /** A plan as declared to the fake: its slug, and any field to set, a token's included. */
 export type FakePlanFields = Partial<Omit<Plan, 'token'>> & {
@@ -108,7 +121,10 @@ export interface SignedWebhook {
 export interface SignWebhookOptions {
     /** The endpoint's secret, `whsec_...`. */
     secret: string;
-    /** `webhook-id`. Defaults to a new `msg_fake_...` each time. */
+    /**
+     * `webhook-id`. Defaults to a new `msg_signed_...` each time, never one
+     * a fake's `webhook()` gives.
+     */
     id?: string;
     /** `webhook-timestamp`, Unix seconds. Defaults to now. */
     timestamp?: number;
@@ -137,7 +153,11 @@ export interface FakeEventFields {
 
 /** What `FakeMesub.webhook` sends, on top of a made-up event of that type. */
 export interface FakeWebhookFields {
-    /** Fields of the subscription it carries. Defaults to an active, paid one on `pro`. */
+    /**
+     * Fields of the subscription it carries, on top of the one the fake
+     * holds under that `id`, else of an active, paid one on `pro`. The
+     * `test` event carries Mesub's sample one (`sub_test`, `user_123`).
+     */
     subscription?: Partial<ServerSubscription>;
     /** The event's detail. Defaults to a plausible one for the type. */
     detail?: Record<string, unknown>;
@@ -155,7 +175,10 @@ export interface FakeWebhookFields {
      * number.
      */
     sequence?: number | null;
-    /** The delivery's id, the `webhook-id` header. Defaults to a new `msg_fake_...`. */
+    /**
+     * The delivery's id, the `webhook-id` header. Defaults to the fake's
+     * next `msg_fake_...`, from `msg_fake_1`, and again after `reset()`.
+     */
     delivery_id?: string;
     /** `webhook-timestamp`, Unix seconds. Defaults to now. */
     timestamp?: number;
@@ -189,6 +212,8 @@ export interface FakeFailure {
      * queues (every POST under `/v1/subscriptions`) defaults to Mesub's own:
      * 2 for `unavailable` on submit (too many submits waiting), 20 for
      * `unavailable` on retry (the charge could not be queued), 10 otherwise.
+     * `retry_too_soon` defaults to the first wait of the fake's `tier`: 600
+     * on `free`, 1200 on `dev` and `business`.
      */
     retryAfter?: number;
 }
@@ -267,6 +292,43 @@ const RESOURCE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_ID_HEADER = 'Mesub-Request-Id';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const PERIOD_MS = 30 * 24 * 3600 * 1000;
+const DAY_MS = 24 * 3600 * 1000;
+/** The id and the made-up subscription of every test delivery, as Mesub's (`TEST_SUBSCRIPTION`). */
+const TEST_SUBSCRIPTION: ServerSubscription = {
+    id: 'sub_test',
+    status: 'active',
+    paused: false,
+    end_reason: null,
+    late_reason: null,
+    stop_reason: null,
+    access: true,
+    payment_status: 'paid',
+    blocked_since: null,
+    blocked_reason: null,
+    plan: 'pro',
+    wallet: FAKE_WALLET,
+    email: 'subscriber@example.com',
+    external_id: 'user_123',
+    current_period_start: '2026-01-01T00:00:00.000Z',
+    current_period_end: '2026-01-31T00:00:00.000Z',
+    next_charge_at: '2026-01-31T00:00:00.000Z',
+    next_retry_at: null,
+    retry_deadline: null,
+    next_retry_number: null,
+    retries_allowed: null,
+    access_until: '2026-01-31T00:00:00.000Z',
+    closable: false,
+    closable_from: null,
+    created_at: '2026-01-01T00:00:00.000Z',
+    confirmed_at: '2026-01-01T00:00:00.000Z',
+};
+/** Free: the wait after each hand retry (`MANUAL_RETRY_COOLDOWN_MS`), and how many a missed period gets. */
+const FREE_RETRY_WAIT_MS = 10 * 60 * 1000;
+const FREE_HAND_RETRIES = 3;
+/** Dev and Business: the wait after the first hand retry, doubling after each (`PAID_HAND_RETRY_WAIT_MS`). */
+const PAID_RETRY_WAIT_MS = 20 * 60 * 1000;
+/** Two minutes before the end of the missed period, where Free's hand retries close (`retryClosesAt`). */
+const CLOCK_MARGIN_MS = 2 * 60 * 1000;
 /** About 150 blocks of 200 ms: how long Mesub says a transaction it built lives. */
 const TRANSACTION_LIFE_MS = 30_000;
 const REASONS: Record<number, string> = {
@@ -332,6 +394,12 @@ export class FakeMesub {
     readonly #eventsSince: string;
     #failure: FakeFailure | null = null;
     #ids = 0;
+    /** The made-up subscriptions of `webhook` and `addEvent`, apart: they take no `sub_fake_` id. */
+    #madeUpIds = 0;
+    #deliveryIds = 0;
+    readonly #tier: FakeTier;
+    /** The hand retries fired on each late subscription, and when the last one was, by id. */
+    readonly #handRetries = new Map<string, { count: number; at: number }>();
 
     constructor(options: FakeMesubOptions = {}) {
         this.baseUrl = (options.baseUrl ?? 'https://api.mesub.test').replace(/\/+$/, '');
@@ -345,6 +413,7 @@ export class FakeMesub {
         this.#attemptsRoute = options.attemptsRoute ?? true;
         this.#revalidateAfter = options.revalidateAfter;
         this.#accessEvents = options.accessEvents ?? false;
+        this.#tier = options.tier ?? 'dev';
         this.#eventsSince = new Date(
             options.eventsSince ?? Date.now() - EVENTS_WINDOW_MS,
         ).toISOString();
@@ -478,12 +547,22 @@ export class FakeMesub {
     }
 
     /**
-     * A subscription `retrieve` and `list` answer, active by default. Its
-     * access answer is left as it is: set it with `grant`.
+     * A subscription `retrieve` and `list` answer, active by default, dated
+     * as Mesub dates a row of that `status` unless `fields` say otherwise:
+     * active, paid for a period ending in 30 days and charged then; unpaid,
+     * that period over, late, with access and a retry tomorrow, or on `free`
+     * no access and hand retries until `retry_deadline`; cancelled, access to
+     * the end of the period; stopped (`out_of_retries`) or ended (`closed`),
+     * no access. Its access answer is left as it is: set it with `grant`.
+     * Throws for a wallet Mesub would refuse. Its plan may be one `plans`
+     * leaves out: Mesub serves the rows of a plan it no longer has.
      */
     addSubscription(
         fields: Partial<ServerSubscription> & { wallet: string; plan: string },
     ): ServerSubscription {
+        if (!BASE58_ADDRESS.test(fields.wallet)) {
+            throw new Error(`${fields.wallet} is not a wallet: a base58 Solana address.`);
+        }
         const subscription = this.#subscription(fields);
 
         this.#subscriptions.push(subscription);
@@ -542,28 +621,28 @@ export class FakeMesub {
     /**
      * A webhook of that type, as Mesub posts it to an endpoint: the event's
      * body (Mesub-io/backend#482), on a made-up subscription and detail
-     * unless `fields` say otherwise, signed with `webhookSecret`. Post it to
-     * your own handler, or hand it to `webhooks.verify` of a `client()`.
-     * Nothing is added to the fake.
+     * unless `fields` say otherwise, the subscription the fake holds under
+     * `fields.subscription.id` when it holds one, signed with
+     * `webhookSecret`. The `test` event is Mesub's test delivery: `test:
+     * true`, `evt_test`, on its sample subscription (`sub_test`,
+     * `user_123`). Post it to your own handler, or hand it to
+     * `webhooks.verify` of a `client()`. Nothing is added to the fake.
      */
     async webhook(type: WebhookEventType, fields: FakeWebhookFields = {}): Promise<SignedWebhook> {
         const now = new Date();
-        const data = withClosing(
-            this.#subscription({
-                wallet: FAKE_WALLET,
-                plan: 'pro',
-                ...subscriptionOf(type),
-                ...fields.subscription,
-            }),
-        );
+        const test = type === 'test';
+        // A test delivery carries Mesub's sample subscription, the same every time.
+        const data = test
+            ? { ...TEST_SUBSCRIPTION, ...fields.subscription }
+            : withClosing(this.#madeUp(type, fields.subscription));
         const sequence =
             fields.sequence === undefined
-                ? type === 'test'
+                ? test
                     ? 1
                     : this.#nextSequence(data.id)
                 : fields.sequence;
         const payload = {
-            id: fields.id ?? (type === 'test' ? TEST_EVENT_ID : this.#nextEventId()),
+            id: fields.id ?? (test ? TEST_EVENT_ID : this.#nextEventId()),
             object: 'event',
             type,
             created_at: fields.created_at ?? now.toISOString(),
@@ -572,13 +651,33 @@ export class FakeMesub {
             ...(sequence !== null && { sequence }),
             data,
             detail: fields.detail ?? detailOf(type, now, data),
+            ...(test && { test: true }),
         };
 
         return signWebhook(payload, {
             secret: this.webhookSecret,
-            ...(fields.delivery_id !== undefined && { id: fields.delivery_id }),
+            id: fields.delivery_id ?? `msg_fake_${(this.#deliveryIds += 1)}`,
             ...(fields.timestamp !== undefined && { timestamp: fields.timestamp }),
         });
+    }
+
+    /**
+     * The subscription an event carries: the one the fake holds under
+     * `fields.id` when it holds one, else a made-up one, active and paid on
+     * `pro` unless the type says otherwise; `fields` on top.
+     */
+    #madeUp(type: WebhookEventType, fields: Partial<ServerSubscription> = {}): ServerSubscription {
+        const held = this.#subscriptions.find((each) => each.id === fields.id);
+        const base = held
+            ? this.#view(held)
+            : {
+                  id: fields.id ?? `sub_fake_event_${(this.#madeUpIds += 1)}`,
+                  wallet: FAKE_WALLET,
+                  plan: 'pro',
+                  ...subscriptionOf(type),
+              };
+
+        return this.#subscription({ ...base, ...fields });
     }
 
     /**
@@ -589,11 +688,7 @@ export class FakeMesub {
      */
     addEvent(type: EventType, fields: FakeEventFields = {}): MesubEvent {
         const now = new Date();
-        const held = this.#subscriptions.find((each) => each.id === fields.subscription?.id);
-        const base = held
-            ? this.#view(held)
-            : { wallet: FAKE_WALLET, plan: 'pro', ...subscriptionOf(type) };
-        const data = withClosing(this.#subscription({ ...base, ...fields.subscription }));
+        const data = withClosing(this.#madeUp(type, fields.subscription));
         const sequence =
             fields.sequence === undefined ? this.#nextSequence(data.id) : fields.sequence;
         const event: MesubEvent = {
@@ -620,7 +715,10 @@ export class FakeMesub {
         this.#failure = failure === 'outage' ? OUTAGE : failure;
     }
 
-    /** Forgets every answer, subscription, failure and request. */
+    /**
+     * Forgets every answer, subscription, failure and request, and starts
+     * every id over: the same test makes the same ids, whatever ran before.
+     */
     reset(): void {
         this.#answers.clear();
         this.#ends.clear();
@@ -630,40 +728,44 @@ export class FakeMesub {
         this.#attempts.clear();
         this.#events = [];
         this.#sequences.clear();
+        this.#handRetries.clear();
         this.#failure = null;
         this.requests.length = 0;
+        this.#ids = 0;
+        this.#madeUpIds = 0;
+        this.#eventIds = 0;
+        this.#attemptIds = 0;
+        this.#requestIds = 0;
+        this.#deliveryIds = 0;
     }
 
+    /** A subscription with every field, dated as Mesub dates one of its `status`. */
     #subscription(
         fields: Partial<ServerSubscription> & Pick<ServerSubscription, 'wallet' | 'plan'>,
     ): ServerSubscription {
-        const now = new Date().toISOString();
+        const now = Date.now();
+        const iso = (ms: number) => new Date(ms).toISOString();
 
         return {
-            id: this.#nextId(),
+            id: fields.id ?? this.#nextId(),
             status: 'active',
             paused: false,
             end_reason: null,
             late_reason: null,
             stop_reason: null,
-            access: true,
-            payment_status: 'paid',
             blocked_since: null,
             blocked_reason: null,
             email: null,
             external_id: null,
-            current_period_start: now,
-            current_period_end: null,
-            next_charge_at: null,
             next_retry_at: null,
             retry_deadline: null,
             next_retry_number: null,
             retries_allowed: null,
-            access_until: null,
             closable: false,
             closable_from: null,
-            created_at: now,
-            confirmed_at: now,
+            created_at: iso(now),
+            confirmed_at: iso(now),
+            ...datesOf(fields.status ?? 'active', this.#tier, now),
             ...fields,
         };
     }
@@ -801,7 +903,12 @@ export class FakeMesub {
         const body = typeof init.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined;
         this.requests.push({ method, path, query, headers, body });
 
-        if (headers.get('authorization') !== `Bearer ${this.apiKey}`) {
+        // As Mesub's ApiKeyGuard, which tells a missing key from a wrong one.
+        const [scheme, key] = (headers.get('authorization') ?? '').split(' ');
+        if (scheme?.toLowerCase() !== 'bearer' || !key) {
+            return error(401, 'missing_api_key', 'Send your API key as a bearer token.');
+        }
+        if (key !== this.apiKey) {
             return error(401, 'invalid_api_key', 'That API key is not valid.');
         }
         // After the key, as Mesub's ApiVersionInterceptor: absent is the first
@@ -816,7 +923,8 @@ export class FakeMesub {
         }
         if (this.#failure) {
             const { status, code, message, retryable } = this.#failure;
-            const retryAfter = this.#failure.retryAfter ?? waitOf(method, path, status, code);
+            const retryAfter =
+                this.#failure.retryAfter ?? waitOf(method, path, status, code, this.#tier);
             return error(status, code, message ?? `Mesub answered ${status}.`, {
                 ...(retryable !== undefined && { retryable }),
                 ...(retryAfter !== undefined && { retryAfter }),
@@ -865,6 +973,11 @@ export class FakeMesub {
         if (step === 'attempts' && (confirm || !this.#attemptsRoute)) {
             return error(404, 'not_found', `Cannot ${method} ${path}`);
         }
+        // Mesub's DTO, before any lookup.
+        if (method === 'POST' && step === 'submit' && !confirm) {
+            const invalid = invalidSubmit(body);
+            if (invalid) return invalid;
+        }
         if (id !== undefined) {
             const subscription = this.#subscriptions.find((s) => s.id === decodeURIComponent(id));
             if (!subscription) {
@@ -887,17 +1000,9 @@ export class FakeMesub {
             }
             // Pay now (Mesub-io/backend#354): taken for a late one, nothing pulled here.
             if (step === 'retry') {
-                if (method !== 'POST' || confirm) {
-                    return error(404, 'not_found', `Cannot ${method} ${path}`);
-                }
-                if (subscription.status !== 'unpaid') {
-                    return error(
-                        409,
-                        'subscription_not_late',
-                        'This subscription is not behind on its payment.',
-                    );
-                }
-                return Response.json(this.#view(subscription), { status: 202 });
+                return method === 'POST' && !confirm
+                    ? this.#retry(subscription)
+                    : error(404, 'not_found', `Cannot ${method} ${path}`);
             }
             if (method === 'POST' && step && step !== 'submit') {
                 return confirm
@@ -949,7 +1054,8 @@ export class FakeMesub {
         if (!asked)
             return error(400, 'invalid_request', 'Name one of wallet, external_id or email.');
 
-        const limit = Number(query['limit'] ?? 20);
+        const limit = query['limit'] === undefined ? 20 : limitOf(query['limit']);
+        if (limit === null) return error(400, 'invalid_request', [LIMIT_MESSAGE]);
         // Newest first. The cursor is a position among every subscription
         // held, whoever it is for, and one not held is a 400, as on Mesub.
         const all = [...this.#subscriptions].reverse();
@@ -1134,6 +1240,8 @@ export class FakeMesub {
         if (subscription.status !== 'pending') {
             return error(409, 'not_awaiting_signature', 'That subscription awaits no signature.');
         }
+        // Read again at the submit: a plan that ended since the create takes nobody.
+        if (this.#over(subscription.plan)) return error(409, 'plan_ended', 'This plan has ended.');
         for (const other of this.#subscriptions) {
             const beside = other.plan === subscription.plan && other.wallet === subscription.wallet;
             if (beside && other !== subscription && other.status === 'pending') {
@@ -1183,6 +1291,74 @@ export class FakeMesub {
         });
 
         return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
+    }
+
+    /**
+     * A hand retry, refused as Mesub's `RetryNowService` refuses it from what
+     * the fake holds, in its order: a parked late seat, a row not late, a
+     * plan past its end, the wait since the last one (by `tier`, with
+     * `Retry-After`), and on Free a `retry_deadline` passed or the three
+     * retries spent. Taken, it pulls nothing and the row stays `unpaid`: the
+     * fake counts it as one more that failed. What only the chain or a race
+     * decides (`insufficient_balance`, `retry_cannot_succeed`,
+     * `pull_running`, `subscription_changed`) is answered with `fail()`.
+     */
+    #retry(subscription: ServerSubscription): Response {
+        if (subscription.status === 'unpaid' && subscription.paused) {
+            return error(
+                409,
+                'subscription_paused',
+                "This subscription is paused over the merchant's tier limit, so it cannot be retried.",
+            );
+        }
+        if (subscription.status !== 'unpaid') {
+            return error(
+                409,
+                'subscription_not_late',
+                'This subscription is not behind on its payment.',
+            );
+        }
+        if (this.#over(subscription.plan)) {
+            return error(
+                409,
+                'plan_ended',
+                'This plan has ended, so this payment can no longer be collected.',
+            );
+        }
+
+        const now = Date.now();
+        const free = this.#tier === 'free';
+        const fired = this.#handRetries.get(subscription.id) ?? { count: 0, at: 0 };
+        const openAt =
+            fired.count === 0
+                ? 0
+                : fired.at +
+                  (free ? FREE_RETRY_WAIT_MS : PAID_RETRY_WAIT_MS * 2 ** (fired.count - 1));
+        if (openAt > now) {
+            const minutes = Math.ceil((openAt - now) / 60_000);
+            return error(
+                409,
+                'retry_too_soon',
+                `Try again in ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`,
+                { retryAfter: Math.ceil((openAt - now) / 1000) },
+            );
+        }
+        if (free) {
+            const deadline = subscription.retry_deadline;
+            if (deadline !== null && Date.parse(deadline) <= now) {
+                return error(
+                    409,
+                    'retry_deadline_passed',
+                    'The missed period ends too soon to retry.',
+                );
+            }
+            if (fired.count >= FREE_HAND_RETRIES) {
+                return error(409, 'retries_spent', 'This subscription has no retries left.');
+            }
+        }
+
+        this.#handRetries.set(subscription.id, { count: fired.count + 1, at: now });
+        return Response.json(this.#view(subscription), { status: 202 });
     }
 
     /** The transaction of a cancel, resume or close, or Mesub's refusal of it. */
@@ -1250,6 +1426,8 @@ export class FakeMesub {
                 status: 'cancelled',
                 stop_reason: null,
                 ...NO_BLOCK,
+                // The access a cancellation keeps, also where no grant dated it.
+                access_until: subscription.access_until,
                 cancelled_at: now,
                 next_charge_at: null,
                 next_retry_at: null,
@@ -1389,6 +1567,94 @@ function bounded<T extends Dated>(row: T, end: string | null): T {
         next_charge_at: ahead(row.next_charge_at),
         next_retry_at: ahead(row.next_retry_at),
     };
+}
+
+/** What a row of that status reads as on Mesub, dated from `now`, ms. */
+type StatusDates = Pick<
+    ServerSubscription,
+    | 'access'
+    | 'payment_status'
+    | 'current_period_start'
+    | 'current_period_end'
+    | 'next_charge_at'
+    | 'access_until'
+> &
+    Partial<ServerSubscription>;
+
+/**
+ * The fields Mesub serves a row of that status with: a period that runs 30
+ * days from now on a running or cancelled one, a period just over on a late,
+ * stopped or ended one, and none on a checkout. Late, it keeps access to its
+ * one retry, tomorrow, except on Free, which grants none to a late row and
+ * dates the close of its hand retries instead (`billingDatesOf`).
+ */
+function datesOf(status: ServerSubscription['status'], tier: FakeTier, now: number): StatusDates {
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const running = { current_period_start: iso(now), current_period_end: iso(now + PERIOD_MS) };
+    // The period that went unpaid, or the last one before the row stopped.
+    const behind = { current_period_start: iso(now - PERIOD_MS), current_period_end: iso(now) };
+    const nothing = {
+        access: false,
+        payment_status: 'none',
+        next_charge_at: null,
+        access_until: null,
+    } as const;
+
+    switch (status) {
+        case 'active':
+            return {
+                ...running,
+                access: true,
+                payment_status: 'paid',
+                next_charge_at: running.current_period_end,
+                access_until: running.current_period_end,
+            };
+        case 'cancelled':
+            return {
+                ...running,
+                access: true,
+                payment_status: 'paid',
+                next_charge_at: null,
+                access_until: running.current_period_end,
+            };
+        case 'unpaid': {
+            const late = {
+                ...behind,
+                late_reason: 'insufficient_balance',
+                payment_status: 'late',
+                next_charge_at: null,
+            } as const;
+            if (tier === 'free') {
+                // The close of hand retries: two minutes before the missed period ends.
+                const deadline = iso(now + PERIOD_MS - CLOCK_MARGIN_MS);
+                return { ...late, access: false, access_until: null, retry_deadline: deadline };
+            }
+            const retry = iso(now + DAY_MS);
+            return {
+                ...late,
+                access: true,
+                // Its last retry: access stops there if that one fails too.
+                access_until: retry,
+                next_retry_at: retry,
+                next_retry_number: 1,
+                retries_allowed: 1,
+            };
+        }
+        case 'stopped':
+            return { ...behind, ...nothing, stop_reason: 'out_of_retries' };
+        case 'ended':
+            return { ...behind, ...nothing, end_reason: 'closed' };
+        case 'superseded':
+            return { ...behind, ...nothing };
+        default:
+            // pending, expired, failed: a checkout nothing landed for.
+            return {
+                ...nothing,
+                current_period_start: null,
+                current_period_end: null,
+                confirmed_at: null,
+            };
+    }
 }
 
 /** About half a minute from now, as Mesub dates a transaction's `last_valid_block_height`. */
@@ -1626,7 +1892,8 @@ function keyOf(asked: Asked, plan: string): string {
     return `${asked.kind}:${asked.value}\n${plan}`;
 }
 
-let webhookIds = 0;
+/** Only `signWebhook`'s own: a fake's deliveries are numbered by the fake, apart. */
+let signedIds = 0;
 
 /**
  * Signs a body as Mesub does (Standard Webhooks, HMAC-SHA256 of
@@ -1638,7 +1905,7 @@ export async function signWebhook(
     options: SignWebhookOptions,
 ): Promise<SignedWebhook> {
     const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
-    const id = options.id ?? `msg_fake_${(webhookIds += 1)}`;
+    const id = options.id ?? `msg_signed_${(signedIds += 1)}`;
     const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000);
 
     return { body, headers: await signedHeaders(options.secret, id, timestamp, body) };
@@ -1773,6 +2040,38 @@ function invalidContact({ wallet, email }: { wallet?: unknown; email?: unknown }
     return reasons.length ? error(400, 'invalid_request', reasons) : null;
 }
 
+const LIMIT_MESSAGE = 'limit must be a whole number from 1 to 100';
+
+/** A list's `limit` as Mesub reads it (`asInteger`, then 1 to 100), null when it refuses it. */
+function limitOf(value: string): number | null {
+    const limit = /^\d{1,4}$/.test(value) ? Number(value) : NaN;
+
+    return limit >= 1 && limit <= 100 ? limit : null;
+}
+
+/**
+ * Mesub's 400 for a submit body its `ServerSubmitDto` refuses, null for one
+ * it takes. The transaction is held to base64, as there; `terms_signature`
+ * only to a string that is not empty, where Mesub holds it to 64 bytes in
+ * base58: the fake checks no signature, so a test may hand it any.
+ */
+function invalidSubmit(body: unknown): Response | null {
+    const { transaction, terms_signature } = (body ?? {}) as Record<string, unknown>;
+    const reasons: string[] = [];
+
+    if (typeof transaction !== 'string' || transaction.length > 2048) {
+        reasons.push('transaction must be shorter than or equal to 2048 characters');
+    }
+    if (typeof transaction !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(transaction)) {
+        reasons.push('transaction must be base64');
+    }
+    if (typeof terms_signature !== 'string' || terms_signature === '') {
+        reasons.push('terms_signature must be a base58 signature');
+    }
+
+    return reasons.length ? error(400, 'invalid_request', reasons) : null;
+}
+
 /** The one customer a query names, or null when it names none or several. */
 function askedIn(query: Record<string, string>): Asked | null {
     try {
@@ -1855,9 +2154,19 @@ const RETRYABLE_CODES = new Set([
  * The `Retry-After` Mesub sends with a 503 on a route that builds, sends or
  * queues: its spec makes it required there. The seat wait of a submit
  * (`SEAT_BUSY_RETRY_AFTER`), the queue of a retry (`UNQUEUED_RETRY_AFTER`),
- * the chain guard's otherwise. Undefined elsewhere.
+ * the chain guard's otherwise. And the one `retry_too_soon` always carries.
+ * Undefined elsewhere.
  */
-function waitOf(method: string, path: string, status: number, code: string): number | undefined {
+function waitOf(
+    method: string,
+    path: string,
+    status: number,
+    code: string,
+    tier: FakeTier,
+): number | undefined {
+    // Always sent with its wait: the first one of the tier, as no retry was counted.
+    if (code === 'retry_too_soon')
+        return (tier === 'free' ? FREE_RETRY_WAIT_MS : PAID_RETRY_WAIT_MS) / 1000;
     if (status !== 503 || method !== 'POST' || !path.startsWith('/v1/subscriptions')) {
         return undefined;
     }
