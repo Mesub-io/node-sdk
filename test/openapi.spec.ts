@@ -25,7 +25,10 @@ interface Spec {
     info: { version: string };
     paths: Record<string, Record<string, { responses: Record<string, Response3> }>>;
     webhooks: Record<string, { post: { requestBody: Response3 } }>;
-    components: { schemas: Record<string, Schema>; headers: Record<string, { schema: Schema }> };
+    components: {
+        schemas: Record<string, Schema>;
+        headers: Record<string, { schema: Schema; required?: boolean }>;
+    };
 }
 interface Response3 {
     content?: { 'application/json'?: { schema: Schema } };
@@ -85,8 +88,7 @@ interface Seen {
     route: string;
     status: number;
     body: unknown;
-    requestId: string | null;
-    retryAfter: string | null;
+    headers: Headers;
 }
 
 /** A fake, a client on it, and every answer it gave on a route of the spec. */
@@ -105,8 +107,7 @@ function recorded(options: ConstructorParameters<typeof FakeMesub>[0] = {}) {
                 route,
                 status: response.status,
                 body: await response.clone().json(),
-                requestId: response.headers.get('mesub-request-id'),
-                retryAfter: response.headers.get('retry-after'),
+                headers: response.headers,
             });
         }
         return response;
@@ -120,25 +121,44 @@ function recorded(options: ConstructorParameters<typeof FakeMesub>[0] = {}) {
             webhookSecret: fake.webhookSecret,
         });
 
-    return { fake, client, seen };
+    return { fake, client, seen, fetch };
 }
 
-/** Each answer seen, against the schema the spec names for its route and status. */
-function expectContract(seen: Seen[]) {
-    const pattern = new RegExp(String(components.headers['MesubRequestId']!.schema['pattern']));
+/**
+ * What a header's value breaks of its schema: an integer header is read as
+ * the number it spells, digits only.
+ */
+function headerProblems(schema: Schema, value: string): string[] {
+    if (schema['type'] !== 'integer') return problems(schema, value);
 
+    return /^-?[0-9]+$/.test(value) ? problems(schema, Number(value)) : ['not an integer'];
+}
+
+/**
+ * Each answer seen, against the schema the spec names for its route and
+ * status, and its headers: every one the spec marks required is sent, and
+ * every one named and sent holds to its schema.
+ */
+function expectContract(seen: Seen[]) {
     expect(seen.length).toBeGreaterThan(0);
-    for (const { method, route, status, body, requestId, retryAfter } of seen) {
+    for (const { method, route, status, body, headers } of seen) {
         const label = `${method.toUpperCase()} ${route} ${status}`;
         const answer = spec.paths[route]?.[method]?.responses[String(status)];
         const schema = answer?.content?.['application/json']?.schema;
 
         expect(schema, `${label}: the spec names no such answer`).toBeDefined();
         expect(problems(schema!, body), label).toEqual([]);
-        expect(requestId, `${label}: Mesub-Request-Id`).toMatch(pattern);
-        // `RetryAfter` is required where the spec names it; the other one comes with some codes.
-        if (answer?.headers?.['Retry-After']?.$ref === '#/components/headers/RetryAfter') {
-            expect(retryAfter, `${label}: Retry-After`).toMatch(/^[0-9]+$/);
+        expect(Object.keys(answer?.headers ?? {}), `${label}: headers named`).toEqual(
+            expect.arrayContaining(['Mesub-Version', 'Mesub-Request-Id']),
+        );
+        for (const [name, { $ref }] of Object.entries(answer?.headers ?? {})) {
+            const header = components.headers[String($ref).split('/').pop()!]!;
+            const value = headers.get(name);
+
+            if (header.required) expect(value, `${label}: ${name} missing`).not.toBeNull();
+            if (value !== null) {
+                expect(headerProblems(header.schema, value), `${label}: ${name}`).toEqual([]);
+            }
         }
     }
 }
@@ -314,11 +334,44 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         expectContract(seen);
         expect(await submit).toMatchObject({ apiCode: 'unavailable', retryAfter: 2_000 });
         expect(retry).toMatchObject({ apiCode: 'unavailable', retryAfter: 20_000 });
-        expect(seen.slice(1).map(({ status, retryAfter }) => [status, retryAfter])).toEqual([
+        expect(
+            seen.slice(1).map(({ status, headers }) => [status, headers.get('retry-after')]),
+        ).toEqual([
             [503, '10'],
             [503, '2'],
             [503, '20'],
         ]);
+    });
+
+    it('answers the version asked, and refuses one it does not serve, after the key', async () => {
+        const { fake, seen, fetch } = recorded();
+        const ask = (version: string | null, key = fake.apiKey) =>
+            fetch(`${fake.baseUrl}/v1/plans`, {
+                headers: {
+                    authorization: `Bearer ${key}`,
+                    ...(version !== null && { 'mesub-version': version }),
+                },
+            });
+
+        const answers = await Promise.all([
+            ask('2026-10-02'),
+            ask(null),
+            ask('2026-11-01'),
+            ask(''),
+            ask('latest', 'SUB_wrong'),
+        ]);
+
+        expect(answers.map((each) => each.status)).toEqual([200, 200, 400, 400, 401]);
+        expect(answers.map((each) => each.headers.get('mesub-version'))).toEqual(
+            Array(5).fill('2026-10-02'),
+        );
+        await expect(answers[2]!.json()).resolves.toMatchObject({
+            code: 'unsupported_version',
+            retryable: false,
+            message: 'Mesub-Version must be one of the versions this API serves: 2026-10-02.',
+        });
+        expectContract(seen);
+        expect(seen).toHaveLength(5);
     });
 
     it('answers events as the spec says', async () => {

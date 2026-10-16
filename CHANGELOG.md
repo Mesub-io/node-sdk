@@ -483,6 +483,10 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   20 s for `unavailable` on retry, 10 s otherwise, unless the failure names
   one. The spec test holds the fake to the `Retry-After` the spec requires
   (#149).
+- `FakeMesub` answers `Mesub-Version` on every answer, errors included, as
+  Mesub does, and refuses a version it does not serve, after the key, with a
+  400 `unsupported_version`; a call naming none is served. The spec test
+  holds every answer to each header the spec marks required (#149).
 
 ### Errors
 

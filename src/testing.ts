@@ -30,7 +30,7 @@ import type {
     SubscriptionAttemptList,
     WalletTransaction,
 } from './subscriptions.js';
-import { API_VERSION } from './version.js';
+import { API_VERSION, API_VERSION_HEADER } from './version.js';
 import {
     type EventType,
     type MesubEvent,
@@ -750,7 +750,7 @@ export class FakeMesub {
         this.#requestIds += 1;
         const id = `req_fake${String(this.#requestIds).padStart(20, '0')}`;
 
-        return withRequestId(await this.#route(url, url.pathname.slice(prefix.length), init), id);
+        return stamped(await this.#route(url, url.pathname.slice(prefix.length), init), id);
     }
 
     async #route(url: URL, path: string, init: RequestInit): Promise<Response> {
@@ -762,6 +762,16 @@ export class FakeMesub {
 
         if (headers.get('authorization') !== `Bearer ${this.apiKey}`) {
             return error(401, 'invalid_api_key', 'That API key is not valid.');
+        }
+        // After the key, as Mesub's ApiVersionInterceptor: absent is the first
+        // version; anything not, to the letter, a version served is refused.
+        const version = headers.get(API_VERSION_HEADER);
+        if (version !== null && version !== API_VERSION) {
+            return error(
+                400,
+                'unsupported_version',
+                `${API_VERSION_HEADER} must be one of the versions this API serves: ${API_VERSION}.`,
+            );
         }
         if (this.#failure) {
             const { status, code, message, retryable } = this.#failure;
@@ -1797,11 +1807,14 @@ function error(
 
 /**
  * The answer with the id Mesub gives every request (Mesub-io/backend#472): in
- * `Mesub-Request-Id`, and in an error body's `request_id`.
+ * `Mesub-Request-Id`, and in an error body's `request_id`. And the version it
+ * is written in, `Mesub-Version`, on every answer, errors included: the one
+ * served, also for a call that named none or one not served.
  */
-async function withRequestId(response: Response, id: string): Promise<Response> {
+async function stamped(response: Response, id: string): Promise<Response> {
     const headers = new Headers(response.headers);
     headers.set(REQUEST_ID_HEADER, id);
+    headers.set(API_VERSION_HEADER, API_VERSION);
 
     if (response.ok) return new Response(response.body, { status: response.status, headers });
 
