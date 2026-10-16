@@ -258,6 +258,8 @@ const EVENT_TYPES: readonly EventType[] = [
     'subscription.expired',
     'subscription.access_granted',
     'subscription.access_revoked',
+    'subscription.paused',
+    'subscription.unpaused',
 ];
 /** An id as Mesub's DTOs take one. */
 const RESOURCE_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -421,6 +423,45 @@ export class FakeMesub {
             const ended = endedBy(subscription);
             Object.assign(subscription, ended, 'status' in ended && NO_RETRY);
         }
+    }
+
+    /**
+     * Parks that subscription's seat, as Mesub does when a project holds more
+     * subscribers than its tier allows: `paused`, no next charge, access and
+     * status unchanged (the fake moves no clock, so the paid period never
+     * runs out). With `accessEvents`, raises `subscription.paused`
+     * (Mesub-io/backend#509), sent behind the same flag. Throws for an id the
+     * fake does not hold.
+     */
+    park(id: string): ServerSubscription {
+        return this.#seat(id, true);
+    }
+
+    /**
+     * Brings a parked seat back: not `paused`, charged again at the end of
+     * its period. With `accessEvents`, raises `subscription.unpaused`.
+     */
+    unpark(id: string): ServerSubscription {
+        return this.#seat(id, false);
+    }
+
+    #seat(id: string, paused: boolean): ServerSubscription {
+        const subscription = this.#subscriptions.find((each) => each.id === id);
+        if (!subscription) throw new Error(`The fake holds no subscription ${id}.`);
+        if (subscription.paused === paused) return this.#view(subscription);
+
+        const before = this.#view(subscription).access;
+        const next_charge_at = paused ? null : subscription.current_period_end;
+        Object.assign(subscription, { paused, next_charge_at });
+        this.#answer(subscription, { paused, next_charge_at });
+        if (this.#accessEvents) {
+            this.#raise(
+                paused ? 'subscription.paused' : 'subscription.unpaused',
+                subscription,
+                before,
+            );
+        }
+        return this.#view(subscription);
     }
 
     /**
@@ -1131,8 +1172,15 @@ export class FakeMesub {
             this.grant({ external_id: subscription.external_id }, plan, fields);
         }
         if (subscription.email) this.grant({ email: subscription.email }, plan, fields);
-        // Pending, it granted nothing.
-        this.#raise('subscription.created', subscription, false);
+        // Pending, it granted nothing. What it paid, as Mesub-io/backend#509 tells it.
+        const terms = this.#planList.find((each) => each.slug === subscription.plan);
+        this.#raise('subscription.created', subscription, false, {
+            first_payment: {
+                amount: terms?.amount ?? '9990000',
+                mint: terms?.mint ?? USDC,
+                signature: 'fake_signature',
+            },
+        });
 
         return Response.json({ subscription: this.#view(subscription) }, { status: 201 });
     }
@@ -1632,6 +1680,13 @@ function detailOf(
         case 'subscription.access_granted':
         case 'subscription.access_revoked':
             return accessDetailOf(data, start);
+        case 'subscription.created':
+            return {
+                first_payment: { amount: paid.amount, mint: USDC, signature: 'fake_signature' },
+            };
+        case 'subscription.ended':
+            // A cancellation reaching its end says when (Mesub-io/backend#509).
+            return data.end_reason === 'cancelled' ? { changed_at: start } : {};
         default:
             return {};
     }
@@ -1667,6 +1722,7 @@ function accessDetailOf(data: ServerSubscription, changedAt: string): Record<str
  * a cancellation that reached its end.
  */
 function subscriptionOf(type: WebhookEventType): Partial<ServerSubscription> {
+    if (type === 'subscription.paused') return { paused: true, next_charge_at: null };
     if (type !== 'subscription.access_revoked') return {};
 
     return {

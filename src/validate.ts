@@ -16,6 +16,7 @@ import type {
 import type {
     AccessChangedDetail,
     CreatedDetail,
+    EndedDetail,
     MesubEvent,
     PaymentFailedDetail,
     RenewalUpcomingDetail,
@@ -508,6 +509,19 @@ const TEST: Field = { check: (value) => value === true, expected: 'true', option
 const OLDER_WEBHOOK = { type: STRING, created_at: DATE, data: OBJECT, test: TEST };
 
 /**
+ * `first_payment` on `subscription.created` (Mesub-io/backend#509): null, or
+ * what the first payment paid; left out by an event written before it.
+ */
+const FIRST_PAYMENT: Field = {
+    check: (value) =>
+        value === null ||
+        problemWith(value, { amount: STRING, mint: STRING_OR_NULL, signature: STRING_OR_NULL }) ===
+            null,
+    expected: 'null or a payment (amount, mint, signature)',
+    optional: true,
+};
+
+/**
  * An access event's detail (Mesub-io/backend#507), and since #511 why and
  * until when: both left out by an event written before it.
  */
@@ -520,7 +534,11 @@ const ACCESS_CHANGED = {
 const DETAILS: Partial<Record<string, Record<string, Field>>> = {
     'subscription.created': {
         previous_id: OPTIONAL_STRING,
+        first_payment: FIRST_PAYMENT,
     } satisfies Record<keyof CreatedDetail, Field>,
+    'subscription.ended': {
+        changed_at: { ...DATE, optional: true },
+    } satisfies Record<keyof EndedDetail, Field>,
     'subscription.renewal_upcoming': {
         can_pay: BOOLEAN,
         renewal_issue: STRING_OR_NULL,

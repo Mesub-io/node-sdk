@@ -98,7 +98,14 @@ function olderBody(type: string, detail: Record<string, unknown> = {}): string {
 
 /** Each v1 detail, in the shape the back's `pull-events.ts` and services write it. */
 const DETAILS: Record<string, Record<string, unknown>> = {
-    'subscription.created': { previous_id: 'sub_before' },
+    'subscription.created': {
+        previous_id: 'sub_before',
+        first_payment: {
+            amount: '9990000',
+            mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+            signature: '5wHu1q',
+        },
+    },
     'subscription.renewed': {
         amount: '9990000',
         mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
@@ -129,6 +136,8 @@ const DETAILS: Record<string, Record<string, unknown>> = {
     'subscription.resumed': {},
     'subscription.ended': {},
     'subscription.expired': {},
+    'subscription.paused': {},
+    'subscription.unpaused': {},
     'subscription.access_granted': {
         changed_at: '2026-01-15T12:00:00.000Z',
         blocked_reason: null,
@@ -478,6 +487,59 @@ describe('verifyWebhook', () => {
             ...JSON.parse(body('subscription.renewed', DETAILS['subscription.renewed'])),
             sequence,
         });
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
+    });
+
+    it.each([
+        ['null, nothing recorded at the confirmation', { first_payment: null }],
+        [
+            'without mint and signature',
+            { first_payment: { amount: '1', mint: null, signature: null } },
+        ],
+    ])('reads a created event whose first_payment is %s', async (_what, detail) => {
+        const raw = body('subscription.created', detail);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        expect(event.detail).toEqual(detail);
+    });
+
+    it('reads an ended event of a cancellation that reached its end, and types its changed_at', async () => {
+        const raw = body(
+            'subscription.ended',
+            { changed_at: '2026-01-31T00:00:00.000Z' },
+            {
+                ...SUBSCRIPTION,
+                status: 'ended',
+                end_reason: 'cancelled' as never,
+                access: false,
+            },
+        );
+        const event: WebhookEvent = await verifyWebhook(
+            raw,
+            backendHeaders(SECRET, 'cm1', NOW, raw),
+            { secret: SECRET },
+        );
+
+        if (event.type !== 'subscription.ended') throw new Error('narrowed wrong');
+        const changed: string | undefined = event.detail.changed_at;
+        expect(changed).toBe('2026-01-31T00:00:00.000Z');
+    });
+
+    it.each([
+        ['created', { first_payment: { amount: 9990000, mint: null, signature: null } }],
+        ['created', { first_payment: { mint: null, signature: null } }],
+        ['created', { first_payment: 'paid' }],
+        ['ended', { changed_at: 'later' }],
+    ])('throws unexpected for a %s detail of the wrong shape: %j', async (type, detail) => {
+        const raw = body(`subscription.${type}`, detail);
 
         const error = await failure(
             verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),

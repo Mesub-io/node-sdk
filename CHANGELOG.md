@@ -399,6 +399,15 @@ answer this request.`: never the SDK's own message, which may name your
   `MesubSubmitError`, unless an earlier send got no answer. `retry`'s 503
   `unavailable` (the charge could not be queued) now carries `retryAfter`,
   20 s; it is still never sent again (#149).
+- `subscription.paused` and `subscription.unpaused` are typed
+  (Mesub-io/backend#509): `SubscriptionPausedEvent` and
+  `SubscriptionUnpausedEvent`, a seat parked over the tier's cap and brought
+  back, `data.paused` saying which. `subscription.ended` gets its own detail,
+  `EndedDetail`: `changed_at`, only when a cancellation reached its end; a
+  subscription can now end twice, `cancelled` then `closed`. These come only
+  once Mesub turns the access events on. `subscription.created` carries
+  `detail.first_payment` (`FirstPayment`: `amount`, `mint`, `signature`), or
+  null, sent whatever the flag; absent on older events. All checked (#149).
 - Every event carries `sequence` (Mesub-io/backend#502), its place among its
   subscription's events: apply one subscription's events by `sequence`, and
   skip one lower than the last applied. Optional: absent on a body written
@@ -481,7 +490,14 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
   an ended subscription without access. `new FakeMesub({ accessEvents: true
 })` raises `access_granted` after a submit's `created`, as Mesub with its
   `ACCESS_EVENTS` flag on; off by default. Held to Mesub-io/backend
-  `openapi/v1.json` at 4c69034 (backend#511), each webhook against its own schema (#149).
+  `openapi/v1.json` (main with #509, and #511), each webhook against its
+  own schema (#149).
+- `FakeMesub`: a submit's `subscription.created` tells its `first_payment`,
+  the plan's amount and mint; `addEvent` and `webhook` make
+  `subscription.paused` (on a paused seat) and `subscription.unpaused`, and
+  an `ended` on a cancellation that reached its end carries `changed_at`.
+  `park(id)` and `unpark(id)` park a seat and bring it back, raising
+  `paused` and `unpaused` with `accessEvents` (#149).
 - `FakeMesub` sends `Retry-After` with a 503 on every POST under
   `/v1/subscriptions`, as Mesub must there: 2 s for `unavailable` on submit,
   20 s for `unavailable` on retry, 10 s otherwise, unless the failure names

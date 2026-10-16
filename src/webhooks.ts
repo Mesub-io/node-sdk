@@ -118,6 +118,30 @@ export type NoDetail = Record<string, never>;
 export interface CreatedDetail {
     /** On a wallet coming back after a stop, the subscription it replaces. */
     previous_id?: string;
+    /**
+     * What the first payment paid (Mesub-io/backend#509). Null when Mesub
+     * recorded none at the confirmation (a period paid only in part, which
+     * the next charge collects); absent on an event written before it.
+     */
+    first_payment?: FirstPayment | null;
+}
+
+/** The first payment of a subscription: the transfer its own transaction carried. */
+export interface FirstPayment {
+    /** In the token's smallest unit, as a string. */
+    amount: string;
+    mint: string | null;
+    /** The transaction that paid it. */
+    signature: string | null;
+}
+
+/**
+ * `subscription.ended`: `changed_at` only on a cancellation that reached its
+ * end (Mesub-io/backend#509), its expiry to the millisecond, the moment
+ * `data` describes. Absent on any other end.
+ */
+export interface EndedDetail {
+    changed_at?: string;
 }
 
 /**
@@ -226,10 +250,12 @@ interface EventDetails {
     'subscription.stopped': StoppedDetail;
     'subscription.cancelled': NoDetail;
     'subscription.resumed': NoDetail;
-    'subscription.ended': NoDetail;
+    'subscription.ended': EndedDetail;
     'subscription.expired': NoDetail;
     'subscription.access_granted': AccessChangedDetail;
     'subscription.access_revoked': AccessChangedDetail;
+    'subscription.paused': NoDetail;
+    'subscription.unpaused': NoDetail;
 }
 
 /**
@@ -257,12 +283,13 @@ export type SubscriptionCancelledEvent = WebhookEventOf<'subscription.cancelled'
 export type SubscriptionResumedEvent = WebhookEventOf<'subscription.resumed', NoDetail>;
 /**
  * Sent when the plan ends, is removed or replaced, and when a subscription is
- * closed. None comes when a cancellation reaches its end: it reads `ended`,
- * `end_reason` `cancelled`, and `subscription.cancelled` came before. Its
- * `access_until` says when access stops; `subscription.access_revoked`
- * says it stopped, once Mesub turns the access events on.
+ * closed. Once Mesub turns the access events on, also when a cancellation
+ * reaches its end (Mesub-io/backend#509): `end_reason` `cancelled`,
+ * `detail.changed_at` its expiry, usually within half an hour of it, after
+ * that expiry's `subscription.access_revoked`. Closing it later sends it
+ * again, `end_reason` `closed`: one subscription can end twice.
  */
-export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', NoDetail>;
+export type SubscriptionEndedEvent = WebhookEventOf<'subscription.ended', EndedDetail>;
 /** A checkout nobody signed in time. */
 export type SubscriptionExpiredEvent = WebhookEventOf<'subscription.expired', NoDetail>;
 /**
@@ -292,6 +319,22 @@ export type SubscriptionAccessRevokedEvent = WebhookEventOf<
     AccessChangedDetail
 >;
 /**
+ * A seat parked (Mesub-io/backend#509): the project holds more subscribers
+ * than its tier allows, and Mesub stopped charging the newest. Not a pause
+ * the subscriber asked for; the status stays. `data.paused` is true,
+ * `data.next_charge_at` null; access runs to the end of the paid period,
+ * and its `subscription.access_revoked` comes then. Off until Mesub turns
+ * the access events on.
+ */
+export type SubscriptionPausedEvent = WebhookEventOf<'subscription.paused', NoDetail>;
+/**
+ * A parked seat back (Mesub-io/backend#509): the tier has room again, and
+ * Mesub charges it again. `data.paused` is false; a
+ * `subscription.access_granted` follows when its access had ended. Off until
+ * Mesub turns the access events on.
+ */
+export type SubscriptionUnpausedEvent = WebhookEventOf<'subscription.unpaused', NoDetail>;
+/**
  * Sent from the dashboard on request, with a made-up subscription (`sub_test`).
  * The dashboard also sends samples of the other types, with `test: true`.
  */
@@ -314,6 +357,8 @@ export type WebhookEvent =
     | SubscriptionExpiredEvent
     | SubscriptionAccessGrantedEvent
     | SubscriptionAccessRevokedEvent
+    | SubscriptionPausedEvent
+    | SubscriptionUnpausedEvent
     | TestEvent;
 
 /** The body as received, never parsed: a string, a Buffer or any Uint8Array, an ArrayBuffer. */

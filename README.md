@@ -451,9 +451,25 @@ A body sent from the dashboard carries `test: true`, on a made-up subscription
 (`sub_test`, `user_123`), whatever its `type`. Change nothing for it: `verify`
 keeps the access cache as it is.
 
-No `subscription.ended` comes when a cancellation reaches its end: the
-subscription reads `ended` from its `access_until` on, and only
-`subscription.access_revoked` says so, once the access events are on. A `subscription.renewed` can come late, on
+A cancellation reaching its end reads `ended` from its `access_until` on. Once
+the access events are on, its `subscription.access_revoked` comes at the
+expiry, then `subscription.ended` with `end_reason: 'cancelled'` and
+`detail.changed_at` (the expiry), usually within half an hour. Closing it later
+sends `subscription.ended` again, `end_reason: 'closed'`: one subscription can
+end twice, so key what you do on `end_reason`, not on the event alone.
+
+`subscription.created` carries `detail.first_payment`, `{ amount, mint,
+signature }` of the first payment, or null when Mesub recorded none (a period
+paid only in part, which the next charge collects); absent on older events.
+
+`subscription.paused` and `subscription.unpaused` (with the access events)
+say a seat was parked because the project holds more subscribers than its tier
+allows, and brought back: `data.paused` true or false, the status unchanged.
+A parked seat keeps access to the end of its paid period; its
+`subscription.access_revoked` comes then, and an `access_granted` follows an
+unpause when access had ended.
+
+A `subscription.renewed` can come late, on
 a subscription that is no longer `active`. The events, their bodies and how to
 test: [Webhooks](https://docs.mesub.io/docs/webhooks).
 
@@ -597,6 +613,7 @@ fake.fail({ status: 503, code: 'unavailable' }); // Retry-After as Mesub: 2 s on
 const { body, headers } = await fake.webhook('subscription.renewed'); // signed
 fake.addEvent('subscription.payment_failed', { subscription: { id } }); // on /v1/events
 fake.addEvent('subscription.access_revoked', { subscription: { id }, sequence: 5 });
+fake.park(id); // a seat over the tier's cap: paused, no next charge; unpark(id) brings it back
 fake.reset(); // between tests
 ```
 
@@ -604,8 +621,9 @@ Every event the fake signs or serves carries the next `sequence` of its
 subscription (`sequence: null` leaves it out). The access events are off by
 default, as on Mesub: `new FakeMesub({ accessEvents: true })` raises
 `subscription.access_granted` after the `subscription.created` of a submit,
-one `sequence` later, and an access event after any other change of the fake
-that flips access. `addEvent` and `webhook` make either type whatever this says.
+one `sequence` later, an access event after any other change of the fake
+that flips access, and `subscription.paused` and `subscription.unpaused` on
+`park` and `unpark`. `addEvent` and `webhook` make either type whatever this says.
 
 As on Mesub, a client keeps a yes up to five minutes: a change shows to a new
 `fake.client()`, or on the next call with `new FakeMesub({ revalidateAfter: 0 })`.

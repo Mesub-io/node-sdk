@@ -49,7 +49,9 @@ export type { EventList, EventListParams, Events } from './events.js';
 export type {
     AccessChangedDetail,
     CreatedDetail,
+    EndedDetail,
     EventNetwork,
+    FirstPayment,
     EventType,
     HeaderSource,
     MesubEvent,
@@ -65,6 +67,8 @@ export type {
     SubscriptionCreatedEvent,
     SubscriptionEndedEvent,
     SubscriptionExpiredEvent,
+    SubscriptionPausedEvent,
+    SubscriptionUnpausedEvent,
     SubscriptionPaymentFailedEvent,
     SubscriptionRenewalUpcomingEvent,
     SubscriptionRenewedEvent,

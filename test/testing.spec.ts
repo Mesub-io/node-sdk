@@ -1497,6 +1497,76 @@ describe('FakeMesub', () => {
             expect(granted!.data.access).toBe(true);
         });
 
+        it("tells what a submit's first payment paid, the plan's amount and mint", async () => {
+            const fake = new FakeMesub({ plans: [{ slug: 'pro', amount: '5000000' }] });
+            const { mesub } = await subscribed(fake);
+
+            const { data } = await mesub.events.list({ type: 'subscription.created' });
+
+            expect(data[0]!.detail).toEqual({
+                first_payment: {
+                    amount: '5000000',
+                    mint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+                    signature: 'fake_signature',
+                },
+            });
+        });
+
+        it('parks and brings back a seat, raising nothing without accessEvents', async () => {
+            const fake = new FakeMesub();
+            const { mesub, id } = await subscribed(fake);
+
+            const parked = fake.park(id);
+
+            expect(parked).toMatchObject({ paused: true, next_charge_at: null, access: true });
+            await expect(fake.client().access(WALLET, 'pro')).resolves.toMatchObject({
+                paused: true,
+                next_charge_at: null,
+                access: true,
+            });
+            const back = fake.unpark(id);
+            expect(back).toMatchObject({ paused: false, next_charge_at: back.current_period_end });
+            expect((await mesub.events.list()).data.map((event) => event.type)).toEqual([
+                'subscription.created',
+            ]);
+            expect(() => fake.park('sub_nobody')).toThrow(/no subscription sub_nobody/);
+        });
+
+        it('with accessEvents, raises paused and unpaused, once each', async () => {
+            const fake = new FakeMesub({ accessEvents: true });
+            const { mesub, id } = await subscribed(fake);
+
+            fake.park(id);
+            fake.park(id);
+            fake.unpark(id);
+
+            const { data } = await mesub.events.list({ subscription: id });
+            expect(data.map(({ type, sequence }) => [type, sequence])).toEqual([
+                ['subscription.unpaused', 4],
+                ['subscription.paused', 3],
+                ['subscription.access_granted', 2],
+                ['subscription.created', 1],
+            ]);
+            expect(data[1]!.data).toMatchObject({ paused: true, next_charge_at: null });
+            expect(data[0]!.detail).toEqual({});
+        });
+
+        it('adds an ended of a cancellation reaching its end with changed_at, and a paused one parked', async () => {
+            const fake = new FakeMesub();
+
+            const ended = fake.addEvent('subscription.ended', {
+                subscription: { status: 'ended', end_reason: 'cancelled', access: false },
+            });
+            const closed = fake.addEvent('subscription.ended', {
+                subscription: { status: 'ended', end_reason: 'closed', access: false },
+            });
+            const paused = fake.addEvent('subscription.paused');
+
+            expect(ended.detail).toEqual({ changed_at: ended.created_at });
+            expect(closed.detail).toEqual({});
+            expect(paused.data).toMatchObject({ paused: true, next_charge_at: null });
+        });
+
         it('adds access events: a revoked one on a subscription without access', async () => {
             const fake = new FakeMesub();
 

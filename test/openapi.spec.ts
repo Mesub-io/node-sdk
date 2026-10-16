@@ -19,8 +19,9 @@ import type { WebhookEventType } from '../src/webhooks.js';
  * one it leaves out. The fake is built from the SDK's own types, so this is
  * where the types and the back's contract meet without a back running.
  */
-// Mesub-io/backend#511 (branch 510-access-events-journal): the access events' detail.
-const BACKEND_COMMIT = '4c69034028d51ba5cb1767c3baa5d5c396d6f43e';
+// Until Mesub-io/backend#511 is rebased on #509: main at 903252a (#509), with
+// #511's changes (4c69034, the access events' detail) merged in by git merge-file.
+const BACKEND_COMMIT = '903252aac2aae07f0c33720037511952773119c3';
 
 interface Spec {
     info: { version: string };
@@ -394,6 +395,11 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         }
         fake.addEvent('subscription.access_revoked');
         fake.addEvent('subscription.renewed', { sequence: null });
+        fake.addEvent('subscription.paused');
+        fake.addEvent('subscription.unpaused');
+        fake.addEvent('subscription.ended', {
+            subscription: { status: 'ended', end_reason: 'cancelled', access: false },
+        });
 
         const { data } = await mesub.events.list();
         await mesub.events.list({ type: 'subscription.renewed', limit: 1 });
@@ -403,7 +409,7 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         await mesub.events.list({ limit: 0 }).catch(() => null);
 
         expectContract(seen);
-        expect(data).toHaveLength(8);
+        expect(data).toHaveLength(11);
     });
 
     it.each([
@@ -438,7 +444,7 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
     );
 
     it('raises the access events of its own changes as the spec says, when asked', async () => {
-        const { client, seen } = recorded({ accessEvents: true });
+        const { fake, client, seen } = recorded({ accessEvents: true });
         const mesub = client();
         const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
         const { id } = created.subscription;
@@ -446,11 +452,15 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
             transaction: created.transaction,
             terms_signature: 'signed',
         });
+        fake.park(id);
+        fake.unpark(id);
 
         const { data } = await mesub.events.list({ subscription: id });
 
         expectContract(seen);
         expect(data.map(({ type, sequence }) => [type, sequence])).toEqual([
+            ['subscription.unpaused', 4],
+            ['subscription.paused', 3],
             ['subscription.access_granted', 2],
             ['subscription.created', 1],
         ]);

@@ -3,7 +3,7 @@
   "info": {
     "title": "Mesub API",
     "version": "2026-10-02",
-    "description": "Recurring payments on Solana, read and driven from your own server. This document is the contract of `/v1` and of the webhooks: what it does not name is not part of it.\n\n## Calls\n\n- Every route takes the project's API key as a bearer token, `Authorization: Bearer SUB_...`, and never in the query string. Everything is scoped to the project the key belongs to.\n- Fields are in snake case, statuses and reasons in lowercase. Dates are ISO 8601 strings in UTC, with milliseconds. Token amounts are strings in the token's smallest unit, and so is every other integer that may not fit in a double (`last_valid_block_height`, lamports).\n- A field nobody set is `null`, never left out, except where a field says otherwise (`reason` and `reason_code` on a confirmation, `attempts` on an access answer).\n- A query or body field a route does not know is refused, `400 invalid_request`.\n- Every answer, errors included, carries `Mesub-Request-Id`, the id Mesub gave the request (`req_` and 24 letters or digits). Log it beside your own; quote it to Mesub support to find the request in our logs. Mesub writes it: an id sent with the request is ignored.\n\n## Versions\n\n- Send `Mesub-Version` on every call to name the version of this contract your code is written against. The one version served today is `2026-10-02`.\n- A call without the header is served as the first version, `2026-10-02`, for good: an integration written without it never changes under its feet.\n- A value that is not, to the letter, a version this API serves (another date, `latest`, an empty header) is refused with `400 unsupported_version`, whose message lists the versions served. The API key and the rate limit are checked first: a wrong key reads `401` whatever version it names.\n- Every answer under `/v1`, errors included, says in `Mesub-Version` the version it is written in: the one asked for, or `2026-10-02` when the call named none or one this API does not serve.\n\n## Compatibility\n\n- Within a version, this contract only grows. Without a new `Mesub-Version`, an answer may gain a field, an enum may gain a value, an answer may gain an error code, an attempt may gain a reason, a confirmation may gain a `reason_code`, and a webhook may gain an event type or a field. Your code must ignore what it does not know: never fail on an unknown field, and treat an unknown enum value, code, reason or event as \"something else\".\n- Anything else takes a new version: removing or renaming a field, changing its type or its meaning, making an optional request field required, or changing the status of an error.\n- Before the first integrator, exceptions were made once, in this version: values moved to snake case (an attempt's `reason`, for example `insufficient_balance` and `program_4`), and each fact got one word: the codes `plan_deleted` and `plan_rebuilt` become `plan_removed` and `plan_replaced`, an attempt's `plan_gone`, `delegation_gone` and `subscription_cancelled` become `plan_removed`, `closed_elsewhere` and `cancelled`, and `end_reason` `authority_closed` becomes `closed_elsewhere`; and webhook bodies took the shape of an event (see Webhooks).\n\n## Rate limits\n\n- Counted per API key, per route, over a minute: 1,000 calls to the routes that read, 60 to the routes that build a transaction, read the chain or write (each route says its own in `x-mesub.limit`). A call without a valid key is counted against its IP, 120 a minute.\n- Counted in the memory of the server that answers: the limits are a floor, not a promise of what gets through.\n- `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` (seconds) come on every answer the limit counted. Past the limit: `429 rate_limited` with `Retry-After`, in seconds.\n\n## Errors\n\n- Every error under `/v1` answers the same body: `statusCode`, `error` (the status's name), `code`, `message`, `retryable` and `request_id`. `message` is a sentence for a person, or a list of them when the body or the query failed validation; it may be reworded any day.\n- Branch on `code`. A code is never moved to another status or reused for another cause, and is renamed only in a new version (see Compatibility). The codes each answer may carry are listed under it, in `x-codes`.\n- `retryable` says whether the same request, sent again unchanged, may succeed later. `Retry-After`, when present, says how long to wait.\n- Beside what each route lists: a path or a method that does not exist answers `404 not_found`; a body over 100 kB answers `413 payload_too_large`; a fault of ours answers `500 internal_error`, retryable, since every route is safe to call twice.\n\n## Webhooks\n\n- Each delivery is a `POST` of a JSON body, `{ id, object, type, created_at, network, api_version, sequence, data, detail }`: `id` is the event's, `sequence` its place among the subscription's events, `data` the subscription as it stood right after the change that raised this event, as [Retrieve a subscription](/reference/subscriptions/retrieve) would have answered it then, and `detail` what the event is about. A delivery sent by hand from the dashboard also carries `test: true`.\n- `data` is the subscription as it stood right after the change that raised this event; events raised by the same change share it, and `detail` says what each event is about. A last retry that fails raises `subscription.payment_failed` and `subscription.stopped`, both showing `status: stopped`; the failure's cause is in `payment_failed`'s `detail`. Do not assume the order events arrive in: apply a subscription's events in the order of their `sequence` (1, 2, 3...), skipping one lower than the last you applied, or read [Retrieve a subscription](/reference/subscriptions/retrieve) for the state now. An event without `sequence` (one written before Mesub numbered events, or one it could not number) cannot be placed: read the subscription's state now rather than applying its `data`.\n- Access: `subscription.access_granted` and `subscription.access_revoked` are sent exactly when the access a subscription grants changes (`data.access`), whatever made it change, a date passing included. `detail.changed_at` is when access changed (a date that passed, to the millisecond, even when the event is written seconds or hours later), and the moment `data` describes; `created_at` is when Mesub wrote the event, never before an event written earlier, so [List events](/reference/events/list) serves it in the order it was written. One event per change, never two. Drive your customer's access from these two: `sequence` orders one subscription's events, the access of the highest one applied stands; the other events say why. A renewal paid on time, or a resume while the paid period runs, changes nothing and sends neither. `detail.blocked_reason` and `detail.access_until` say whether the charges were held then, and when access ended or ends.\n- [List events](/reference/events/list) serves the same bodies, byte for byte once parsed, over the last 30 days: catch up there on what an endpoint missed.\n- Bodies written before `available_since` (see [List events](/reference/events/list)), and the few written during the deploy that brought this shape by a server still on the previous version, keep the shape they were sent in: `{ type, created_at, data }`, with `detail` inside `data`, no `id`, and `data` as it was at the delivery's first attempt. A retry or a resend of one sends it unchanged.\n- An event whose capture failed is held: its deliveries are not sent and it is missing from [List events](/reference/events/list) until Mesub recovers it. Mesub is alerted, and never sends or serves an event with a later state.\n- Signed the Standard Webhooks way: `webhook-signature` is `v1,` and the base64 HMAC-SHA256 of `webhook-id.webhook-timestamp.body`, keyed with the endpoint's secret (the part after `whsec_`, base64 decoded). Check it over the raw bytes received.\n- The header may list several signatures, space separated. When an endpoint's secret is regenerated with an overlap (up to 24 hours, chosen then), the old secret keeps signing beside the new one until the overlap ends: every attempt in that window carries two, the new secret's first, and an attempt after it, a retry included, carries the new one alone. Verify against each and accept the delivery when any one matches; the Standard Webhooks libraries and `@mesub/node` do.\n- `webhook-id` names the delivery: one per event and per endpoint, the same on every retry of it and on a resend from the dashboard. Deduplicate on it. Two endpoints of a project receiving one event get two ids.\n- The body is written once, at the event's first attempt, and every retry and every endpoint gets the same bytes; `webhook-timestamp` is the attempt's own.\n- Answer with a 2xx within 10 seconds. Anything else, a redirect included, is a failure: the delivery is tried again 1 minute, 5 minutes, 30 minutes and 2 hours later, then every 12 hours, eleven attempts over about three days. An endpoint that fails for three days with no success in between is turned off.\n\n## What may change without a new version\n\nWithout a new `Mesub-Version`, Mesub may add:\n\n- fields to an answer or to a webhook body;\n- values to an enum (a `status`, a reason, an `outcome`), and to the open families that are not enums (an attempt's `reason`);\n- error codes, to any route;\n- webhook events;\n- optional parameters and optional body fields.\n\nYour code must ignore a field it does not know, and keep a default branch on every enum, reason and code. Anything else, renaming or removing a field, changing its type or its meaning, making something optional required, takes a new version, and the versions already served keep answering as they did.\n\nDecided before the first integrator, and made without a new version:\n\n- reasons and `detail` values move to snake case (`insufficient-balance` becomes `insufficient_balance`, `program:4` becomes `program_4`, `grace-ended` becomes `retry_deadline_passed`);\n- the error code `plan_deleted` becomes `plan_removed`, and `plan_rebuilt` becomes `plan_replaced`, the words `end_reason` already uses;\n- an attempt's `reason` takes the word `end_reason` uses for the same fact: `plan_gone` becomes `plan_removed`, `subscription_cancelled` becomes `cancelled`, and `delegation_gone` becomes `closed_elsewhere`;\n- `end_reason` `authority_closed` becomes `closed_elsewhere`, the subscription account closed outside Mesub: `authority_closed` names only the subscription authority closed for good, as `late_reason` does;\n- a webhook body gains `id`, `object`, `network` and `api_version`, `detail` moves out of `data` to the top, and `data` describes the subscription at the event rather than at the first attempt. Bodies written before `available_since` keep their shape.\n\n`network` keeps `mainnet-beta`: the name Solana gives its cluster."
+    "description": "Recurring payments on Solana, read and driven from your own server. This document is the contract of `/v1` and of the webhooks: what it does not name is not part of it.\n\n## Calls\n\n- Every route takes the project's API key as a bearer token, `Authorization: Bearer SUB_...`, and never in the query string. Everything is scoped to the project the key belongs to.\n- Fields are in snake case, statuses and reasons in lowercase. Dates are ISO 8601 strings in UTC, with milliseconds. Token amounts are strings in the token's smallest unit, and so is every other integer that may not fit in a double (`last_valid_block_height`, lamports).\n- A field nobody set is `null`, never left out, except where a field says otherwise (`reason` and `reason_code` on a confirmation, `attempts` on an access answer).\n- A query or body field a route does not know is refused, `400 invalid_request`.\n- Every answer, errors included, carries `Mesub-Request-Id`, the id Mesub gave the request (`req_` and 24 letters or digits). Log it beside your own; quote it to Mesub support to find the request in our logs. Mesub writes it: an id sent with the request is ignored.\n\n## Versions\n\n- Send `Mesub-Version` on every call to name the version of this contract your code is written against. The one version served today is `2026-10-02`.\n- A call without the header is served as the first version, `2026-10-02`, for good: an integration written without it never changes under its feet.\n- A value that is not, to the letter, a version this API serves (another date, `latest`, an empty header) is refused with `400 unsupported_version`, whose message lists the versions served. The API key and the rate limit are checked first: a wrong key reads `401` whatever version it names.\n- Every answer under `/v1`, errors included, says in `Mesub-Version` the version it is written in: the one asked for, or `2026-10-02` when the call named none or one this API does not serve.\n\n## Compatibility\n\n- Within a version, this contract only grows. Without a new `Mesub-Version`, an answer may gain a field, an enum may gain a value, an answer may gain an error code, an attempt may gain a reason, a confirmation may gain a `reason_code`, and a webhook may gain an event type or a field. Your code must ignore what it does not know: never fail on an unknown field, and treat an unknown enum value, code, reason or event as \"something else\".\n- Anything else takes a new version: removing or renaming a field, changing its type or its meaning, making an optional request field required, or changing the status of an error.\n- Before the first integrator, exceptions were made once, in this version: values moved to snake case (an attempt's `reason`, for example `insufficient_balance` and `program_4`), and each fact got one word: the codes `plan_deleted` and `plan_rebuilt` become `plan_removed` and `plan_replaced`, an attempt's `plan_gone`, `delegation_gone` and `subscription_cancelled` become `plan_removed`, `closed_elsewhere` and `cancelled`, and `end_reason` `authority_closed` becomes `closed_elsewhere`; and webhook bodies took the shape of an event (see Webhooks).\n\n## Rate limits\n\n- Counted per API key, per route, over a minute: 1,000 calls to the routes that read, 60 to the routes that build a transaction, read the chain or write (each route says its own in `x-mesub.limit`). A call without a valid key is counted against its IP, 120 a minute.\n- Counted in the memory of the server that answers: the limits are a floor, not a promise of what gets through.\n- `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` (seconds) come on every answer the limit counted. Past the limit: `429 rate_limited` with `Retry-After`, in seconds.\n\n## Errors\n\n- Every error under `/v1` answers the same body: `statusCode`, `error` (the status's name), `code`, `message`, `retryable` and `request_id`. `message` is a sentence for a person, or a list of them when the body or the query failed validation; it may be reworded any day.\n- Branch on `code`. A code is never moved to another status or reused for another cause, and is renamed only in a new version (see Compatibility). The codes each answer may carry are listed under it, in `x-codes`.\n- `retryable` says whether the same request, sent again unchanged, may succeed later. `Retry-After`, when present, says how long to wait.\n- Beside what each route lists: a path or a method that does not exist answers `404 not_found`; a body over 100 kB answers `413 payload_too_large`; a fault of ours answers `500 internal_error`, retryable, since every route is safe to call twice.\n\n## Webhooks\n\n- Each delivery is a `POST` of a JSON body, `{ id, object, type, created_at, network, api_version, sequence, data, detail }`: `id` is the event's, `sequence` its place among the subscription's events, `data` the subscription as it stood right after the change that raised this event, as [Retrieve a subscription](/reference/subscriptions/retrieve) would have answered it then, and `detail` what the event is about. A delivery sent by hand from the dashboard also carries `test: true`.\n- `data` is the subscription as it stood right after the change that raised this event; events raised by the same change share it, and `detail` says what each event is about. A last retry that fails raises `subscription.payment_failed` and `subscription.stopped`, both showing `status: stopped`; the failure's cause is in `payment_failed`'s `detail`. Do not assume the order events arrive in: apply a subscription's events in the order of their `sequence` (1, 2, 3...), skipping one lower than the last you applied, or read [Retrieve a subscription](/reference/subscriptions/retrieve) for the state now. An event without `sequence` (one written before Mesub numbered events, or one it could not number) cannot be placed: read the subscription's state now rather than applying its `data`.\n- Access: `subscription.access_granted` and `subscription.access_revoked` are sent exactly when the access a subscription grants changes (`data.access`), whatever made it change, a date passing included. `detail.changed_at` is when access changed (a date that passed, to the millisecond, even when the event is written seconds or hours later), and the moment `data` describes; `created_at` is when Mesub wrote the event, never before an event written earlier, so [List events](/reference/events/list) serves it in the order it was written. One event per change, never two. Drive your customer's access from these two: `sequence` orders one subscription's events, the access of the highest one applied stands; the other events say why. A renewal paid on time, or a resume while the paid period runs, changes nothing and sends neither.\n- Transitions: a cancellation that reached its end sends `subscription.ended` (`end_reason: cancelled`, `detail.changed_at` its expiry) once the chain shows the cancellation still in place past its expiry, after the `subscription.access_revoked` of that expiry; a resume seen late can still follow an `access_revoked`; a seat parked over the project's subscriber limit sends `subscription.paused`, and `subscription.unpaused` when it is back. Each once per change, ordered by `sequence` beside the access events. `subscription.created` carries its first payment in `detail.first_payment`.\n- [List events](/reference/events/list) serves the same bodies, byte for byte once parsed, over the last 30 days: catch up there on what an endpoint missed.\n- Bodies written before `available_since` (see [List events](/reference/events/list)), and the few written during the deploy that brought this shape by a server still on the previous version, keep the shape they were sent in: `{ type, created_at, data }`, with `detail` inside `data`, no `id`, and `data` as it was at the delivery's first attempt. A retry or a resend of one sends it unchanged.\n- An event whose capture failed is held: its deliveries are not sent and it is missing from [List events](/reference/events/list) until Mesub recovers it. Mesub is alerted, and never sends or serves an event with a later state.\n- Signed the Standard Webhooks way: `webhook-signature` is `v1,` and the base64 HMAC-SHA256 of `webhook-id.webhook-timestamp.body`, keyed with the endpoint's secret (the part after `whsec_`, base64 decoded). Check it over the raw bytes received.\n- The header may list several signatures, space separated. When an endpoint's secret is regenerated with an overlap (up to 24 hours, chosen then), the old secret keeps signing beside the new one until the overlap ends: every attempt in that window carries two, the new secret's first, and an attempt after it, a retry included, carries the new one alone. Verify against each and accept the delivery when any one matches; the Standard Webhooks libraries and `@mesub/node` do.\n- `webhook-id` names the delivery: one per event and per endpoint, the same on every retry of it and on a resend from the dashboard. Deduplicate on it. Two endpoints of a project receiving one event get two ids.\n- The body is written once, at the event's first attempt, and every retry and every endpoint gets the same bytes; `webhook-timestamp` is the attempt's own.\n- Answer with a 2xx within 10 seconds. Anything else, a redirect included, is a failure: the delivery is tried again 1 minute, 5 minutes, 30 minutes and 2 hours later, then every 12 hours, eleven attempts over about three days. An endpoint that fails for three days with no success in between is turned off.\n\n## What may change without a new version\n\nWithout a new `Mesub-Version`, Mesub may add:\n\n- fields to an answer or to a webhook body;\n- values to an enum (a `status`, a reason, an `outcome`), and to the open families that are not enums (an attempt's `reason`);\n- error codes, to any route;\n- webhook events;\n- optional parameters and optional body fields.\n\nYour code must ignore a field it does not know, and keep a default branch on every enum, reason and code. Anything else, renaming or removing a field, changing its type or its meaning, making something optional required, takes a new version, and the versions already served keep answering as they did.\n\nDecided before the first integrator, and made without a new version:\n\n- reasons and `detail` values move to snake case (`insufficient-balance` becomes `insufficient_balance`, `program:4` becomes `program_4`, `grace-ended` becomes `retry_deadline_passed`);\n- the error code `plan_deleted` becomes `plan_removed`, and `plan_rebuilt` becomes `plan_replaced`, the words `end_reason` already uses;\n- an attempt's `reason` takes the word `end_reason` uses for the same fact: `plan_gone` becomes `plan_removed`, `subscription_cancelled` becomes `cancelled`, and `delegation_gone` becomes `closed_elsewhere`;\n- `end_reason` `authority_closed` becomes `closed_elsewhere`, the subscription account closed outside Mesub: `authority_closed` names only the subscription authority closed for good, as `late_reason` does;\n- a webhook body gains `id`, `object`, `network` and `api_version`, `detail` moves out of `data` to the top, and `data` describes the subscription at the event rather than at the first attempt. Bodies written before `available_since` keep their shape.\n\n`network` keeps `mainnet-beta`: the name Solana gives its cluster."
   },
   "servers": [
     {
@@ -6274,7 +6274,9 @@
                 "subscription.ended",
                 "subscription.expired",
                 "subscription.access_granted",
-                "subscription.access_revoked"
+                "subscription.access_revoked",
+                "subscription.paused",
+                "subscription.unpaused"
               ]
             },
             "x-example": "subscription.payment_failed"
@@ -6819,7 +6821,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.created",
         "operationId": "webhook_subscription_created",
-        "description": "The first payment landed.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "The first payment landed. `detail.first_payment` says what it paid.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-created",
           "guide": {
@@ -6913,11 +6915,30 @@
                   },
                   "detail": {
                     "type": "object",
-                    "description": "The event's own fields: empty, except on a comeback.",
+                    "description": "The event's own fields.",
                     "properties": {
                       "previous_id": {
                         "type": "string",
                         "description": "On a comeback only: the id of the stopped subscription this one took over, now `superseded`. Absent otherwise."
+                      },
+                      "first_payment": {
+                        "type": ["object", "null"],
+                        "description": "The first payment, the transfer the subscriber's own transaction carried. Null when Mesub recorded none at the confirmation: the subscription landed in a period paid only in part, which the next charge collects. Absent on events written before Mesub told it.",
+                        "required": ["amount", "mint", "signature"],
+                        "properties": {
+                          "amount": {
+                            "type": "string",
+                            "description": "What was paid, in the token's smallest unit."
+                          },
+                          "mint": {
+                            "type": ["string", "null"],
+                            "description": "The token's mint address."
+                          },
+                          "signature": {
+                            "type": ["string", "null"],
+                            "description": "The signature of the transaction that paid it."
+                          }
+                        }
                       }
                     }
                   },
@@ -6963,7 +6984,13 @@
                   "created_at": "2026-01-01T00:00:00.000Z",
                   "confirmed_at": "2026-01-01T00:00:05.000Z"
                 },
-                "detail": {}
+                "detail": {
+                  "first_payment": {
+                    "amount": "9990000",
+                    "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "signature": "5wHu1qwD4kLDLoREEPBpKvGvhbxWFxFFfr5nQq7dxAsRRDXvHRqpNvfsCvC1qzjWQhqmPtBb8LnZjKmvpehJqSWk"
+                  }
+                }
               }
             }
           }
@@ -8047,7 +8074,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.ended",
         "operationId": "webhook_subscription_ended",
-        "description": "It is over. `data.end_reason` says why. A cancellation reaching its end sends no event of its own.\n\nOn a plan with an end date, a subscription still running or late is ended at the plan's end, within minutes of it, whatever period it paid for: this event then carries `end_reason: \"plan_ended\"`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "It is over. `data.end_reason` says why.\n\nA cancellation that reached its end (its expiry: the end of the period it paid for) sends this event with `end_reason: \"cancelled\"`, once per cancellation, once a read of the chain after the expiry shows the cancellation still in place: usually within half an hour of the expiry. `detail.changed_at` is the expiry, to the millisecond, and the moment `data` describes, `status: ended`. The `subscription.access_revoked` of that expiry is sent at the expiry itself, from Mesub's records, so it comes first; a resume signed in the wallet before the expiry and seen late by Mesub can still follow that `access_revoked` (then `subscription.resumed` and `subscription.access_granted`, and no `subscription.ended`). The subscription can still be closed afterwards, which sends this event again with `end_reason: \"closed\"` (or `\"cancelled\"` when Mesub finds it closed outside Mesub).\n\nOn a plan with an end date, a subscription still running or late is ended at the plan's end, within minutes of it, whatever period it paid for: this event then carries `end_reason: \"plan_ended\"`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-ended",
           "guide": {
@@ -8118,7 +8145,7 @@
                   "created_at": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "When the event happened: the moment `data` describes."
+                    "description": "When the event happened: the moment `data` describes. For a cancellation that reached its end, when Mesub wrote the event, never before an event written earlier; `detail.changed_at` is then the moment `data` describes."
                   },
                   "network": {
                     "type": "string",
@@ -8141,8 +8168,14 @@
                   },
                   "detail": {
                     "type": "object",
-                    "description": "Empty on this event.",
-                    "properties": {}
+                    "description": "The event's own fields: empty, except on a cancellation reaching its end.",
+                    "properties": {
+                      "changed_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "On a cancellation that reached its end only: its expiry, to the millisecond, however much later Mesub read the chain and wrote the event, and the moment `data` describes. Absent otherwise."
+                      }
+                    }
                   },
                   "test": {
                     "type": "boolean",
@@ -8713,6 +8746,318 @@
                   "blocked_reason": null,
                   "access_until": "2026-01-31T00:00:00.000Z"
                 }
+              }
+            }
+          }
+        },
+        "responses": {
+          "2XX": {
+            "description": "Received. Anything else, a redirect included, counts as a failure and is retried."
+          }
+        }
+      }
+    },
+    "subscription.paused": {
+      "post": {
+        "tags": ["Webhooks"],
+        "summary": "subscription.paused",
+        "operationId": "webhook_subscription_paused",
+        "description": "A seat was parked: the project now holds more subscribers than its tier allows (it moved to a smaller tier, or a subscription confirmed late filled it), and Mesub stopped charging the newest ones rather than any within the limit. Not a pause the subscriber asked for: nothing changed on chain, and the status stays as it was.\n\nThe subscription keeps access to the end of the period it paid for, and no further: `data.paused` is true, `data.next_charge_at` null. Its `subscription.access_revoked` comes when that access ends, or right after this event, with a higher `sequence`, when it had already ended. The project moving back to a tier with room sends `subscription.unpaused`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "x-mesub": {
+          "href": "reference/webhooks/subscription-paused",
+          "guide": {
+            "label": "Webhooks",
+            "href": "docs/webhooks"
+          }
+        },
+        "parameters": [
+          {
+            "name": "webhook-id",
+            "in": "header",
+            "required": true,
+            "description": "The delivery's id: one per event and per endpoint, the same on every retry of that delivery and on a resend from the dashboard. Deduplicate on it. Two endpoints receiving one event get two ids.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "webhook-timestamp",
+            "in": "header",
+            "required": true,
+            "description": "When this attempt was sent, in Unix seconds: new on every retry, and signed with the body. Refuse one too far from your own clock.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "webhook-signature",
+            "in": "header",
+            "required": true,
+            "description": "`v1,` then the base64 HMAC-SHA256 of `webhook-id.webhook-timestamp.body`, keyed with the endpoint's signing secret (the part after `whsec_`, base64 decoded), the Standard Webhooks way. It may hold several, space separated: two while a regenerated secret's overlap runs, the new secret's first. Accept the delivery when any one matches your secret. Check it over the raw bytes received, before parsing them.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "object",
+                  "type",
+                  "created_at",
+                  "network",
+                  "api_version",
+                  "data",
+                  "detail"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "The event's id: the same in every delivery of it, to every endpoint and on every retry, and on [Retrieve an event](/reference/events/retrieve). `webhook-id` names the delivery, not the event."
+                  },
+                  "object": {
+                    "type": "string",
+                    "enum": ["event"],
+                    "description": "Always `event`."
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["subscription.paused"],
+                    "description": "The event's name."
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When the event happened: the moment `data` describes."
+                  },
+                  "network": {
+                    "type": "string",
+                    "enum": ["devnet", "mainnet-beta"],
+                    "description": "The Solana network the subscription is on."
+                  },
+                  "api_version": {
+                    "type": "string",
+                    "enum": ["2026-10-02"],
+                    "description": "The version of this contract `data` and `detail` are written in, as `Mesub-Version` names them. Set when the body is written, and kept with it."
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Its place among the events of this subscription: 1, 2, 3... in the order they happened, two events of one change included. Deliveries may arrive in any order: apply a subscription's events in the order of `sequence`, and skip one lower than the last you applied for it. Absent on bodies written before Mesub numbered events, and on an event it could not number. An event without `sequence` cannot be placed: read the subscription's state now, with [Retrieve a subscription](/reference/subscriptions/retrieve) or [Check access](/reference/access/check), rather than applying its `data`."
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/Subscription",
+                    "description": "The subscription as it stood right after the change that raised this event, as [Retrieve a subscription](/reference/subscriptions/retrieve) would have answered it then, however late the delivery. Events raised by the same change share it, and `detail` says what each event is about: a last retry that fails raises `subscription.payment_failed` and `subscription.stopped`, both showing `status: stopped`, the failure's cause in `payment_failed`'s `detail`."
+                  },
+                  "detail": {
+                    "type": "object",
+                    "description": "Empty on this event.",
+                    "properties": {}
+                  },
+                  "test": {
+                    "type": "boolean",
+                    "description": "True on a test delivery of this event, sent by hand from the dashboard. Absent otherwise."
+                  }
+                }
+              },
+              "example": {
+                "id": "evt_cmg1x0evt0001",
+                "object": "event",
+                "type": "subscription.paused",
+                "created_at": "2026-01-11T00:00:00.000Z",
+                "network": "devnet",
+                "api_version": "2026-10-02",
+                "sequence": 3,
+                "data": {
+                  "id": "cmg1x0abc0001",
+                  "status": "active",
+                  "paused": true,
+                  "end_reason": null,
+                  "late_reason": null,
+                  "stop_reason": null,
+                  "access": true,
+                  "payment_status": "none",
+                  "blocked_since": null,
+                  "blocked_reason": null,
+                  "plan": "pro",
+                  "wallet": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+                  "email": "subscriber@example.com",
+                  "external_id": "user_123",
+                  "current_period_start": "2026-01-01T00:00:00.000Z",
+                  "current_period_end": "2026-01-31T00:00:00.000Z",
+                  "next_charge_at": null,
+                  "next_retry_at": null,
+                  "retry_deadline": null,
+                  "next_retry_number": null,
+                  "retries_allowed": null,
+                  "access_until": "2026-01-31T00:00:00.000Z",
+                  "closable": false,
+                  "closable_from": null,
+                  "created_at": "2026-01-01T00:00:00.000Z",
+                  "confirmed_at": "2026-01-01T00:00:05.000Z"
+                },
+                "detail": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "2XX": {
+            "description": "Received. Anything else, a redirect included, counts as a failure and is retried."
+          }
+        }
+      }
+    },
+    "subscription.unpaused": {
+      "post": {
+        "tags": ["Webhooks"],
+        "summary": "subscription.unpaused",
+        "operationId": "webhook_subscription_unpaused",
+        "description": "A parked seat is back: the project's tier has room for it again, and Mesub charges it again, at the end of the period it paid for, or at once when that period is over. `data.paused` is false.\n\nIts `subscription.access_granted` follows, with a higher `sequence`, when its access had ended while it was parked.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "x-mesub": {
+          "href": "reference/webhooks/subscription-unpaused",
+          "guide": {
+            "label": "Webhooks",
+            "href": "docs/webhooks"
+          }
+        },
+        "parameters": [
+          {
+            "name": "webhook-id",
+            "in": "header",
+            "required": true,
+            "description": "The delivery's id: one per event and per endpoint, the same on every retry of that delivery and on a resend from the dashboard. Deduplicate on it. Two endpoints receiving one event get two ids.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "webhook-timestamp",
+            "in": "header",
+            "required": true,
+            "description": "When this attempt was sent, in Unix seconds: new on every retry, and signed with the body. Refuse one too far from your own clock.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "webhook-signature",
+            "in": "header",
+            "required": true,
+            "description": "`v1,` then the base64 HMAC-SHA256 of `webhook-id.webhook-timestamp.body`, keyed with the endpoint's signing secret (the part after `whsec_`, base64 decoded), the Standard Webhooks way. It may hold several, space separated: two while a regenerated secret's overlap runs, the new secret's first. Accept the delivery when any one matches your secret. Check it over the raw bytes received, before parsing them.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "object",
+                  "type",
+                  "created_at",
+                  "network",
+                  "api_version",
+                  "data",
+                  "detail"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "The event's id: the same in every delivery of it, to every endpoint and on every retry, and on [Retrieve an event](/reference/events/retrieve). `webhook-id` names the delivery, not the event."
+                  },
+                  "object": {
+                    "type": "string",
+                    "enum": ["event"],
+                    "description": "Always `event`."
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["subscription.unpaused"],
+                    "description": "The event's name."
+                  },
+                  "created_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When the event happened: the moment `data` describes."
+                  },
+                  "network": {
+                    "type": "string",
+                    "enum": ["devnet", "mainnet-beta"],
+                    "description": "The Solana network the subscription is on."
+                  },
+                  "api_version": {
+                    "type": "string",
+                    "enum": ["2026-10-02"],
+                    "description": "The version of this contract `data` and `detail` are written in, as `Mesub-Version` names them. Set when the body is written, and kept with it."
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Its place among the events of this subscription: 1, 2, 3... in the order they happened, two events of one change included. Deliveries may arrive in any order: apply a subscription's events in the order of `sequence`, and skip one lower than the last you applied for it. Absent on bodies written before Mesub numbered events, and on an event it could not number. An event without `sequence` cannot be placed: read the subscription's state now, with [Retrieve a subscription](/reference/subscriptions/retrieve) or [Check access](/reference/access/check), rather than applying its `data`."
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/Subscription",
+                    "description": "The subscription as it stood right after the change that raised this event, as [Retrieve a subscription](/reference/subscriptions/retrieve) would have answered it then, however late the delivery. Events raised by the same change share it, and `detail` says what each event is about: a last retry that fails raises `subscription.payment_failed` and `subscription.stopped`, both showing `status: stopped`, the failure's cause in `payment_failed`'s `detail`."
+                  },
+                  "detail": {
+                    "type": "object",
+                    "description": "Empty on this event.",
+                    "properties": {}
+                  },
+                  "test": {
+                    "type": "boolean",
+                    "description": "True on a test delivery of this event, sent by hand from the dashboard. Absent otherwise."
+                  }
+                }
+              },
+              "example": {
+                "id": "evt_cmg1x0evt0001",
+                "object": "event",
+                "type": "subscription.unpaused",
+                "created_at": "2026-01-13T00:00:00.000Z",
+                "network": "devnet",
+                "api_version": "2026-10-02",
+                "sequence": 4,
+                "data": {
+                  "id": "cmg1x0abc0001",
+                  "status": "active",
+                  "paused": false,
+                  "end_reason": null,
+                  "late_reason": null,
+                  "stop_reason": null,
+                  "access": true,
+                  "payment_status": "paid",
+                  "blocked_since": null,
+                  "blocked_reason": null,
+                  "plan": "pro",
+                  "wallet": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+                  "email": "subscriber@example.com",
+                  "external_id": "user_123",
+                  "current_period_start": "2026-01-01T00:00:00.000Z",
+                  "current_period_end": "2026-01-31T00:00:00.000Z",
+                  "next_charge_at": "2026-01-31T00:00:00.000Z",
+                  "next_retry_at": null,
+                  "retry_deadline": null,
+                  "next_retry_number": null,
+                  "retries_allowed": null,
+                  "access_until": "2026-01-31T00:00:00.000Z",
+                  "closable": false,
+                  "closable_from": null,
+                  "created_at": "2026-01-01T00:00:00.000Z",
+                  "confirmed_at": "2026-01-01T00:00:05.000Z"
+                },
+                "detail": {}
               }
             }
           }
@@ -9333,7 +9678,7 @@
           },
           "paused": {
             "type": "boolean",
-            "description": "True on a seat parked over the project's subscriber limit, its status unchanged."
+            "description": "True on a seat parked over the project's subscriber limit, its status unchanged. `subscription.paused` and `subscription.unpaused` are sent when it changes."
           },
           "end_reason": {
             "type": ["string", "null"],
@@ -9771,14 +10116,16 @@
               "subscription.ended",
               "subscription.expired",
               "subscription.access_granted",
-              "subscription.access_revoked"
+              "subscription.access_revoked",
+              "subscription.paused",
+              "subscription.unpaused"
             ],
             "description": "The event's name, as its webhook is named."
           },
           "created_at": {
             "type": "string",
             "format": "date-time",
-            "description": "When the event happened: the moment `data` describes."
+            "description": "When the event happened: the moment `data` describes, but for an access event or a cancellation reaching its end, written when Mesub wrote the event, whose `detail.changed_at` is that moment."
           },
           "network": {
             "type": "string",
