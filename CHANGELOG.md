@@ -5,7 +5,7 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-16)
 
 The first version published to npm. Requires Node 22 or later.
 

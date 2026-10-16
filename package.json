@@ -1,7 +1,7 @@
 {
   "name": "@mesub/node",
   "version": "0.1.0",
-  "description": "Server-side SDK for Mesub: know whether a customer has access to a plan, from Node.",
+  "description": "Mesub for Node: check a customer's access, take subscriptions and verify webhooks for subscription billing on Solana.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,7 +14,9 @@
     "solana",
     "subscriptions",
     "billing",
-    "sdk"
+    "sdk",
+    "webhooks",
+    "usdc"
   ],
   "type": "module",
   "sideEffects": false,
