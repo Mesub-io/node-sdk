@@ -184,7 +184,12 @@ export interface FakeFailure {
      * status says: true for 408, 429 and 5xx.
      */
     retryable?: boolean;
-    /** Seconds, sent as `Retry-After`. */
+    /**
+     * Seconds, sent as `Retry-After`. A 503 on a route that builds, sends or
+     * queues (every POST under `/v1/subscriptions`) defaults to Mesub's own:
+     * 2 for `unavailable` on submit (too many submits waiting), 20 for
+     * `unavailable` on retry (the charge could not be queued), 10 otherwise.
+     */
     retryAfter?: number;
 }
 
@@ -759,7 +764,8 @@ export class FakeMesub {
             return error(401, 'invalid_api_key', 'That API key is not valid.');
         }
         if (this.#failure) {
-            const { status, code, message, retryable, retryAfter } = this.#failure;
+            const { status, code, message, retryable } = this.#failure;
+            const retryAfter = this.#failure.retryAfter ?? waitOf(method, path, status, code);
             return error(status, code, message ?? `Mesub answered ${status}.`, {
                 ...(retryable !== undefined && { retryable }),
                 ...(retryAfter !== undefined && { retryAfter }),
@@ -1748,6 +1754,21 @@ const RETRYABLE_CODES = new Set([
     'pull_running',
     'network_unavailable',
 ]);
+
+/**
+ * The `Retry-After` Mesub sends with a 503 on a route that builds, sends or
+ * queues: its spec makes it required there. The seat wait of a submit
+ * (`SEAT_BUSY_RETRY_AFTER`), the queue of a retry (`UNQUEUED_RETRY_AFTER`),
+ * the chain guard's otherwise. Undefined elsewhere.
+ */
+function waitOf(method: string, path: string, status: number, code: string): number | undefined {
+    if (status !== 503 || method !== 'POST' || !path.startsWith('/v1/subscriptions')) {
+        return undefined;
+    }
+    if (code === 'unavailable' && path.endsWith('/submit')) return 2;
+    if (code === 'unavailable' && path.endsWith('/retry')) return 20;
+    return 10;
+}
 
 /** An error as the back writes it: Nest's body, plus `code` and `retryable`. */
 function error(

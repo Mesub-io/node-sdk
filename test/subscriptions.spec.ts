@@ -483,6 +483,59 @@ describe('subscriptions.submit', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    // Mesub-io/backend#505: too many submits waiting, nothing signed or sent.
+    describe('a 503 unavailable, the seats busy', () => {
+        const busy = () =>
+            coded(503, 'unavailable', 'Too many subscriptions are being submitted.', true, {
+                'retry-after': '2',
+            });
+
+        it('sends the same request again after its Retry-After, and answers that', async () => {
+            const { fetch, calls } = mockFetch(busy(), json(201, { subscription: subscription() }));
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+
+            await vi.advanceTimersByTimeAsync(1_999);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            await vi.advanceTimersByTimeAsync(1);
+
+            expect((await result).value).toEqual({ subscription: subscription() });
+            expect(posts(calls)).toEqual([SENT, SENT]);
+        });
+
+        it('throws it as is once the replays run out, reading nothing back', async () => {
+            const { fetch, calls } = mockFetch(busy(), busy(), busy());
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+
+            const { error } = await result;
+            expect(error).not.toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({
+                status: 503,
+                code: 'unavailable',
+                apiCode: 'unavailable',
+                retryable: true,
+                retryAfter: 2_000,
+            });
+            expect(posts(calls)).toEqual([SENT, SENT, SENT]);
+            expect(calls.every(({ init }) => init.method === 'POST')).toBe(true);
+        });
+
+        it('still reads back when an earlier send got no answer', async () => {
+            const { fetch } = mockFetch(
+                new TypeError('fetch failed'),
+                busy(),
+                busy(),
+                json(200, pending()),
+            );
+            const result = settle(mesub(fetch).subscriptions.submit('sub_1', signed));
+            await vi.runAllTimersAsync();
+
+            const { error } = await result;
+            expect(error).toBeInstanceOf(MesubSubmitError);
+            expect(error).toMatchObject({ code: 'unavailable', subscription: pending() });
+        });
+    });
+
     describe('an answer it cannot read', () => {
         it.each([
             ['no subscription', { reason: 'x' }],
@@ -1400,6 +1453,21 @@ describe('subscriptions.retry', () => {
         await expect(mesub(fetch).subscriptions.retry('sub_1')).rejects.toMatchObject({
             status,
             apiCode: code,
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['unavailable', '20', 20_000],
+        ['network_unavailable', '10', 10_000],
+    ])('hands back the Retry-After of a 503 %s', async (code, header, wait) => {
+        const { fetch } = mockFetch(coded(503, code, 'Not now.', true, { 'retry-after': header }));
+
+        await expect(mesub(fetch).subscriptions.retry('sub_1')).rejects.toMatchObject({
+            status: 503,
+            apiCode: code,
+            retryable: true,
+            retryAfter: wait,
         });
         expect(fetch).toHaveBeenCalledTimes(1);
     });

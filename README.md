@@ -219,7 +219,10 @@ if (now.access) {
 `submit` waits for the chain: up to 130 s by default, which `{ timeout, budget }`
 lower for a serverless function. When no answer says what became of it, it
 throws a `MesubSubmitError`: read the subscription back with `retrieve` before
-creating a new one, since the wallet may have paid.
+creating a new one, since the wallet may have paid. A 503 `unavailable` (too
+many submits waiting on your project) says nothing was signed or sent: `submit`
+sends the same request again after its `Retry-After`, and past its replays
+throws it as is, `retryable`, with `retryAfter`.
 
 A transaction lives about half a minute, the terms five:
 `transaction_expires_at` says when it should run out, an estimate that errs
@@ -273,7 +276,9 @@ up first), `retry_cannot_succeed` (the wallet no longer approves it, its token
 account is frozen, or its authority is closed), `retry_too_soon` (`retryAfter`
 says when). Two refusals are `retryable`: `subscription_changed` (two retries
 met, or a pull moved it on) and, on Free, `pull_running` (a pull runs now).
-Read the subscription back before you ask again. Sent once, never retried.
+Read the subscription back before you ask again. A 503 (`unavailable`, the
+charge could not be queued, or `network_unavailable`) changed nothing, and
+`retryAfter` says when to ask again. Sent once, never retried.
 
 ```ts
 await mesub.subscriptions.retrieve(id);
@@ -583,6 +588,7 @@ fake.grant({ external_id: 'user_9' }, 'pro', {
 new FakeMesub({ plans: ['pro', { slug: 'bonk', mint, token: { name: 'Bonk' } }] });
 
 fake.fail('outage'); // every call answers 503, until fail(null)
+fake.fail({ status: 503, code: 'unavailable' }); // Retry-After as Mesub: 2 s on submit, 20 s on retry
 const { body, headers } = await fake.webhook('subscription.renewed'); // signed
 fake.addEvent('subscription.payment_failed', { subscription: { id } }); // on /v1/events
 fake.addEvent('subscription.access_revoked', { subscription: { id }, sequence: 5 });

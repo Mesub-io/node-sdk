@@ -29,6 +29,7 @@ interface Spec {
 }
 interface Response3 {
     content?: { 'application/json'?: { schema: Schema } };
+    headers?: Record<string, { $ref?: string }>;
 }
 type Schema = Record<string, unknown>;
 
@@ -85,6 +86,7 @@ interface Seen {
     status: number;
     body: unknown;
     requestId: string | null;
+    retryAfter: string | null;
 }
 
 /** A fake, a client on it, and every answer it gave on a route of the spec. */
@@ -104,6 +106,7 @@ function recorded(options: ConstructorParameters<typeof FakeMesub>[0] = {}) {
                 status: response.status,
                 body: await response.clone().json(),
                 requestId: response.headers.get('mesub-request-id'),
+                retryAfter: response.headers.get('retry-after'),
             });
         }
         return response;
@@ -125,15 +128,18 @@ function expectContract(seen: Seen[]) {
     const pattern = new RegExp(String(components.headers['MesubRequestId']!.schema['pattern']));
 
     expect(seen.length).toBeGreaterThan(0);
-    for (const { method, route, status, body, requestId } of seen) {
+    for (const { method, route, status, body, requestId, retryAfter } of seen) {
         const label = `${method.toUpperCase()} ${route} ${status}`;
-        const schema =
-            spec.paths[route]?.[method]?.responses[String(status)]?.content?.['application/json']
-                ?.schema;
+        const answer = spec.paths[route]?.[method]?.responses[String(status)];
+        const schema = answer?.content?.['application/json']?.schema;
 
         expect(schema, `${label}: the spec names no such answer`).toBeDefined();
         expect(problems(schema!, body), label).toEqual([]);
         expect(requestId, `${label}: Mesub-Request-Id`).toMatch(pattern);
+        // `RetryAfter` is required where the spec names it; the other one comes with some codes.
+        if (answer?.headers?.['Retry-After']?.$ref === '#/components/headers/RetryAfter') {
+            expect(retryAfter, `${label}: Retry-After`).toMatch(/^[0-9]+$/);
+        }
     }
 }
 
@@ -283,6 +289,36 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
                 '/v1/subscriptions/{id}/close/confirm',
             ]),
         );
+    });
+
+    it("answers a 503 with the Retry-After Mesub sends, submit's and retry's own", async () => {
+        const { fake, client, seen } = recorded();
+        const mesub = client();
+        const created = await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET });
+        const { id } = created.subscription;
+
+        fake.fail({ status: 503, code: 'network_unavailable' });
+        await mesub.subscriptions.create({ plan: 'pro', wallet: WALLET }).catch(() => null);
+        fake.fail({ status: 503, code: 'unavailable' });
+        const submit = mesub.subscriptions
+            .submit(
+                id,
+                { transaction: created.transaction, terms_signature: 'signed' },
+                {
+                    budget: 1,
+                },
+            )
+            .catch((error: unknown) => error);
+        const retry = await mesub.subscriptions.retry(id).catch((error: unknown) => error);
+
+        expectContract(seen);
+        expect(await submit).toMatchObject({ apiCode: 'unavailable', retryAfter: 2_000 });
+        expect(retry).toMatchObject({ apiCode: 'unavailable', retryAfter: 20_000 });
+        expect(seen.slice(1).map(({ status, retryAfter }) => [status, retryAfter])).toEqual([
+            [503, '10'],
+            [503, '2'],
+            [503, '20'],
+        ]);
     });
 
     it('answers events as the spec says', async () => {

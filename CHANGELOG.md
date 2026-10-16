@@ -392,6 +392,13 @@ answer this request.`: never the SDK's own message, which may name your
   `available_since`: events before it are not served. Typed as `MesubEvent`
   and `EventList`; a Mesub that predates the route throws a `not_found`
   whose `apiCode` is null (#146).
+- `submit` reads a 503 `unavailable` (Mesub-io/backend#505: too many
+  submits waiting on the project, nothing signed or sent) as an answer: it
+  is replayed after its `Retry-After` as before, but past the replays it is
+  thrown as is, `retryable`, with no read back, instead of a
+  `MesubSubmitError`, unless an earlier send got no answer. `retry`'s 503
+  `unavailable` (the charge could not be queued) now carries `retryAfter`,
+  20 s; it is still never sent again (#149).
 - Every event carries `sequence` (Mesub-io/backend#502), its place among its
   subscription's events: apply one subscription's events by `sequence`, and
   skip one lower than the last applied. Optional: absent on a body written
@@ -471,6 +478,11 @@ endsAt)` for an answer in its last period, `endPlan(plan)` to end what is
 })` raises `access_granted` after a submit's `created`, as Mesub with its
   `ACCESS_EVENTS` flag on; off by default. Held to Mesub-io/backend
   `openapi/v1.json` at c585920, each webhook against its own schema (#149).
+- `FakeMesub` sends `Retry-After` with a 503 on every POST under
+  `/v1/subscriptions`, as Mesub must there: 2 s for `unavailable` on submit,
+  20 s for `unavailable` on retry, 10 s otherwise, unless the failure names
+  one. The spec test holds the fake to the `Retry-After` the spec requires
+  (#149).
 
 ### Errors
 
