@@ -331,6 +331,9 @@ it too; `SITUATIONS` is the whole table.
 talks to Mesub: it calls your server, on routes this package mounts in one
 line.
 
+`@mesub/react` 0.1.x works with the routes of `@mesub/node` 0.1.x: upgrade
+both to the same minor together.
+
 ```ts
 // Express, after your own login. Under Nest: the same app.use in main.ts.
 import { mesubRoutes } from '@mesub/node/express';
@@ -370,6 +373,7 @@ API key, nor the email and the id you gave Mesub.
 | `POST /subscriptions`                                        | Prepares one: terms and a transaction.      |
 | `POST /subscriptions/:id/transaction`                        | A fresh transaction for it, and its terms.  |
 | `POST /subscriptions/:id/submit`                             | Sends what the wallet signed.               |
+| `POST /subscriptions/:id/retry`                              | Pay now: queues the missed charge.          |
 | `POST /subscriptions/:id/cancel`, `/resume`, `/close`        | The transaction the wallet signs and sends. |
 | `POST /subscriptions/:id/cancel/confirm`, and the two others | Confirms it with its signature.             |
 
