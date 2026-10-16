@@ -186,7 +186,7 @@
                       "first_subscribed_at": "2026-01-01T00:00:05.000Z",
                       "current_period_end": "2026-01-31T00:00:00.000Z",
                       "cancelled_at": null,
-                      "access_until": "2026-02-03T00:00:00.000Z",
+                      "access_until": "2026-02-03T00:06:00.000Z",
                       "closable": false,
                       "closable_from": null,
                       "next_charge_at": "2026-01-31T00:12:00.000Z",
@@ -7565,7 +7565,7 @@
                   "retry_deadline": null,
                   "next_retry_number": 1,
                   "retries_allowed": 3,
-                  "access_until": "2026-02-03T00:01:00.000Z",
+                  "access_until": "2026-02-03T00:05:00.000Z",
                   "closable": false,
                   "closable_from": null,
                   "created_at": "2026-01-01T00:00:00.000Z",
@@ -8074,7 +8074,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.ended",
         "operationId": "webhook_subscription_ended",
-        "description": "It is over. `data.end_reason` says why.\n\nA cancellation that reached its end (its expiry: the end of the period it paid for) sends this event with `end_reason: \"cancelled\"`, once per cancellation, once a read of the chain after the expiry shows the cancellation still in place: usually within half an hour of the expiry. `detail.changed_at` is the expiry, to the millisecond, and the moment `data` describes, `status: ended`. The `subscription.access_revoked` of that expiry is sent at the expiry itself, from Mesub's records, so it comes first; a resume signed in the wallet before the expiry and seen late by Mesub can still follow that `access_revoked` (then `subscription.resumed` and `subscription.access_granted`, and no `subscription.ended`). The subscription can still be closed afterwards, which sends this event again with `end_reason: \"closed\"` (or `\"cancelled\"` when Mesub finds it closed outside Mesub).\n\nOn a plan with an end date, a subscription still running or late is ended at the plan's end, within minutes of it, whatever period it paid for: this event then carries `end_reason: \"plan_ended\"`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "It is over. `data.end_reason` says why.\n\nNot sent yet for this case, which Mesub turns on later: a cancellation that reached its end (its expiry: the end of the period it paid for) sends this event with `end_reason: \"cancelled\"`, once per cancellation, once a read of the chain after the expiry shows the cancellation still in place: usually within half an hour of the expiry. `detail.changed_at` is the expiry, to the millisecond, and the moment `data` describes, `status: ended`. The `subscription.access_revoked` of that expiry is sent at the expiry itself, from Mesub's records, so it comes first; a resume signed in the wallet before the expiry and seen late by Mesub can still follow that `access_revoked` (then `subscription.resumed` and `subscription.access_granted`, and no `subscription.ended`). The subscription can still be closed afterwards, which sends this event again with `end_reason: \"closed\"` (or `\"cancelled\"` when Mesub finds it closed outside Mesub).\n\nOn a plan with an end date, a subscription still running or late is ended at the plan's end, within minutes of it, whatever period it paid for: this event then carries `end_reason: \"plan_ended\"`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-ended",
           "guide": {
@@ -8397,7 +8397,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.access_granted",
         "operationId": "webhook_subscription_access_granted",
-        "description": "Access started: the subscription grants access now, and did not just before. Its first access, a payment that gives access back after it ended, a comeback, a resume that comes after a cancellation ended. A renewal paid on time, or a resume while the paid period still runs, keeps access and sends none: only `subscription.renewed` or `subscription.resumed`.\n\nDrive the customer's access from `subscription.access_granted` and `subscription.access_revoked` alone: they are sent only when access actually changes, and every change sends one. The other events say why. Apply them in the order of `sequence`, since deliveries may arrive in any order: the last one applied says whether the customer has access. `detail.changed_at` is the moment access started, and `data.access` is true.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "Not sent yet: Mesub turns this event on later. Access started: the subscription grants access now, and did not just before. Its first access, a payment that gives access back after it ended, a comeback, a resume that comes after a cancellation ended. A renewal paid on time, or a resume while the paid period still runs, keeps access and sends none: only `subscription.renewed` or `subscription.resumed`.\n\nDrive the customer's access from `subscription.access_granted` and `subscription.access_revoked` alone: they are sent only when access actually changes, and every change sends one. The other events say why. Apply them in the order of `sequence`, since deliveries may arrive in any order: the last one applied says whether the customer has access. `detail.changed_at` is the moment access started, and `data.access` is true.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-access-granted",
           "guide": {
@@ -8582,7 +8582,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.access_revoked",
         "operationId": "webhook_subscription_access_revoked",
-        "description": "Access ended: the subscription grants no access now, and did just before. It stopped, ended, failed a payment on Free, a cancellation reached its end, its plan ended, or a collection blocked on Mesub's or the merchant's side reached the end of the access it keeps (`access_until`). Sent at the change, or, for a date that passed with nothing else happening, a few seconds after it: `detail.changed_at` is then that date, to the millisecond.\n\nDrive the customer's access from `subscription.access_granted` and `subscription.access_revoked` alone: they are sent only when access actually changes, and every change sends one. The other events say why. Apply them in the order of `sequence`, since deliveries may arrive in any order: the last one applied says whether the customer has access. `data.access` is false.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "Not sent yet: Mesub turns this event on later. Access ended: the subscription grants no access now, and did just before. It stopped, ended, failed a payment on Free, a cancellation reached its end, its plan ended, or a collection blocked on Mesub's or the merchant's side reached the end of the access it keeps (`access_until`). Sent at the change, or, for a date that passed with nothing else happening, a few seconds after it: `detail.changed_at` is then that date, to the millisecond.\n\nDrive the customer's access from `subscription.access_granted` and `subscription.access_revoked` alone: they are sent only when access actually changes, and every change sends one. The other events say why. Apply them in the order of `sequence`, since deliveries may arrive in any order: the last one applied says whether the customer has access. `data.access` is false.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-access-revoked",
           "guide": {
@@ -8767,7 +8767,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.paused",
         "operationId": "webhook_subscription_paused",
-        "description": "A seat was parked: the project now holds more subscribers than its tier allows (it moved to a smaller tier, or a subscription confirmed late filled it), and Mesub stopped charging the newest ones rather than any within the limit. Not a pause the subscriber asked for: nothing changed on chain, and the status stays as it was.\n\nThe subscription keeps access to the end of the period it paid for, and no further: `data.paused` is true, `data.next_charge_at` null. Its `subscription.access_revoked` comes when that access ends, or right after this event, with a higher `sequence`, when it had already ended. The project moving back to a tier with room sends `subscription.unpaused`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "Not sent yet: Mesub turns this event on later. A seat was parked: the project now holds more subscribers than its tier allows (it moved to a smaller tier, or a subscription confirmed late filled it), and Mesub stopped charging the newest ones rather than any within the limit. Not a pause the subscriber asked for: nothing changed on chain, and the status stays as it was.\n\nThe subscription keeps access to the end of the period it paid for, and no further: `data.paused` is true, `data.next_charge_at` null. Its `subscription.access_revoked` comes when that access ends, or right after this event, with a higher `sequence`, when it had already ended. The project moving back to a tier with room sends `subscription.unpaused`.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-paused",
           "guide": {
@@ -8923,7 +8923,7 @@
         "tags": ["Webhooks"],
         "summary": "subscription.unpaused",
         "operationId": "webhook_subscription_unpaused",
-        "description": "A parked seat is back: the project's tier has room for it again, and Mesub charges it again, at the end of the period it paid for, or at once when that period is over. `data.paused` is false.\n\nIts `subscription.access_granted` follows, with a higher `sequence`, when its access had ended while it was parked.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
+        "description": "Not sent yet: Mesub turns this event on later. A parked seat is back: the project's tier has room for it again, and Mesub charges it again, at the end of the period it paid for, or at once when that period is over. `data.paused` is false.\n\nIts `subscription.access_granted` follows, with a higher `sequence`, when its access had ended while it was parked.\n\nMesub posts this to every endpoint of the project subscribed to it. Answer with a 2xx within 10 seconds.",
         "x-mesub": {
           "href": "reference/webhooks/subscription-unpaused",
           "guide": {
