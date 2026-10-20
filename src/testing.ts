@@ -648,7 +648,7 @@ export class FakeMesub {
             object: 'event',
             type,
             created_at: fields.created_at ?? now.toISOString(),
-            network: 'devnet',
+            network: 'mainnet-beta',
             api_version: API_VERSION,
             ...(sequence !== null && { sequence }),
             data,
@@ -698,7 +698,7 @@ export class FakeMesub {
             object: 'event',
             type,
             created_at: fields.created_at ?? now.toISOString(),
-            network: 'devnet',
+            network: 'mainnet-beta',
             api_version: API_VERSION,
             ...(sequence !== null && { sequence }),
             data,
@@ -824,7 +824,7 @@ export class FakeMesub {
                 object: 'event',
                 type: each,
                 created_at,
-                network: 'devnet',
+                network: 'mainnet-beta',
                 api_version: API_VERSION,
                 sequence: this.#nextSequence(subscription.id),
                 data: structuredClone(data),
@@ -2096,7 +2096,7 @@ function withAttempts(answer: AccessAnswer, attempts: boolean): AccessAnswer {
 }
 
 /**
- * A plan as `/v1/plans` serves one: 9.99 USDC a month on devnet, unless told
+ * A plan as `/v1/plans` serves one: 9.99 USDC a month on mainnet, unless told
  * otherwise. Its token follows its `symbol`, which only a vouched mint has:
  * verified and worth its amount in dollars with one, unverified and unpriced
  * with a `token` given or a null `symbol`.
@@ -2123,9 +2123,9 @@ function fakePlan(slug: string, { token, ...over }: Omit<FakePlanFields, 'slug'>
             verified: vouched,
             ...token,
         },
-        mint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+        mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
         period_hours: 720,
-        network: 'devnet',
+        network: 'mainnet-beta',
         status: 'active',
         available: true,
         ends_at: null,
