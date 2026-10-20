@@ -20,7 +20,7 @@ import type { WebhookEventType } from '../src/webhooks.js';
  * where the types and the back's contract meet without a back running.
  */
 // Mesub-io/backend main, with #513.
-const BACKEND_COMMIT = 'cb638a1aefc2cb6669e9f3fc72a9f3c9a1b97f9c';
+const BACKEND_COMMIT = '17bef4748306f5a53d0c054ec73599deffd2c4a1';
 
 interface Spec {
     info: { version: string };

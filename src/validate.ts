@@ -81,6 +81,8 @@ const TRANSACTION_EXPIRES_AT: Field = { ...DATE_OR_NULL, absent: null };
  * null, before it.
  */
 const AMOUNT_USD: Field = { ...STRING_OR_NULL, absent: null };
+/** An attempt's `amount_received`, served since Mesub-io/backend#396: null before it. */
+const AMOUNT_RECEIVED: Field = { ...STRING_OR_NULL, absent: null };
 const TOKEN: Field = {
     ...OBJECT,
     absent: (): PlanToken => ({ symbol: null, name: null, logo_url: null, verified: false }),
@@ -243,6 +245,7 @@ const SUBSCRIPTION_ATTEMPT = {
     reason: STRING_OR_NULL,
     amount: STRING,
     amount_usd: AMOUNT_USD,
+    amount_received: AMOUNT_RECEIVED,
     signature: STRING_OR_NULL,
     retry: BOOLEAN,
     retry_number: RETRY_COUNT,

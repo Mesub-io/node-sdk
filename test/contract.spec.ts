@@ -467,6 +467,8 @@ describe.skipIf(!env.url)('contract with the back', () => {
                 amount: 'string',
                 // Read as null from a back that predates it (Mesub-io/backend#433).
                 amount_usd: 'string|null',
+                // Read as null where the mint's fee is not known (Mesub-io/backend#396).
+                amount_received: 'string|null',
                 signature: 'string|null',
                 retry: 'boolean',
                 retry_number: 'number|null',

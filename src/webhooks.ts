@@ -133,6 +133,12 @@ export interface FirstPayment {
     mint: string | null;
     /** The transaction that paid it. */
     signature: string | null;
+    /**
+     * What the receiver's account got of it: `amount` less the fee a
+     * Token-2022 mint withholds. Null when not known, absent from a Mesub that
+     * predates it.
+     */
+    amount_received?: string | null;
 }
 
 /**
