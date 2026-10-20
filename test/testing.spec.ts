@@ -1305,7 +1305,7 @@ describe('FakeMesub', () => {
             ]);
             expect(data[0]).toMatchObject({
                 object: 'event',
-                network: 'devnet',
+                network: 'mainnet-beta',
                 api_version: '2026-10-02',
                 data: { id, status: 'cancelled' },
                 detail: {},
@@ -1506,7 +1506,7 @@ describe('FakeMesub', () => {
             expect(data[0]!.detail).toEqual({
                 first_payment: {
                     amount: '5000000',
-                    mint: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
+                    mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
                     signature: 'fake_signature',
                 },
             });

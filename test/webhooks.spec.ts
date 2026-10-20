@@ -1178,7 +1178,7 @@ describe('testing: signing webhooks', () => {
                 id: type === 'test' ? 'evt_test' : expect.stringMatching(/^evt_fake_\d+$/),
                 delivery_id: headers['webhook-id'],
                 type,
-                network: 'devnet',
+                network: 'mainnet-beta',
                 api_version: '2026-10-02',
             });
             expect(headers['webhook-signature']).toBe(
