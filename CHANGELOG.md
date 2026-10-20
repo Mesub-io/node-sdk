@@ -5,7 +5,12 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
-## 0.1.1 (2026-10-20)
+## 0.1.2 (2026-10-21)
+
+The changes of 0.1.1, on npm at last: 0.1.1 was tagged but never reached npm,
+its release stopped by npm before publishing. Nothing else changed.
+
+## 0.1.1 (2026-10-20, never published to npm)
 
 - An attempt's `amount_received` is typed: what the receiver's account got,
   the `amount` less the fee a Token-2022 mint withholds, null when Mesub does
