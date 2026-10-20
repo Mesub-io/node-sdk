@@ -592,6 +592,8 @@ export class FakeMesub {
                 amount: '9990000',
                 // The default amount's worth only: no price is guessed for another.
                 amount_usd: attempt.amount === undefined ? '9.99' : null,
+                // A mint that withholds nothing: the receiver got it all.
+                amount_received: attempt.amount ?? '9990000',
                 signature: 'fake_signature',
                 retry: false,
                 retry_number: null,
