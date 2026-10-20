@@ -1939,6 +1939,7 @@ describe('subscriptions.attempts', () => {
             reason: null,
             amount: '9990000',
             amount_usd: '9.99',
+            amount_received: '9990000',
             signature: SIGNATURE,
             retry: false,
             retry_number: null,

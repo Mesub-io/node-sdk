@@ -275,6 +275,13 @@ export interface SubscriptionAttempt {
      * knows no price, and from a Mesub that predates it.
      */
     amount_usd: string | null;
+    /**
+     * What the receiver's account got of a `paid` one, in the mint's smallest
+     * unit: `amount` less the fee a Token-2022 mint withholds on transfers.
+     * Null when not known (an attempt not paid, one recorded before Mesub
+     * kept it) and from a Mesub that predates it.
+     */
+    amount_received: string | null;
     /** The transaction that paid. Null on every outcome but `paid`, a refused one included. */
     signature: string | null;
     /** The subscription had already failed on this period. */
