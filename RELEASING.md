@@ -2,7 +2,9 @@
 
 A release is a version tag on main. `.github/workflows/publish.yml` checks the
 tag, runs every check, waits for a reviewer of the `npm` environment, then
-publishes to npm with provenance. Nobody runs `npm publish` from a laptop.
+stages the version on npm with provenance. It reaches npm once an owner of the
+package approves it with their two-factor code. Nobody runs `npm publish` from
+a laptop.
 
 ## Once, before the first release
 
@@ -17,28 +19,19 @@ None of it lives in this repository, so a branch cannot undo it.
    is free (free plan, public packages), or find out who holds it if not.
    Both co-founders as owners, two-factor authentication on both accounts.
 2. **The first publish.** npm lets a trusted publisher be set only on a
-   package that exists. If npmjs.com still says so when you get there:
-    - create a granular access token: "Read and write (publish and stage)",
-      `@mesub` scope with all its packages, "Bypass two-factor
-      authentication" ticked (a run cannot type a code: without it npm
-      answers 403), the shortest expiry offered;
-    - store it as the secret `NPM_TOKEN` of the `npm` environment (below),
-      not as a repository secret;
-    - release 0.1.0 as described further down: the workflow publishes with
-      that token, provenance included;
-    - npm only stages a version sent with such a token: on npmjs.com, the
-      package's staged version, approve it with your two-factor code. Until
-      then `latest` is a `0.0.0-stage` placeholder with nothing in it;
-      deprecate it after (`npm deprecate @mesub/node@0.0.0-stage "..."`);
-    - delete the token on npmjs.com and the secret on GitHub straight after.
-
-    A 404 on the publish means the token cannot write to `@mesub` (wrong
-    scope, or "select packages" while the package does not exist yet).
+   package that exists. Done for 0.1.0 with a short-lived token, which the
+   workflow no longer reads: delete it on npmjs.com, and the `NPM_TOKEN`
+   secret of the `npm` environment. A new package's first version is staged
+   by an owner from their machine (`npm stage publish --access public`),
+   approved with their two-factor code, then step 3.
 
 3. **The trusted publisher.** On npmjs.com, `@mesub/node`, Settings, Trusted
    Publisher, GitHub Actions: organization `Mesub-io`, repository `node-sdk`,
-   workflow `publish.yml`, environment `npm`. Every publish after that goes
-   through OIDC, with no token anywhere.
+   workflow `publish.yml`, environment `npm`.
+   Allowed actions: leave "publish directly" unticked. The workflow only
+   stages, and an owner approves; to a run that tries `npm publish`, npm
+   answers `403 OIDC permission denied for this action`. Every release
+   after that goes through OIDC, with no token anywhere.
 4. **No tokens from then on.** Same page, Publishing access: "Require
    two-factor authentication and disallow tokens".
 
@@ -78,8 +71,17 @@ None of it lives in this repository, so a branch cannot undo it.
     else, and a tag on a commit that is not on main. `v0.2.0-rc.1` publishes
     under the `next` dist-tag, never `latest`.
 
-5. **Approve.** Actions, the Publish run, Review deployments, `npm`: the
-   reviewer reads what the run is about to publish, then approves.
+5. **Approve, twice.** Actions, the Publish run, Review deployments, `npm`:
+   the reviewer reads what the run is about to stage, then approves. The run
+   stages the version. Then an owner of the package approves it on npm,
+   on the package page on npmjs.com or from a terminal:
+
+    ```sh
+    npm stage list @mesub/node
+    npm stage view <stage-id>      # or npm stage download <stage-id>
+    npm stage approve <stage-id>   # asks for the two-factor code
+    ```
+
 6. **Check** what reached npm:
 
     ```sh
@@ -94,7 +96,10 @@ None of it lives in this repository, so a branch cannot undo it.
 
 ## When it goes wrong
 
-- **The run stopped before publishing** (a check failed, the tag was wrong):
+- **The run stopped before staging** (a check failed, the tag was wrong):
   delete the tag (`git push origin :v0.2.0`), fix on main, tag again.
+- **A staged version is wrong.** `npm stage reject <stage-id>` (two-factor
+  code): nothing reached npm, and the version is free again. Then as above:
+  delete the tag, fix on main, tag again.
 - **A bad version reached npm.** Never unpublish: publish a fixed patch, then
   `npm deprecate @mesub/node@0.2.0 "Use 0.2.1: <why>"`.

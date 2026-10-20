@@ -1,9 +1,10 @@
 name: Publish
 
-# A version tag on main publishes that version. npm trusted publishing: GitHub
-# proves who is publishing through OIDC, so no npm token is stored in this
-# repository, and the package carries a provenance statement naming this
-# workflow and commit. RELEASING.md has the one-time setup and the checklist.
+# A version tag on main stages that version on npm, for an owner to approve.
+# npm trusted publishing: GitHub proves who is staging through OIDC, so no npm
+# token is stored in this repository, and the package carries a provenance
+# statement naming this workflow and commit. RELEASING.md has the one-time
+# setup and the checklist.
 #
 # What has to hold before anything reaches npm:
 # - the tag is a version, `v` and semver, naming the version in package.json;
@@ -11,7 +12,10 @@ name: Publish
 # - every check of CI passes on that commit;
 # - somebody listed as a reviewer of the `npm` environment approves the run.
 #   The environment is configured in the repository settings, not here: a
-#   workflow edited on a branch cannot lift the approval.
+#   workflow edited on a branch cannot lift the approval;
+# - an owner of the package approves the staged version on npm with their
+#   two-factor code. The trusted publisher allows staging only, set on
+#   npmjs.com: nothing here can lift that one either.
 on:
   push:
     tags: ['v*']
@@ -95,28 +99,25 @@ jobs:
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - run: pnpm install --frozen-lockfile
 
-      # Trusted publishing needs npm 11.5.1 or later.
-      - name: Check npm can publish through OIDC
+      # Staging needs `npm stage`, which came after trusted publishing (11.5.1).
+      - name: Check npm can stage through OIDC
         run: |
           npm --version
-          node -e "
-            const [major, minor, patch] = process.argv[1].split('.').map(Number);
-            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
-            if (!ok) { console.error('npm ' + process.argv[1] + ' predates trusted publishing'); process.exit(1); }
-          " "$(npm --version)"
+          if ! npm stage --help > /dev/null 2>&1; then
+            echo "::error::npm $(npm --version) has no npm stage"
+            exit 1
+          fi
 
       # prepublishOnly builds and checks the exports again, from this checkout.
-      # A prerelease (v0.2.0-rc.1) goes under `next`, never `latest`.
-      - name: Publish
+      # Staged, never published: the trusted publisher on npmjs.com allows
+      # `npm stage publish` alone, and the version reaches npm once an owner
+      # approves it with their two-factor code (RELEASING.md). A prerelease
+      # (v0.2.0-rc.1) goes under `next`, never `latest`.
+      - name: Stage
         env:
           TAG: ${{ github.ref_name }}
-          # Empty but for the very first publish: npm sets a trusted publisher
-          # only on a package that exists. A short-lived token, a secret of the
-          # `npm` environment, deleted after (RELEASING.md). npm tries OIDC
-          # first either way.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           case "$TAG" in
-            *-*) npm publish --provenance --access public --tag next ;;
-            *) npm publish --provenance --access public ;;
+            *-*) npm stage publish --provenance --access public --tag next ;;
+            *) npm stage publish --provenance --access public ;;
           esac
