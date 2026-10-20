@@ -5,6 +5,16 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
+## 0.1.1 (2026-10-20)
+
+- An attempt's `amount_received` is typed: what the receiver's account got,
+  the `amount` less the fee a Token-2022 mint withholds, null when Mesub does
+  not know it (and from a Mesub that predates it). `subscription.created`'s
+  `detail.first_payment` carries it too (#163).
+- `FakeMesub` and its samples default to mainnet: `network: 'mainnet-beta'`
+  and mainnet USDC, the values your production sees. A test that asserted
+  `devnet` from the fake now reads `mainnet-beta` (#161).
+
 ## 0.1.0 (2026-10-16)
 
 The first version published to npm. Requires Node 22 or later.
