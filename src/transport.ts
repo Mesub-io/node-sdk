@@ -153,7 +153,26 @@ export class Transport {
                 },
                 ...(body !== undefined && { body: JSON.stringify(body) }),
                 signal: controller.signal,
+                // Every call carries the key, and Mesub never redirects: a
+                // redirect is never followed, so the key is never sent on (#171).
+                redirect: 'manual',
             });
+
+            if (isRedirect(response)) {
+                await response.body?.cancel();
+                const to = response.headers.get('location');
+                const error = new MesubError(
+                    `${url.pathname} answered a redirect${to ? ` to ${to}` : ''}, and Mesub never ` +
+                        `redirects: is baseUrl (${this.#config.baseUrl}) the Mesub API?`,
+                    {
+                        status: response.status || null,
+                        code: 'unexpected',
+                        requestId: response.headers.get(REQUEST_ID_HEADER),
+                    },
+                );
+                return { ok: false, error, retry: false, retryAfter: null };
+            }
+
             const text = await response.text();
             const requestId = response.headers.get(REQUEST_ID_HEADER);
 
@@ -218,6 +237,11 @@ export class Transport {
             signal?.removeEventListener('abort', stop);
         }
     }
+}
+
+/** A 3xx, or the opaque answer a browser's fetch gives for one under `redirect: 'manual'`. */
+function isRedirect(response: Response): boolean {
+    return response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400);
 }
 
 /**
