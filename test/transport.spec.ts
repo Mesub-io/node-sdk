@@ -132,6 +132,53 @@ describe('status mapping', () => {
     });
 });
 
+// Every call carries the key: a redirect is never followed, it would send the key on (#171).
+describe('a redirect', () => {
+    it('is never followed by fetch itself', async () => {
+        const { fetch, calls } = mockFetch(json(200, {}));
+
+        await transport(fetch).get('/v1/access');
+
+        expect(calls[0]!.init.redirect).toBe('manual');
+    });
+
+    it.each([301, 302, 307, 308])(
+        'answering %i fails once, naming where it pointed and baseUrl',
+        async (status) => {
+            const { fetch } = mockFetch(
+                new Response(null, { status, headers: { location: 'https://elsewhere.test/v1' } }),
+            );
+
+            const result = settle(transport(fetch).get('/v1/access'));
+            await vi.runAllTimersAsync();
+            const { error } = await result;
+
+            expect(error).toBeInstanceOf(MesubError);
+            expect(error).toMatchObject({ status, code: 'unexpected' });
+            expect((error as MesubError).message).toBe(
+                '/v1/access answered a redirect to https://elsewhere.test/v1, and Mesub never ' +
+                    'redirects: is baseUrl (https://api.test) the Mesub API?',
+            );
+            expect(fetch).toHaveBeenCalledTimes(1);
+        },
+    );
+
+    it("reads a browser's opaque answer as one, with no status", async () => {
+        const opaque = new Response(null, { status: 200 });
+        Object.defineProperty(opaque, 'type', { value: 'opaqueredirect' });
+        Object.defineProperty(opaque, 'status', { value: 0 });
+        const { fetch } = mockFetch(opaque);
+
+        await expect(transport(fetch).post('/v1/subscriptions', {})).rejects.toMatchObject({
+            status: null,
+            code: 'unexpected',
+            message:
+                '/v1/subscriptions answered a redirect, and Mesub never redirects: is baseUrl ' +
+                '(https://api.test) the Mesub API?',
+        });
+    });
+});
+
 // A wrong baseUrl must not read as "no plan of yours is named pro".
 describe('a 404', () => {
     it.each([
