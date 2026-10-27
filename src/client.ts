@@ -35,8 +35,9 @@ export interface MesubOptions {
     /** API key. Defaults to `process.env.MESUB_API_KEY`. */
     apiKey?: string;
     /**
-     * Defaults to `https://api.mesub.io`. May carry a path, e.g. behind a
-     * proxy at `https://proxy.example.com/mesub`: every call is made under it.
+     * Defaults to `process.env.MESUB_BASE_URL`, then `https://api.mesub.io`.
+     * May carry a path, e.g. behind a proxy at
+     * `https://proxy.example.com/mesub`: every call is made under it.
      */
     baseUrl?: string;
     /**
