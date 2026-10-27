@@ -5,6 +5,14 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
+## 0.1.3 (2026-10-27)
+
+- `new Mesub()` reads its address from `MESUB_BASE_URL` when `baseUrl` is not
+  given, then defaults to `https://api.mesub.io`, as the key comes from
+  `MESUB_API_KEY`. The helpers' default client (`mesubRoutes`, `requirePlan`,
+  `withMesub`, ...) follows it too. Checked like the option; an empty
+  variable counts as unset (#169).
+
 ## 0.1.2 (2026-10-21)
 
 The changes of 0.1.1, on npm at last: 0.1.1 was tagged but never reached npm,
