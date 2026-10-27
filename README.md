@@ -684,7 +684,7 @@ Guards, webhooks, subscribing and managing against it:
 ```ts
 new Mesub({
     apiKey, // default: process.env.MESUB_API_KEY
-    baseUrl, // default: https://api.mesub.io, may carry a path
+    baseUrl, // default: process.env.MESUB_BASE_URL, then https://api.mesub.io; may carry a path
     headers, // extra headers on every call, e.g. for a proxy
     timeout, // per attempt, ms, default 5000
     maxRetries, // default 2

@@ -18,6 +18,7 @@ async function firstCall(options: MesubOptions = {}) {
 
 beforeEach(() => {
     vi.stubEnv('MESUB_API_KEY', '');
+    vi.stubEnv('MESUB_BASE_URL', '');
 });
 
 afterEach(() => {
@@ -150,6 +151,30 @@ describe('new Mesub()', () => {
     it('calls https://api.mesub.io by default', async () => {
         const { url } = await firstCall({ apiKey: 'sk' });
         expect(url.href).toBe('https://api.mesub.io/v1/access?wallet=w');
+    });
+
+    it('reads the base URL from MESUB_BASE_URL', async () => {
+        vi.stubEnv('MESUB_BASE_URL', 'https://staging.test/api/');
+
+        const { url } = await firstCall({ apiKey: 'sk' });
+        expect(url.href).toBe('https://staging.test/api/v1/access?wallet=w');
+    });
+
+    it('prefers an explicit baseUrl over MESUB_BASE_URL', async () => {
+        vi.stubEnv('MESUB_BASE_URL', 'https://staging.test');
+
+        const { url } = await firstCall({ apiKey: 'sk', baseUrl: 'http://localhost:3333' });
+        expect(url.href).toBe('http://localhost:3333/v1/access?wallet=w');
+    });
+
+    it('checks MESUB_BASE_URL like the option, naming the variable', () => {
+        vi.stubEnv('MESUB_BASE_URL', 'http://staging.test');
+        expect(() => new Mesub({ apiKey: 'sk' })).toThrow(/^MESUB_BASE_URL must be https/);
+
+        vi.stubEnv('MESUB_BASE_URL', 'staging.test');
+        expect(() => new Mesub({ apiKey: 'sk' })).toThrow(
+            /^MESUB_BASE_URL must be an absolute URL/,
+        );
     });
 
     it.each([

@@ -40,31 +40,45 @@ function envKey(): string | undefined {
 }
 
 /**
- * The base URL, without its trailing slashes: https, or http to this machine
- * only, since every call carries the API key.
+ * The base URL, without its trailing slashes: the one given, else
+ * `MESUB_BASE_URL`, else `fallback`. https, or http to this machine only,
+ * since every call carries the API key.
  */
 export function baseUrlOf(given: unknown, fallback: string): string {
-    if (given === undefined) return fallback;
-    if (typeof given !== 'string') throw new TypeError('baseUrl must be a string.');
+    if (given !== undefined) return checkedBaseUrl('baseUrl', given);
+
+    const fromEnv = envBaseUrl();
+
+    return fromEnv ? checkedBaseUrl('MESUB_BASE_URL', fromEnv) : fallback;
+}
+
+/** `MESUB_BASE_URL`, where there is a `process.env` to read it from. */
+function envBaseUrl(): string | undefined {
+    return typeof process === 'undefined' ? undefined : process.env?.['MESUB_BASE_URL'];
+}
+
+/** `given` checked as a base URL, the errors naming where it came from. */
+function checkedBaseUrl(name: string, given: unknown): string {
+    if (typeof given !== 'string') throw new TypeError(`${name} must be a string.`);
 
     let url: URL;
     try {
         url = new URL(given);
     } catch {
-        throw new TypeError(`baseUrl must be an absolute URL, not ${JSON.stringify(given)}.`);
+        throw new TypeError(`${name} must be an absolute URL, not ${JSON.stringify(given)}.`);
     }
 
     // Every path is appended to it: a query or a fragment would swallow them.
     if (url.search !== '' || url.hash !== '' || given.includes('?') || given.includes('#')) {
         throw new TypeError(
-            `baseUrl must have no query nor fragment, not ${JSON.stringify(given)}.`,
+            `${name} must have no query nor fragment, not ${JSON.stringify(given)}.`,
         );
     }
 
     const local = url.protocol === 'http:' && LOOPBACK.has(url.hostname);
     if (url.protocol !== 'https:' && !local) {
         throw new TypeError(
-            `baseUrl must be https (http only to localhost or 127.0.0.1), not ${url.protocol}//${url.host}: ` +
+            `${name} must be https (http only to localhost or 127.0.0.1), not ${url.protocol}//${url.host}: ` +
                 'every call carries the API key.',
         );
     }
