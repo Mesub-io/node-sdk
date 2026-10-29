@@ -1,5 +1,5 @@
 /** Kept in step with package.json by `test/version.spec.ts`. */
-export const VERSION = '0.1.3';
+export const VERSION = '0.1.4';
 
 /**
  * The version of the Mesub API this release was written against, sent in

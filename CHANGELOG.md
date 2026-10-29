@@ -5,7 +5,7 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
-## Unreleased
+## 0.1.4 (2026-10-29)
 
 - A redirect from the API is never followed: every call carries the API key,
   and Mesub never redirects. It fails once, as `unexpected`, naming where it
