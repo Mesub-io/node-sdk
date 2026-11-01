@@ -5,6 +5,13 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
+## 0.1.5 (2026-11-01)
+
+- The README links to
+  [the Solana Subscriptions program, explained](https://mesub.io/guides/solana-subscriptions-program):
+  what the program does on chain and what it leaves to whoever runs a plan
+  (#178). No change to the code.
+
 ## 0.1.4 (2026-10-29)
 
 - A redirect from the API is never followed: every call carries the API key,
