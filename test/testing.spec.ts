@@ -1317,22 +1317,25 @@ describe('FakeMesub', () => {
         });
 
         it('narrows by type and subscription, and pages after an event', async () => {
-            const fake = new FakeMesub();
-            const mesub = fake.client();
-            const first = fake.addEvent('subscription.renewed', {
-                created_at: '2026-10-01T00:00:00.000Z',
-            });
-            const second = fake.addEvent('subscription.payment_failed', {
-                subscription: { id: 'sub_other' },
-                created_at: '2026-10-02T00:00:00.000Z',
-            });
-            const third = fake.addEvent('subscription.renewed', {
-                created_at: '2026-10-03T00:00:00.000Z',
-            });
+            // The clock first: the fake's default window runs from 30 days
+            // before it is made, so a fake made on the real date drops these.
             vi.useFakeTimers({ toFake: ['Date'] });
             vi.setSystemTime(new Date('2026-10-05T00:00:00.000Z'));
 
             try {
+                const fake = new FakeMesub();
+                const mesub = fake.client();
+                const first = fake.addEvent('subscription.renewed', {
+                    created_at: '2026-10-01T00:00:00.000Z',
+                });
+                const second = fake.addEvent('subscription.payment_failed', {
+                    subscription: { id: 'sub_other' },
+                    created_at: '2026-10-02T00:00:00.000Z',
+                });
+                const third = fake.addEvent('subscription.renewed', {
+                    created_at: '2026-10-03T00:00:00.000Z',
+                });
+
                 await expect(
                     mesub.events.list({ type: 'subscription.renewed' }),
                 ).resolves.toMatchObject({ data: [{ id: third.id }, { id: first.id }] });
