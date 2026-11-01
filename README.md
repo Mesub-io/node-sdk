@@ -34,6 +34,8 @@ Your subscribers get no Mesub account. You keep your own login and your own
 UI; your server talks to Mesub with the API key, through this package, and
 your pages only have the wallet sign. See
 [How it works](https://docs.mesub.io/docs/how-it-works).
+[The Solana Subscriptions program, explained](https://mesub.io/guides/solana-subscriptions-program)
+says what the program does on chain and what it leaves to whoever runs a plan.
 
 | Where                | What                                                                             |
 | -------------------- | -------------------------------------------------------------------------------- |
