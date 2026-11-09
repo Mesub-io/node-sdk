@@ -5,6 +5,16 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
+## 0.1.6 (unreleased)
+
+- `subscription.renewed`'s detail types `amount_received`, as
+  `first_payment` does: what the receiver's account got, `amount` less the fee
+  a Token-2022 mint withholds, null when Mesub does not know it. Book revenue
+  from it (#183).
+- `mesub.project()` answers `{ id }`, the project the API key belongs to
+  (`GET /v1/project`): the quickest way to check that a key works.
+  `FakeMesub` serves it, as `projectId` (#183).
+
 ## 0.1.5 (2026-11-01)
 
 - The README links to

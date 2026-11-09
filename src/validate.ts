@@ -1,4 +1,5 @@
 import type { AccessAnswer, AccessList, ServedAttempt } from './answer.js';
+import type { Project } from './client.js';
 import type { EventList } from './events.js';
 import { MesubError } from './errors.js';
 import type { Plan, PlanToken } from './plans.js';
@@ -340,6 +341,15 @@ function planProblem(body: unknown, label?: string): string | null {
     );
 }
 
+/** `project()`: the id of the project the API key belongs to. */
+export function projectFrom(body: unknown): Project {
+    const problem = problemWith(body, { id: STRING } satisfies Record<keyof Project, Field>);
+
+    if (problem !== null) throw unreadable(problem, body, 'GET /v1/project');
+
+    return body as Project;
+}
+
 /** One plan, from `plans.retrieve`. */
 export function planFrom(body: unknown): Plan {
     const problem = planProblem(body);
@@ -557,6 +567,7 @@ const DETAILS: Partial<Record<string, Record<string, Field>>> = {
         period_start: DATE,
         period_end: DATE,
         signature: STRING,
+        amount_received: { ...STRING_OR_NULL, optional: true },
     } satisfies Record<keyof RenewedDetail, Field>,
     'subscription.payment_failed': {
         reason: STRING,

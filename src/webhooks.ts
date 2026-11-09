@@ -168,6 +168,13 @@ export interface RenewedDetail {
     period_end: string;
     /** The transaction that paid it. */
     signature: string;
+    /**
+     * What the receiver's account got of it: `amount` less the fee a
+     * Token-2022 mint withholds. Book revenue from it. Null when not known
+     * (a transfer Mesub pulled before it kept it), absent from a Mesub that
+     * predates it.
+     */
+    amount_received?: string | null;
 }
 
 /** `subscription.payment_failed`: a pull missed, and what comes next. */

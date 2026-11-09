@@ -112,6 +112,7 @@ const DETAILS: Record<string, Record<string, unknown>> = {
         period_start: '2026-01-31T00:00:00.000Z',
         period_end: '2026-03-02T00:00:00.000Z',
         signature: '5h3sig',
+        amount_received: '9980000',
     },
     'subscription.payment_failed': {
         reason: 'insufficient_balance',
@@ -509,6 +510,35 @@ describe('verifyWebhook', () => {
         });
 
         expect(event.detail).toEqual(detail);
+    });
+
+    it.each([
+        ['null, a transfer pulled before Mesub kept it', null],
+        ['absent, from a Mesub that predates it', undefined],
+    ])('reads a renewed event whose amount_received is %s', async (_what, received) => {
+        const detail = { ...DETAILS['subscription.renewed'], amount_received: received };
+        const raw = body('subscription.renewed', detail);
+
+        const event = await verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), {
+            secret: SECRET,
+        });
+
+        if (event.type !== 'subscription.renewed') throw new Error('narrowed wrong');
+        const typed: string | null | undefined = event.detail.amount_received;
+        expect(typed).toBe(received);
+    });
+
+    it('throws unexpected for a renewed event whose amount_received is a number', async () => {
+        const raw = body('subscription.renewed', {
+            ...DETAILS['subscription.renewed'],
+            amount_received: 9980000,
+        });
+
+        const error = await failure(
+            verifyWebhook(raw, backendHeaders(SECRET, 'cm1', NOW, raw), { secret: SECRET }),
+        );
+
+        expect(error.code).toBe('unexpected');
     });
 
     it('reads an ended event of a cancellation that reached its end, and types its changed_at', async () => {

@@ -1,9 +1,10 @@
 /**
  * `@mesub/node/testing`: a fake Mesub, for a merchant's own tests. It answers
- * what the SDK calls (`/v1/access`, `/v1/plans`, `/v1/subscriptions`, its
- * fresh transaction, its attempts and its cancel, resume and close, and
- * `/v1/events`) from what the test sets, through a `fetch` handed to the
- * client: no network, no backend, no test framework of its own.
+ * what the SDK calls (`/v1/project`, `/v1/access`, `/v1/plans`,
+ * `/v1/subscriptions`, its fresh transaction, its attempts and its cancel,
+ * resume and close, and `/v1/events`) from what the test sets, through a
+ * `fetch` handed to the client: no network, no backend, no test framework of
+ * its own.
  *
  * ```ts
  * import { FakeMesub } from '@mesub/node/testing';
@@ -364,6 +365,8 @@ export class FakeMesub {
     readonly baseUrl: string;
     readonly apiKey: string;
     readonly webhookSecret: string;
+    /** What `project()` answers: the id of the project the key belongs to. */
+    readonly projectId = 'proj_fake';
     /** Every call received, oldest first. */
     readonly requests: FakeRequest[] = [];
     /** Hand it to `new Mesub({ fetch })`, or use `client()`. */
@@ -933,6 +936,8 @@ export class FakeMesub {
             });
         }
 
+        if (method === 'GET' && path === '/v1/project')
+            return Response.json({ id: this.projectId });
         if (method === 'GET' && path === '/v1/plans') {
             return Response.json({ plans: this.#planList.map((plan) => this.#served(plan)) });
         }

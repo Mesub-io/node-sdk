@@ -3,7 +3,7 @@
  * cache, and `explain`, a subscription's situation in words.
  */
 export { Mesub } from './client.js';
-export type { Decision, MesubOptions } from './client.js';
+export type { Decision, MesubOptions, Project } from './client.js';
 export { MesubError, MesubSubmitError } from './errors.js';
 export { API_VERSION, API_VERSION_HEADER, VERSION } from './version.js';
 export type { MesubErrorCode, MesubErrorOptions, MesubSubmitErrorOptions } from './errors.js';
