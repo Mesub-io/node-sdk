@@ -148,8 +148,15 @@ A charge can also fail for a reason that is not your customer's. The answer
 then carries `blocked_since` and `blocked_reason`, both null otherwise:
 `mesub` for a cause on Mesub's side, or your plan's own setup by name,
 `puller_not_allowed`, `receiver_not_allowed`, `receiver_account_missing`,
-`receiver_account_frozen` or `mint_gone`. `status` and `payment_status` do not
-move for it and Mesub keeps trying; `access` ends at `access_until` if nothing
+`receiver_account_frozen`, `receiver_account_needs_memo` (the receiving token
+account requires a memo on every payment in, which Mesub's charges do not
+carry: turn it off or choose another receiving wallet),
+`receiver_account_confidential_only` (it takes confidential transfers only:
+allow plain ones or choose another receiving wallet) or `mint_gone`. Two are
+the token issuer's to lift, not yours: `mint_paused` (the issuer paused the
+token) and `mint_transfer_hook` (the issuer made its transfers run a program
+Mesub does not support yet; otherwise, create a plan with another token).
+`status` and `payment_status` do not move for it and Mesub keeps trying; `access` ends at `access_until` if nothing
 is collected by then, and comes back with the first charge that goes through,
 nothing to sign. On `mint_gone` no charge can go through again, so access does
 not come back.
@@ -322,8 +329,9 @@ stays as `{amount}` and is listed in `missing`. Dates are written as Mesub
 serves them, in ISO 8601, unless you pass `formatDate`. A status or a reason
 newer than this release gives `key: 'unknown'` and the access line, never an
 error. A blocked subscription has its own keys, `blocked_mesub` and one per
-cause of your setup (`blocked_puller_not_allowed`, ...): the subscriber reads
-that nothing is theirs to do, you read what to fix.
+cause (`blocked_puller_not_allowed`, ..., `blocked_mint_paused`): the
+subscriber reads that nothing is theirs to do, you read what to fix, or who
+lifts it when the token's issuer does.
 
 `close` is offered only while Mesub says the subscription is `closable`, and
 the sentence names `closable_from` when it can be closed later. A

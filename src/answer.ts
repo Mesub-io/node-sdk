@@ -70,15 +70,22 @@ export type StopReason = 'out_of_retries' | 'retry_deadline_passed' | 'authority
  * doing (Mesub-io/backend#398). The merchant's own setup, theirs to fix, by
  * name: Mesub's puller taken off the plan on chain, a receiving wallet that
  * is not in the plan's destinations, has no token account for the plan's
- * token or whose token account is frozen (Mesub-io/backend#395), a token
- * that no longer exists. `mesub` for every cause of Mesub's.
+ * token, whose token account is frozen (Mesub-io/backend#395) or refuses a
+ * plain transfer in (a memo required, or confidential transfers only), a
+ * token that no longer exists. Two are the token issuer's to lift, not the
+ * merchant's: a token its issuer paused, or gave a transfer hook program
+ * (Mesub-io/backend#396). `mesub` for every cause of Mesub's.
  */
 export type BlockedReason =
     | 'puller_not_allowed'
     | 'receiver_not_allowed'
     | 'receiver_account_missing'
     | 'receiver_account_frozen'
+    | 'receiver_account_needs_memo'
+    | 'receiver_account_confidential_only'
     | 'mint_gone'
+    | 'mint_paused'
+    | 'mint_transfer_hook'
     | 'mesub';
 
 /**

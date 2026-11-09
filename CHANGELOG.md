@@ -5,6 +5,16 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
+## 0.1.6 (unreleased)
+
+- `BlockedReason` names the four causes the API serves that this release did
+  not know: `receiver_account_needs_memo` and
+  `receiver_account_confidential_only` (the receiving token account refuses a
+  plain transfer in, yours to fix), `mint_paused` and `mint_transfer_hook`
+  (the token's issuer paused it or gave it a transfer hook, the issuer's to
+  lift). `explain()` reads each as its own `blocked_*` situation, with what to
+  do and who does it, instead of `unknown` (#181).
+
 ## 0.1.5 (2026-11-01)
 
 - The README links to
