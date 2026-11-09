@@ -190,7 +190,7 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
         expect(problems(ref('Subscription'), { ...missing, stop_reason: null })).toEqual([]);
     });
 
-    it('answers plans and access as the spec says', async () => {
+    it('answers the project, plans and access as the spec says', async () => {
         const { fake, client, seen } = recorded({
             plans: ['pro', 'team', { slug: 'bonk', token: { name: 'Bonk' } }],
         });
@@ -212,6 +212,7 @@ describe(`the fake against the back's openapi/v1.json (${BACKEND_COMMIT.slice(0,
             blocked_reason: 'receiver_account_frozen',
         });
 
+        await mesub.project();
         await mesub.plans.list();
         await mesub.plans.retrieve('bonk');
         await mesub.plans.retrieve('nope').catch(() => null);

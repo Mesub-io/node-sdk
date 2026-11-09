@@ -8,9 +8,14 @@ import { Events } from './events.js';
 import { apiKeyOf, baseUrlOf, headersOf, numberOf } from './options.js';
 import { Plans } from './plans.js';
 import { type ServerSubscription, Subscriptions } from './subscriptions.js';
-import { type CallOptions, Transport } from './transport.js';
-import { accessAnswerFrom, accessListFrom } from './validate.js';
+import { type CallOptions, type RequestOptions, Transport } from './transport.js';
+import { accessAnswerFrom, accessListFrom, projectFrom } from './validate.js';
 import { webhookSecretOf, Webhooks } from './webhooks.js';
+
+/** The project your API key belongs to, from `mesub.project()`. */
+export interface Project {
+    id: string;
+}
 
 /** What a guard decided, and on which answer. */
 export interface Decision {
@@ -164,6 +169,14 @@ export class Mesub {
         this.cacheScope = () => (cacheScope ??= hashScope(apiKey));
         let cacheSecret: Promise<HmacKey> | undefined;
         this.cacheSecret = () => (cacheSecret ??= importSecret(apiKey));
+    }
+
+    /**
+     * The project your API key belongs to: the quickest way to check that a
+     * key works. A wrong key throws `invalid_api_key`. Never cached.
+     */
+    async project(options: RequestOptions = {}): Promise<Project> {
+        return projectFrom(await this.transport.get('/v1/project', {}, options));
     }
 
     /**

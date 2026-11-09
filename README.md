@@ -501,7 +501,9 @@ A parked seat keeps access to the end of its paid period; its
 unpause when access had ended.
 
 A `subscription.renewed` can come late, on
-a subscription that is no longer `active`. The events, their bodies and how to
+a subscription that is no longer `active`. Its `detail.amount_received` is what
+the receiver got, `amount` less the fee a Token-2022 mint withholds: book
+revenue from it. Null when Mesub does not know it. The events, their bodies and how to
 test: [Webhooks](https://docs.mesub.io/docs/webhooks).
 
 `subscription.renewal_upcoming` comes once per period, in its last quarter and
@@ -711,6 +713,9 @@ the option: a `baseUrl` that is not https (plain http only to `localhost` or
 `127.0.0.1`: every call carries the key), a timeout that is not a positive
 number of milliseconds, or `maxRetries` or `maxStaleMs` below 0. On an edge runtime
 without `process.env` (Cloudflare Workers), pass `apiKey` yourself.
+
+`await mesub.project()` answers `{ id }`, the project the key belongs to: the
+quickest way to check that a key works. A wrong key throws `invalid_api_key`.
 
 Behind a proxy, `baseUrl` may carry a path: every call goes under it
 (`https://proxy.example.com/mesub/v1/access`). Add whatever the proxy asks
