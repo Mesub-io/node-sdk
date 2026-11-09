@@ -136,6 +136,9 @@ const CANCEL_PAID = { ...CANCEL, confirm: 'confirm_cancel_paid' } as const;
  */
 const BLOCKED_BY_SETUP =
     'Mesub cannot take your payments for {plan_name} for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying.[ You keep access until {access_until} if no payment goes through by then.] Access comes back on its own with the first payment that goes through.';
+/** The subscriber's sentence on a token its issuer paused or gave a hook: not the merchant's either. */
+const BLOCKED_BY_TOKEN =
+    'Mesub cannot take your payments for {plan_name} for now, because of the token it is paid in, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying.[ You keep access until {access_until} if no payment goes through by then.] Access comes back on its own with the first payment that goes through.';
 /** How a merchant's sentence on a block ends, whatever the cause but a gone token. */
 const BLOCKED_ACCESS =
     '[ Access ends on {access_until} if nothing is collected by then.] Access comes back with the first payment that goes through, with nothing for the subscriber to sign.';
@@ -265,6 +268,27 @@ export const SITUATIONS = {
     blocked_receiver_account_frozen: {
         subscriber: BLOCKED_BY_SETUP,
         merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the token account of the wallet that receives its payments is frozen, so it cannot take payments. Choose another receiving wallet, or ask the token's issuer to unfreeze that account; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_receiver_account_needs_memo: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the token account of the wallet that receives its payments requires a memo on every payment in, which Mesub's charges do not carry. Turn that requirement off for the account, or choose another receiving wallet; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_receiver_account_confidential_only: {
+        subscriber: BLOCKED_BY_SETUP,
+        merchant: `Payments blocked[ since {blocked_since}] by your plan's setup: the token account of the wallet that receives its payments takes confidential transfers only, and Mesub's charges are plain ones. Allow plain transfers into the account, or choose another receiving wallet; Mesub keeps trying.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    // The token issuer's to lift, not the merchant's (Mesub-io/backend#396).
+    blocked_mint_paused: {
+        subscriber: BLOCKED_BY_TOKEN,
+        merchant: `Payments blocked[ since {blocked_since}] by the plan's token: its issuer paused it, so no payment in it can move. Only the issuer can lift the pause, and Mesub charges again once they do.${BLOCKED_ACCESS}`,
+        actions: [CANCEL],
+    },
+    blocked_mint_transfer_hook: {
+        subscriber: BLOCKED_BY_TOKEN,
+        merchant: `Payments blocked[ since {blocked_since}] by the plan's token: its issuer made every transfer of it run their own program, which Mesub does not support yet. Mesub charges again if the issuer removes it; otherwise, create a new plan with another token.${BLOCKED_ACCESS}`,
         actions: [CANCEL],
     },
     blocked_mint_gone: {
@@ -561,7 +585,11 @@ const BLOCKED_REASONS: Record<BlockedReason, keyof typeof SITUATIONS> = {
     receiver_not_allowed: 'blocked_receiver_not_allowed',
     receiver_account_missing: 'blocked_receiver_account_missing',
     receiver_account_frozen: 'blocked_receiver_account_frozen',
+    receiver_account_needs_memo: 'blocked_receiver_account_needs_memo',
+    receiver_account_confidential_only: 'blocked_receiver_account_confidential_only',
     mint_gone: 'blocked_mint_gone',
+    mint_paused: 'blocked_mint_paused',
+    mint_transfer_hook: 'blocked_mint_transfer_hook',
 };
 
 /** A key that is its status, whatever else the answer says. */

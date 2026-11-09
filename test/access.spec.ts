@@ -375,7 +375,11 @@ describe('access', () => {
             'receiver_not_allowed',
             'receiver_account_missing',
             'receiver_account_frozen',
+            'receiver_account_needs_memo',
+            'receiver_account_confidential_only',
             'mint_gone',
+            'mint_paused',
+            'mint_transfer_hook',
             'not_known_yet',
         ])('hands back an answer blocked by %s as served', async (blocked_reason) => {
             const blocked = answer({

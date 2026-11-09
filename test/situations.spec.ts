@@ -89,6 +89,7 @@ const BLOCKED_MERCHANT = `Access ends on ${UNTIL} if nothing is collected by the
 /** How a sentence on a gone token ends: no payment can bring access back. */
 const NEVER_BACK =
     'No payment can go through on this plan again, so once access ends it does not come back.';
+const BY_TOKEN = `Mesub cannot take your payments for Pro for now, because of the token it is paid in, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying. ${BLOCKED_SUBSCRIBER}`;
 const BY_SETUP = `Mesub cannot take your payments for Pro for now, because of how the plan is set up, not because of anything you did: there is nothing for you to do or sign, and Mesub keeps trying. ${BLOCKED_SUBSCRIBER}`;
 
 function blocked(reason: string, over: Partial<ServerSubscription> = {}): ServerSubscription {
@@ -300,6 +301,30 @@ const CASES = {
         merchant: `Payments blocked since ${SINCE} by your plan's setup: the token account of the wallet that receives its payments is frozen, so it cannot take payments. Choose another receiving wallet, or ask the token's issuer to unfreeze that account; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
         actions: ['subscriber:cancel'],
     },
+    blocked_receiver_account_needs_memo: {
+        input: blocked('receiver_account_needs_memo'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the token account of the wallet that receives its payments requires a memo on every payment in, which Mesub's charges do not carry. Turn that requirement off for the account, or choose another receiving wallet; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_receiver_account_confidential_only: {
+        input: blocked('receiver_account_confidential_only'),
+        subscriber: BY_SETUP,
+        merchant: `Payments blocked since ${SINCE} by your plan's setup: the token account of the wallet that receives its payments takes confidential transfers only, and Mesub's charges are plain ones. Allow plain transfers into the account, or choose another receiving wallet; Mesub keeps trying. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_mint_paused: {
+        input: blocked('mint_paused'),
+        subscriber: BY_TOKEN,
+        merchant: `Payments blocked since ${SINCE} by the plan's token: its issuer paused it, so no payment in it can move. Only the issuer can lift the pause, and Mesub charges again once they do. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
+    blocked_mint_transfer_hook: {
+        input: blocked('mint_transfer_hook'),
+        subscriber: BY_TOKEN,
+        merchant: `Payments blocked since ${SINCE} by the plan's token: its issuer made every transfer of it run their own program, which Mesub does not support yet. Mesub charges again if the issuer removes it; otherwise, create a new plan with another token. ${BLOCKED_MERCHANT}`,
+        actions: ['subscriber:cancel'],
+    },
     blocked_mint_gone: {
         input: blocked('mint_gone'),
         subscriber: `Mesub can no longer take your payments for Pro: the token it is paid in no longer exists. This is not because of anything you did, and there is nothing for you to do or sign. You keep access until ${UNTIL}. ${NEVER_BACK}`,
@@ -437,7 +462,11 @@ describe('explain', () => {
             'receiver_not_allowed',
             'receiver_account_missing',
             'receiver_account_frozen',
+            'receiver_account_needs_memo',
+            'receiver_account_confidential_only',
             'mint_gone',
+            'mint_paused',
+            'mint_transfer_hook',
         ] as const;
 
         it.each(REASONS)('reads %s as blocked once its access ended, never as ended', (reason) => {
@@ -463,6 +492,18 @@ describe('explain', () => {
                 expect(explained.merchant).toMatch(
                     /\. Access comes back with the first payment that goes through, with nothing for the subscriber to sign\.$/,
                 );
+            },
+        );
+
+        // The issuer's, not the merchant's: the merchant reads who lifts it.
+        it.each(['mint_paused', 'mint_transfer_hook'])(
+            "tells the merchant that %s is the issuer's to lift",
+            (reason) => {
+                const explained = explain(blocked(reason), { names: NAMES, now: NOW });
+
+                expect(explained.merchant).toContain("by the plan's token: its issuer");
+                expect(explained.merchant).not.toContain("by your plan's setup");
+                expect(explained.subscriber).not.toContain('how the plan is set up');
             },
         );
 
