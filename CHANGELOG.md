@@ -5,7 +5,7 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
-## 0.1.6 (unreleased)
+## 0.1.6 (2026-11-09)
 
 - `BlockedReason` names the four causes the API serves that this release did
   not know: `receiver_account_needs_memo` and
