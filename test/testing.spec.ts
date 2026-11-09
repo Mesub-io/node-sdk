@@ -814,7 +814,11 @@ describe('FakeMesub', () => {
             'receiver_not_allowed',
             'receiver_account_missing',
             'receiver_account_frozen',
+            'receiver_account_needs_memo',
+            'receiver_account_confidential_only',
             'mint_gone',
+            'mint_paused',
+            'mint_transfer_hook',
         ] as const;
 
         it('answers both fields null unless a test sets them', async () => {
