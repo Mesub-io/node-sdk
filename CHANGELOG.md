@@ -5,6 +5,19 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
+## 0.1.7 (unreleased)
+
+- A subscribe refused with `subscription_cancelled` (`create`, `transaction`,
+  `submit`) names the cancelled subscription in the way, as Mesub now sends it
+  (Mesub-io/backend#690): `MesubError` carries `subscriptionId`, `canResume`
+  (resume it instead) and `closableFrom` (when it can be closed, while that is
+  ahead), all null on any other error. `subscriptionId` is null when that
+  subscription is another customer's on the same wallet. The Express and Next
+  widget routes hand them on to the browser, as `subscription_id`,
+  `can_resume` and `closable_from` beside `code` and `message`, and
+  `FakeMesub` answers them, for the customer it is for only; `fail()` takes
+  them as `details` (#187).
+
 ## 0.1.6 (2026-11-09)
 
 - `BlockedReason` names the four causes the API serves that this release did
