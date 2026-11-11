@@ -388,6 +388,7 @@ describe('subscriptions.transaction', () => {
 
     it.each([
         ['another code', coded(409, 'already_subscribed', 'No.')],
+        ['another code carrying them', json(409, { ...CANCELLED, code: 'already_subscribed' })],
         ['a Mesub that does not send them', coded(409, 'subscription_cancelled', 'No.')],
         [
             'fields of the wrong type',

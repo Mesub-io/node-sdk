@@ -903,7 +903,8 @@ describe('requirePlan', () => {
                         {
                             message: 'nope',
                             statusCode: 401,
-                            code: 'invalid_api_key',
+                            // The only code the cancelled fields are read on, to see them copied.
+                            code: 'subscription_cancelled',
                             subscription_id: 'sub_9',
                             can_resume: false,
                             closable_from: '2026-12-11T14:00:00.000Z',
@@ -926,20 +927,20 @@ describe('requirePlan', () => {
             expect(error).toMatchObject({
                 status: 500,
                 code: 'unauthorized',
-                apiCode: 'invalid_api_key',
+                apiCode: 'subscription_cancelled',
                 retryable: false,
                 retryAfter: 7000,
                 requestId: 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
                 subscriptionId: 'sub_9',
                 canResume: false,
                 closableFrom: '2026-12-11T14:00:00.000Z',
-                body: { code: 'invalid_api_key' },
+                body: { code: 'subscription_cancelled' },
             });
             expect(error.cause).toBeInstanceOf(MesubError);
             expect(error.cause).toMatchObject({
                 status: 401,
                 code: 'unauthorized',
-                apiCode: 'invalid_api_key',
+                apiCode: 'subscription_cancelled',
             });
         });
 

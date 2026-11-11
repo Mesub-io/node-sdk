@@ -1085,6 +1085,20 @@ describe('the widget routes: a cancelled subscription in the way', () => {
 
         expect(answer.body).toEqual({ error: { code: failure.code, message: 'No.' } });
     });
+
+    it('adds nothing on another refusal carrying them', async () => {
+        const { post, fake } = setup();
+        fake.fail({
+            status: 409,
+            code: 'already_subscribed',
+            message: 'No.',
+            details: { subscription_id: 'sub_9', can_resume: true, closable_from: null },
+        });
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.body).toEqual({ error: { code: 'already_subscribed', message: 'No.' } });
+    });
 });
 
 // A fresh transaction (Mesub-io/backend#427): asked when the wallet is ready, or after one expired.

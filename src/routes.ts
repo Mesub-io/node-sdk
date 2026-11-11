@@ -148,7 +148,7 @@ function fromMesub(error: MesubError): WidgetResponse {
  * refusal, nor from a Mesub that does not send them.
  */
 function cancelledOf(error: MesubError) {
-    if (error.canResume === null) return {};
+    if (error.apiCode !== 'subscription_cancelled' || error.canResume === null) return {};
 
     return {
         subscription_id: error.subscriptionId,
