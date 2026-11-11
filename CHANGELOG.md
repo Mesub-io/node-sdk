@@ -5,7 +5,7 @@ Every change a merchant using `@mesub/node` can notice. Versions follow
 may break the API and a patch (0.1.1) never does. Pull request numbers are
 those of Mesub-io/node-sdk.
 
-## 0.1.7 (unreleased)
+## 0.1.7 (2026-11-11)
 
 - A subscribe refused with `subscription_cancelled` (`create`, `transaction`,
   `submit`) names the cancelled subscription in the way, as Mesub now sends it

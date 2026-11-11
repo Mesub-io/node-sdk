@@ -1,6 +1,6 @@
 {
   "name": "@mesub/node",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Mesub for Node: check a customer's access, take subscriptions and verify webhooks for subscription billing on Solana.",
   "license": "MIT",
   "repository": {
