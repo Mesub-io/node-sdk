@@ -604,6 +604,26 @@ describe('FakeMesub', () => {
         expect(held.body).not.toHaveProperty('can_resume');
     });
 
+    it('matches a seeded cancelled one by its normalised email', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const seeded = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            email: 'Ann@Shop.test',
+            status: 'cancelled',
+        });
+
+        const error = await mesub.subscriptions
+            .create({ plan: 'pro', wallet: WALLET, email: 'ann@shop.test ' })
+            .catch((caught: unknown) => caught as MesubError);
+
+        expect(error).toMatchObject({
+            apiCode: 'subscription_cancelled',
+            subscriptionId: seeded.id,
+        });
+    });
+
     it("names it on a waiting checkout's fresh transaction by that checkout's customer", async () => {
         const fake = new FakeMesub();
         const mesub = fake.client();

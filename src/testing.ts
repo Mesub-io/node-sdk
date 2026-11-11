@@ -1900,11 +1900,17 @@ function liveRefusal(held: ServerSubscription[], caller: string): Response | nul
     );
 }
 
-/** Whose checkout it is, as Mesub tells them apart: the external id, else the email, else nobody. */
+/**
+ * Whose checkout it is, as Mesub tells them apart: the external id, else the
+ * email, else nobody. Normalised as `create` stores them, since Mesub holds
+ * them so and a seeded row may not be.
+ */
 function holderOf(contact: Pick<ServerSubscription, 'email' | 'external_id'>): string {
-    if (contact.external_id) return `x:${contact.external_id}`;
+    const externalId = contact.external_id?.trim();
+    if (externalId) return `x:${externalId}`;
+    const email = contact.email?.trim().toLowerCase();
 
-    return contact.email ? `e:${contact.email}` : '-';
+    return email ? `e:${email}` : '-';
 }
 
 /** The reasons a row ends with its plan: removed, replaced, or past its end. */
