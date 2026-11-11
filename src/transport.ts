@@ -266,7 +266,8 @@ function errorFrom(
     retryAfter: number | null,
     header: string | null,
 ): MesubError {
-    const { code, retryable, request_id } = isRecord(body) ? body : {};
+    const fields = isRecord(body) ? body : {};
+    const { code, retryable, request_id } = fields;
     const apiCode = typeof code === 'string' ? code : null;
 
     return new MesubError(messageFrom(body, status), {
@@ -279,6 +280,10 @@ function errorFrom(
         // The header first: the body's says the same, and is the fallback
         // when a proxy in front drops the header (Mesub-io/backend#472).
         requestId: header ?? (typeof request_id === 'string' ? request_id : null),
+        // A subscribe refused over a cancelled subscription (Mesub-io/backend#690).
+        subscriptionId: typeof fields.subscription_id === 'string' ? fields.subscription_id : null,
+        canResume: typeof fields.can_resume === 'boolean' ? fields.can_resume : null,
+        closableFrom: typeof fields.closable_from === 'string' ? fields.closable_from : null,
     });
 }
 

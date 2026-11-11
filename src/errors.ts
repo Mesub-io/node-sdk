@@ -33,6 +33,12 @@ export interface MesubErrorOptions {
     retryAfter?: number | null;
     /** The response's `Mesub-Request-Id`, or the body's `request_id`. Defaults to null. */
     requestId?: string | null;
+    /** On a `subscription_cancelled` refusal of a subscribe: the body's `subscription_id`. Defaults to null. */
+    subscriptionId?: string | null;
+    /** The body's `can_resume`. Defaults to null. */
+    canResume?: boolean | null;
+    /** The body's `closable_from`. Defaults to null. */
+    closableFrom?: string | null;
     cause?: unknown;
 }
 
@@ -85,6 +91,26 @@ export class MesubError extends Error {
      * logs. Null when no response came back, or one that is not Mesub's.
      */
     readonly requestId: string | null;
+    /**
+     * On a `subscription_cancelled` refusal of a subscribe (`create`,
+     * `transaction`, `submit`): the cancelled subscription of the same
+     * customer that blocks it, to resume or close instead. Null when Mesub
+     * does not name it, as for another customer on the same wallet, and on
+     * every other error.
+     */
+    readonly subscriptionId: string | null;
+    /**
+     * On that refusal, true when the cancelled subscription still runs, so
+     * resuming it is the way back, false when it must be closed first. Null
+     * when Mesub did not say, and on every other error.
+     */
+    readonly canResume: boolean | null;
+    /**
+     * On that refusal, when the cancelled subscription can be closed, an ISO
+     * 8601 date, when that is still ahead. Null when it can be closed now,
+     * when it can be resumed, or when Mesub did not say.
+     */
+    readonly closableFrom: string | null;
 
     constructor(message: string, options: MesubErrorOptions) {
         super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -97,6 +123,9 @@ export class MesubError extends Error {
         this.body = options.body;
         this.retryAfter = options.retryAfter ?? null;
         this.requestId = options.requestId ?? null;
+        this.subscriptionId = options.subscriptionId ?? null;
+        this.canResume = options.canResume ?? null;
+        this.closableFrom = options.closableFrom ?? null;
     }
 }
 

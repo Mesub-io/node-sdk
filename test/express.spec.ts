@@ -900,7 +900,14 @@ describe('requirePlan', () => {
             const { client } = mesub({
                 access: () =>
                     Response.json(
-                        { message: 'nope', statusCode: 401, code: 'invalid_api_key' },
+                        {
+                            message: 'nope',
+                            statusCode: 401,
+                            code: 'invalid_api_key',
+                            subscription_id: 'sub_9',
+                            can_resume: false,
+                            closable_from: '2026-12-11T14:00:00.000Z',
+                        },
                         {
                             status: 401,
                             headers: {
@@ -923,6 +930,9 @@ describe('requirePlan', () => {
                 retryable: false,
                 retryAfter: 7000,
                 requestId: 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
+                subscriptionId: 'sub_9',
+                canResume: false,
+                closableFrom: '2026-12-11T14:00:00.000Z',
                 body: { code: 'invalid_api_key' },
             });
             expect(error.cause).toBeInstanceOf(MesubError);
