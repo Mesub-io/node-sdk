@@ -541,6 +541,152 @@ describe('FakeMesub', () => {
         ).resolves.toMatchObject({ status: 'pending' });
     });
 
+    // Mesub-io/backend#690: the blocking one is named to its own customer only.
+    it('names a cancelled subscription to its own customer, and to nobody else', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const later = new Date(Date.now() + 3600 * 1000).toISOString();
+        const past = '2020-01-01T00:00:00.000Z';
+        const runs = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'cancelled',
+            access_until: later,
+        });
+        const over = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'team',
+            email: 'ada@example.com',
+            status: 'cancelled',
+            access: false,
+            access_until: past,
+        });
+        const refused = (plan: string, contact: { external_id?: string; email?: string }) =>
+            mesub.subscriptions.create({ plan, wallet: WALLET, ...contact }).then(
+                () => {
+                    throw new Error('not refused');
+                },
+                (caught: unknown) => caught as MesubError,
+            );
+
+        await expect(refused('pro', { external_id: ' user_ada ' })).resolves.toMatchObject({
+            apiCode: 'subscription_cancelled',
+            subscriptionId: runs.id,
+            canResume: true,
+            closableFrom: null,
+            body: { subscription_id: runs.id, can_resume: true, closable_from: null },
+        });
+        await expect(refused('team', { email: 'Ada@example.com' })).resolves.toMatchObject({
+            subscriptionId: over.id,
+            canResume: false,
+            closableFrom: null,
+        });
+        for (const [plan, contact] of [
+            ['pro', { external_id: 'user_bob' }],
+            ['pro', { email: 'ada@example.com' }],
+            ['pro', {}],
+            ['team', { external_id: 'user_ada' }],
+        ] as const) {
+            const error = await refused(plan, contact);
+            expect(error).toMatchObject({
+                apiCode: 'subscription_cancelled',
+                subscriptionId: null,
+                canResume: false,
+                closableFrom: null,
+            });
+            expect(JSON.stringify(error.body)).not.toContain(plan === 'pro' ? runs.id : over.id);
+        }
+        // Other refusals add nothing.
+        fake.addSubscription({ wallet: WALLET, plan: 'live', external_id: 'user_ada' });
+        const held = await refused('live', { external_id: 'user_ada' });
+        expect(held).toMatchObject({ apiCode: 'already_subscribed', canResume: null });
+        expect(held.body).not.toHaveProperty('can_resume');
+    });
+
+    it('matches a seeded cancelled one by its normalised email', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const seeded = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            email: 'Ann@Shop.test',
+            status: 'cancelled',
+        });
+
+        const error = await mesub.subscriptions
+            .create({ plan: 'pro', wallet: WALLET, email: 'ann@shop.test ' })
+            .catch((caught: unknown) => caught as MesubError);
+
+        expect(error).toMatchObject({
+            apiCode: 'subscription_cancelled',
+            subscriptionId: seeded.id,
+        });
+    });
+
+    it("names it on a waiting checkout's fresh transaction by that checkout's customer", async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        const hers = await mesub.subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_ada',
+        });
+        const his = await mesub.subscriptions.create({
+            plan: 'pro',
+            wallet: WALLET,
+            external_id: 'user_bob',
+        });
+        const cancelled = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'cancelled',
+            access_until: new Date(Date.now() + 3600 * 1000).toISOString(),
+        });
+        const transaction = (id: string) =>
+            mesub.subscriptions.transaction(id).catch((caught: unknown) => caught as MesubError);
+
+        await expect(transaction(hers.subscription.id)).resolves.toMatchObject({
+            subscriptionId: cancelled.id,
+            canResume: true,
+        });
+        await expect(transaction(his.subscription.id)).resolves.toMatchObject({
+            apiCode: 'subscription_cancelled',
+            subscriptionId: null,
+            canResume: false,
+        });
+    });
+
+    it('answers the fields a failure names, never over the standard ones', async () => {
+        const fake = new FakeMesub();
+        const mesub = fake.client();
+        fake.fail({
+            status: 409,
+            code: 'subscription_cancelled',
+            message: 'Close it from 2026-12-11T14:00:00.000Z.',
+            details: {
+                subscription_id: 'sub_9',
+                can_resume: false,
+                closable_from: '2026-12-11T14:00:00.000Z',
+                ...({ code: 'other', statusCode: 200 } as object),
+            },
+        });
+
+        const error = await mesub.subscriptions
+            .create({ plan: 'pro', wallet: WALLET })
+            .catch((caught: unknown) => caught as MesubError);
+
+        expect(error).toMatchObject({
+            status: 409,
+            apiCode: 'subscription_cancelled',
+            subscriptionId: 'sub_9',
+            canResume: false,
+            closableFrom: '2026-12-11T14:00:00.000Z',
+            body: { statusCode: 409, code: 'subscription_cancelled' },
+        });
+    });
+
     // Mesub's reserveSubscription answers liveRefusal of the wallet's live row
     // on the plan, by its status; a STOPPED one nothing cancelled is a
     // comeback, a new checkout beside it (#211).

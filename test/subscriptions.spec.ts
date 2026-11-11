@@ -331,6 +331,77 @@ describe('subscriptions.transaction', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    // Mesub-io/backend#690: what a subscribe refused over a cancelled subscription adds.
+    const CANCELLED = {
+        statusCode: 409,
+        error: 'Conflict',
+        message:
+            'Your cancelled subscription to this plan must be closed first: close it from 2026-12-11T14:00:00.000Z, then subscribe again.',
+        code: 'subscription_cancelled',
+        retryable: false,
+        request_id: 'req_7Hq2LxVb9TzK4mWc1RpN6sYd',
+        subscription_id: 'sub_9',
+        can_resume: false,
+        closable_from: '2026-12-11T14:00:00.000Z',
+    };
+
+    it.each([
+        [
+            'create',
+            (client: Mesub): Promise<unknown> =>
+                client.subscriptions.create({ plan: 'pro', wallet: WALLET }),
+        ],
+        ['transaction', (client: Mesub) => client.subscriptions.transaction('sub_1')],
+        [
+            'submit',
+            (client: Mesub) =>
+                client.subscriptions.submit('sub_1', {
+                    transaction: 'AQ==',
+                    terms_signature: SIGNATURE,
+                }),
+        ],
+    ])('reads on %s the cancelled subscription a 409 names', async (_label, call) => {
+        const { fetch } = mockFetch(json(409, CANCELLED));
+
+        const { error } = await settle(call(mesub(fetch)));
+
+        expect(error).toBeInstanceOf(MesubError);
+        expect(error).toMatchObject({
+            status: 409,
+            code: 'conflict',
+            apiCode: 'subscription_cancelled',
+            subscriptionId: 'sub_9',
+            canResume: false,
+            closableFrom: '2026-12-11T14:00:00.000Z',
+        });
+    });
+
+    it("reads nulls when the cancelled subscription is another customer's", async () => {
+        const { fetch } = mockFetch(
+            json(409, { ...CANCELLED, subscription_id: null, closable_from: null }),
+        );
+
+        const { error } = await settle(mesub(fetch).subscriptions.transaction('sub_1'));
+
+        expect(error).toMatchObject({ subscriptionId: null, canResume: false, closableFrom: null });
+    });
+
+    it.each([
+        ['another code', coded(409, 'already_subscribed', 'No.')],
+        ['another code carrying them', json(409, { ...CANCELLED, code: 'already_subscribed' })],
+        ['a Mesub that does not send them', coded(409, 'subscription_cancelled', 'No.')],
+        [
+            'fields of the wrong type',
+            json(409, { ...CANCELLED, subscription_id: 9, can_resume: 'no', closable_from: 1 }),
+        ],
+    ])('leaves them null on %s', async (_label, response) => {
+        const { fetch } = mockFetch(response);
+
+        const { error } = await settle(mesub(fetch).subscriptions.transaction('sub_1'));
+
+        expect(error).toMatchObject({ subscriptionId: null, canResume: null, closableFrom: null });
+    });
+
     // Sent once like `create`: the caller decides when the wallet is ready for another.
     it.each([
         [409, 'comeback_period_rolling', { 'retry-after': '90' }, 90_000],

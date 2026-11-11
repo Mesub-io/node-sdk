@@ -130,8 +130,30 @@ function fromMesub(error: MesubError): WidgetResponse {
 
     return {
         status,
-        body: { error: { code: error.apiCode ?? error.code, message: said(error) } },
+        body: {
+            error: {
+                code: error.apiCode ?? error.code,
+                message: said(error),
+                ...cancelledOf(error),
+            },
+        },
         ...(retry && { headers: retry }),
+    };
+}
+
+/**
+ * What a subscribe refused over a cancelled subscription adds (Mesub-io/backend#690),
+ * as Mesub sent it: the blocking one's id when it is this customer's, else
+ * null, whether to resume it, and from when it closes. Nothing on any other
+ * refusal, nor from a Mesub that does not send them.
+ */
+function cancelledOf(error: MesubError) {
+    if (error.apiCode !== 'subscription_cancelled' || error.canResume === null) return {};
+
+    return {
+        subscription_id: error.subscriptionId,
+        can_resume: error.canResume,
+        closable_from: error.closableFrom,
     };
 }
 

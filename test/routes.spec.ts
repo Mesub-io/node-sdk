@@ -986,6 +986,121 @@ describe('the widget routes: managing', () => {
     });
 });
 
+// Mesub-io/backend#690: a subscribe refused over a cancelled subscription says which, to resume or close it.
+describe('the widget routes: a cancelled subscription in the way', () => {
+    const later = () => new Date(Date.now() + 3600 * 1000).toISOString();
+    const cancelled = (fake: FakeMesub, externalId = 'user_ada') =>
+        fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: externalId,
+            status: 'cancelled',
+            access_until: later(),
+        });
+
+    it('hands on which one, whether to resume it and from when it closes', async () => {
+        const { post, fake } = setup();
+        const { id, access_until } = cancelled(fake);
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer).toEqual({
+            status: 409,
+            body: {
+                error: {
+                    code: 'subscription_cancelled',
+                    message: `Your subscription to this plan is cancelled but runs until ${access_until}: resume it instead of subscribing again.`,
+                    subscription_id: id,
+                    can_resume: true,
+                    closable_from: null,
+                },
+            },
+        });
+    });
+
+    it("hands on nulls for another customer's, as Mesub sends them", async () => {
+        const { post, fake } = setup();
+        const { id } = cancelled(fake, 'user_bob');
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.body).toMatchObject({
+            error: {
+                code: 'subscription_cancelled',
+                subscription_id: null,
+                can_resume: false,
+                closable_from: null,
+            },
+        });
+        expect(JSON.stringify(answer.body)).not.toContain(id);
+    });
+
+    it('hands them on over a fresh transaction too', async () => {
+        const { post, fake } = setup();
+        const created = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+        const { subscription } = created.body as { subscription: { id: string } };
+        const { id } = cancelled(fake);
+
+        const answer = await post(ada, `/subscriptions/${subscription.id}/transaction`, {});
+
+        expect(answer.body).toMatchObject({
+            error: { code: 'subscription_cancelled', subscription_id: id, can_resume: true },
+        });
+    });
+
+    it('hands on a date it closes from', async () => {
+        const { post, fake } = setup();
+        fake.fail({
+            status: 409,
+            code: 'subscription_cancelled',
+            message: 'Close it from 2026-12-11T14:00:00.000Z.',
+            details: {
+                subscription_id: 'sub_9',
+                can_resume: false,
+                closable_from: '2026-12-11T14:00:00.000Z',
+            },
+        });
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.body).toEqual({
+            error: {
+                code: 'subscription_cancelled',
+                message: 'Close it from 2026-12-11T14:00:00.000Z.',
+                subscription_id: 'sub_9',
+                can_resume: false,
+                closable_from: '2026-12-11T14:00:00.000Z',
+            },
+        });
+    });
+
+    it.each([
+        ['another refusal', { status: 409, code: 'already_subscribed' }],
+        ['a Mesub that does not send them', { status: 409, code: 'subscription_cancelled' }],
+    ])('adds nothing on %s', async (_label, failure) => {
+        const { post, fake } = setup();
+        fake.fail({ ...failure, message: 'No.' });
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.body).toEqual({ error: { code: failure.code, message: 'No.' } });
+    });
+
+    it('adds nothing on another refusal carrying them', async () => {
+        const { post, fake } = setup();
+        fake.fail({
+            status: 409,
+            code: 'already_subscribed',
+            message: 'No.',
+            details: { subscription_id: 'sub_9', can_resume: true, closable_from: null },
+        });
+
+        const answer = await post(ada, '/subscriptions', { plan: 'pro', wallet: WALLET });
+
+        expect(answer.body).toEqual({ error: { code: 'already_subscribed', message: 'No.' } });
+    });
+});
+
 // A fresh transaction (Mesub-io/backend#427): asked when the wallet is ready, or after one expired.
 describe('the widget routes: a fresh transaction to sign', () => {
     async function waiting(
@@ -2493,6 +2608,38 @@ describe('mesubRoutes for Express', () => {
     });
 });
 
+describe('mesubRoutes for Express: a cancelled subscription in the way', () => {
+    it('hands the browser which one, as Mesub named it', async () => {
+        const fake = new FakeMesub({ plans: ['pro'] });
+        const server = express();
+        server.use(
+            '/api/mesub',
+            mesubRoutes({ client: fake.client(), customer: () => ({ external_id: 'user_ada' }) }),
+        );
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'cancelled',
+            access_until: new Date(Date.now() + 3600 * 1000).toISOString(),
+        });
+
+        const response = await request(server)
+            .post('/api/mesub/subscriptions')
+            .send({ plan: 'pro', wallet: WALLET });
+
+        expect(response.status).toBe(409);
+        expect(response.body).toMatchObject({
+            error: {
+                code: 'subscription_cancelled',
+                subscription_id: id,
+                can_resume: true,
+                closable_from: null,
+            },
+        });
+    });
+});
+
 describe('mesubRouteHandlers for Next', () => {
     function handlers(customer: (request: Request) => unknown) {
         const fake = new FakeMesub({ plans: ['pro'] });
@@ -2510,6 +2657,55 @@ describe('mesubRouteHandlers for Next', () => {
             headers: { 'content-type': JSON_TYPE },
             body: JSON.stringify(body),
         });
+
+    it('hands the browser a cancelled subscription in the way, as Mesub named it', async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        const { id, access_until } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_ada',
+            status: 'cancelled',
+            access_until: new Date(Date.now() + 3600 * 1000).toISOString(),
+        });
+
+        const response = await POST(
+            json({ plan: 'pro', wallet: WALLET }),
+            context('subscriptions'),
+        );
+
+        expect(response.status).toBe(409);
+        expect(await response.json()).toEqual({
+            error: {
+                code: 'subscription_cancelled',
+                message: `Your subscription to this plan is cancelled but runs until ${access_until}: resume it instead of subscribing again.`,
+                subscription_id: id,
+                can_resume: true,
+                closable_from: null,
+            },
+        });
+    });
+
+    it("hands the browser nulls for another customer's", async () => {
+        const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));
+        const { id } = fake.addSubscription({
+            wallet: WALLET,
+            plan: 'pro',
+            external_id: 'user_bob',
+            status: 'cancelled',
+            access_until: new Date(Date.now() + 3600 * 1000).toISOString(),
+        });
+
+        const response = await POST(
+            json({ plan: 'pro', wallet: WALLET }),
+            context('subscriptions'),
+        );
+        const text = await response.text();
+
+        expect(JSON.parse(text)).toMatchObject({
+            error: { subscription_id: null, can_resume: false, closable_from: null },
+        });
+        expect(text).not.toContain(id);
+    });
 
     it('subscribes through the catch-all segment', async () => {
         const { POST, fake } = handlers(() => ({ external_id: 'user_ada' }));

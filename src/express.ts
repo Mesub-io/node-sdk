@@ -59,6 +59,9 @@ function forNext(error: unknown): unknown {
         body: error.body,
         retryAfter: error.retryAfter,
         requestId: error.requestId,
+        subscriptionId: error.subscriptionId,
+        canResume: error.canResume,
+        closableFrom: error.closableFrom,
         cause: error,
     });
 }

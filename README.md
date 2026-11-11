@@ -609,6 +609,14 @@ parsed `body`, and `requestId`, the id Mesub gave the request
 (`Mesub-Request-Id`): log it, and quote it to Mesub support. New codes are added: keep a default branch. Every code:
 [Errors](https://docs.mesub.io/reference/errors).
 
+A subscribe (`create`, `transaction`, `submit`) refused with
+`subscription_cancelled` also says what to do with the cancelled subscription
+in the way: `subscriptionId`, `canResume` (true: resume it instead) and
+`closableFrom` (when it can be closed, while that is ahead). `subscriptionId`
+is null when that subscription is another customer's on the same wallet. The
+widget routes hand the three on to the browser, as `subscription_id`,
+`can_resume` and `closable_from` beside `code` and `message`.
+
 `pending_cap_reached` is a quota, not a rate: too many subscriptions wait for
 a signature. `create` is never retried for it, and `retryAfter` says when the
 oldest stops counting, up to an hour. Do not hold a request that long.
