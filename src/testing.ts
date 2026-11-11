@@ -217,6 +217,23 @@ export interface FakeFailure {
      * on `free`, 1200 on `dev` and `business`.
      */
     retryAfter?: number;
+    /**
+     * Fields the body carries beside the standard ones, as Mesub adds to a
+     * `subscription_cancelled` refusal of a subscribe (Mesub-io/backend#690):
+     * `{ subscription_id: 'sub_1', can_resume: false, closable_from: '2026-12-11T14:00:00.000Z' }`.
+     * They never replace `statusCode`, `message`, `error`, `code` nor `retryable`.
+     */
+    details?: FakeCancelledDetails;
+}
+
+/** What Mesub adds to a `subscription_cancelled` refusal of a subscribe. */
+export interface FakeCancelledDetails {
+    /** The cancelled subscription that blocks, null when it is another customer's. */
+    subscription_id?: string | null;
+    /** True while it still runs: resume it instead. */
+    can_resume?: boolean;
+    /** When it can be closed, while that is ahead; null otherwise. */
+    closable_from?: string | null;
 }
 
 /** What a test may set of an access answer: all but the plan, named apart. */
@@ -927,12 +944,13 @@ export class FakeMesub {
             );
         }
         if (this.#failure) {
-            const { status, code, message, retryable } = this.#failure;
+            const { status, code, message, retryable, details } = this.#failure;
             const retryAfter =
                 this.#failure.retryAfter ?? waitOf(method, path, status, code, this.#tier);
             return error(status, code, message ?? `Mesub answered ${status}.`, {
                 ...(retryable !== undefined && { retryable }),
                 ...(retryAfter !== undefined && { retryAfter }),
+                ...(details !== undefined && { details }),
             });
         }
 
@@ -1192,7 +1210,7 @@ export class FakeMesub {
             external_id: typeof external_id === 'string' ? external_id.trim() : null,
         };
         const held = this.#subscriptions.filter((s) => s.plan === plan && s.wallet === wallet);
-        const refusal = liveRefusal(held);
+        const refusal = liveRefusal(held, holderOf(contact));
         if (refusal) return refusal;
 
         // One checkout per customer on a wallet, as Mesub keeps them: the same
@@ -1233,6 +1251,7 @@ export class FakeMesub {
             this.#subscriptions.filter(
                 (s) => s.plan === subscription.plan && s.wallet === subscription.wallet,
             ),
+            holderOf(subscription),
         );
         if (refusal) return refusal;
 
@@ -1832,9 +1851,11 @@ function refusalOf(action: FakeAction, subscription: Closing, gone = false): Res
  * holds none. A cancelled one past its end is held until it is closed: it
  * reads `ended`, with `end_reason` `cancelled`. A stopped one is not: the
  * fake's is one nothing cancelled, which the wallet comes back over
- * (Mesub-io/backend#211).
+ * (Mesub-io/backend#211). A cancelled one names itself only to the customer
+ * it is for, `caller` (`holderOf`): another customer on the wallet reads
+ * nulls (Mesub-io/backend#690).
  */
-function liveRefusal(held: ServerSubscription[]): Response | null {
+function liveRefusal(held: ServerSubscription[], caller: string): Response | null {
     const live = held.find(
         (s) =>
             ['active', 'cancelled', 'unpaid'].includes(s.status) ||
@@ -1863,12 +1884,19 @@ function liveRefusal(held: ServerSubscription[]): Response | null {
         );
     }
     const until = live.status === 'cancelled' ? live.access_until : null;
+    const resumes = until !== null && Date.parse(until) > Date.now();
+    // The fake closes one as soon as its period is over: never from a later date.
+    const details: FakeCancelledDetails =
+        holderOf(live) === caller
+            ? { subscription_id: live.id, can_resume: resumes, closable_from: null }
+            : { subscription_id: null, can_resume: false, closable_from: null };
     return error(
         409,
         'subscription_cancelled',
-        until !== null && Date.parse(until) > Date.now()
+        resumes
             ? `Your subscription to this plan is cancelled but runs until ${until}: resume it instead of subscribing again.`
             : 'Your cancelled subscription to this plan must be closed first: close it, then subscribe again.',
+        { details },
     );
 }
 
@@ -2188,10 +2216,16 @@ function error(
     code: string,
     // A list for what Mesub's validation refused, as Nest answers it.
     message: string | string[],
-    { retryable, retryAfter }: { retryable?: boolean; retryAfter?: number } = {},
+    {
+        retryable,
+        retryAfter,
+        details,
+    }: { retryable?: boolean; retryAfter?: number; details?: FakeCancelledDetails } = {},
 ): Response {
     return Response.json(
         {
+            // First, so they never replace a standard field, as on Mesub.
+            ...details,
             statusCode: status,
             error: REASONS[status] ?? 'Error',
             message,
